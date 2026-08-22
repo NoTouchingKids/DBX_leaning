@@ -120,3 +120,55 @@ def test_wire_falls_back_to_attributes():
     obj = Plain()
     describe_object(obj, "plain").wire(emit="E", should_cancel="C")
     assert obj.emit == "E" and obj.should_cancel == "C"
+
+
+def test_a_gurobi_model_is_discovered_before_build_has_created_it():
+    """Discovery runs before build(), so the attribute exists but is None.
+    Presence is the capability signal; the value comes later."""
+
+    class LateGrb:
+        grb_model = None
+
+        def build(self):
+            self.grb_model = object()
+
+        def results(self): return []
+
+    obj = LateGrb()
+    handle = describe_object(obj, "late")
+    assert handle.gurobi_model_attr == "grb_model"
+    assert handle.gurobi_model is None
+    assert handle.run is None  # accepted anyway
+
+    obj.build()
+    handle.refresh()
+    assert handle.gurobi_model is not None
+
+
+def test_refresh_also_picks_up_a_callback_defined_during_build():
+    class LateCallback:
+        grb_model = None
+
+        def build(self):
+            self.grb_model = object()
+            self.gurobi_callback = lambda m, where: None
+
+    obj = LateCallback()
+    handle = describe_object(obj, "late-cb")
+    assert handle.model_callback is None
+    obj.build()
+    handle.refresh()
+    assert handle.model_callback is not None
+
+
+def test_a_gurobi_model_still_none_after_build_fails_with_an_actionable_message():
+    from job.drivers import select_driver
+
+    class NeverBuilt:
+        grb_model = None
+
+        def build(self): ...
+
+    handle = describe_object(NeverBuilt(), "never")
+    with pytest.raises(RuntimeError, match="still None after build"):
+        select_driver(handle, lambda *a, **k: None, lambda: False)

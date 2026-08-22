@@ -70,7 +70,7 @@ async def collect(app, hub, run_id, publish, *, headers=None, deadline=0.4):
         async with asyncio.timeout(deadline):
             async for chunk in response.body_iterator:
                 chunks.append(chunk if isinstance(chunk, str) else chunk.decode())
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         pass
     finally:
         publisher.cancel()
@@ -124,7 +124,9 @@ async def test_an_unparseable_last_event_id_is_ignored_not_fatal(app_and_hub):
 
 async def test_a_fresh_viewer_gets_the_current_snapshot_not_a_blank_page(app_and_hub):
     app, hub = app_and_hub()
-    await hub.broadcaster.publish("r1", make_message("status", run_id="r1", seq=0, status="RUNNING"))
+    await hub.broadcaster.publish(
+        "r1", make_message("status", run_id="r1", seq=0, status="RUNNING")
+    )
     await hub.broadcaster.publish(
         "r1", make_message("progress", run_id="r1", seq=1, elapsed_seconds=9.0)
     )
@@ -139,7 +141,9 @@ async def test_a_fresh_viewer_gets_the_current_snapshot_not_a_blank_page(app_and
 
 async def test_a_reconnecting_client_does_not_get_the_snapshot_again(app_and_hub):
     app, hub = app_and_hub()
-    await hub.broadcaster.publish("r1", make_message("status", run_id="r1", seq=0, status="RUNNING"))
+    await hub.broadcaster.publish(
+        "r1", make_message("status", run_id="r1", seq=0, status="RUNNING")
+    )
 
     async def publish(hub):
         await asyncio.sleep(10)
@@ -196,9 +200,7 @@ async def test_only_this_runs_messages_reach_this_stream(app_and_hub):
     assert [e["id"] for e in events] == ["1"]
 
 
-async def test_a_subscriber_that_stops_reading_cannot_grow_memory_without_limit(
-    app_and_hub, config
-):
+async def test_a_slow_subscriber_cannot_grow_memory_without_limit(app_and_hub, config):
     app, hub = app_and_hub(config(sse_queue_max=5))
     sub = hub.broadcaster.subscribe("r1")
     for seq in range(50):

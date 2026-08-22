@@ -12,13 +12,13 @@ change.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Union
+from typing import Any
 
 import msgpack
 from pydantic import BaseModel, ConfigDict, Field
 
-from .envelope import Message, MessageAdapter, now_ms
 from .codec import to_jsonable
+from .envelope import Message, MessageAdapter, now_ms
 
 __all__ = [
     "ControlKind",
@@ -60,7 +60,7 @@ class ControlFrame(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-Frame = Union[Message, ControlFrame]
+Frame = Message | ControlFrame
 
 _MSG = "m"
 _CTL = "c"

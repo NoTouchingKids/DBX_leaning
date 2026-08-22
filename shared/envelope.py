@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import time
 from enum import Enum
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -191,7 +191,7 @@ class ResultMessage(_Common):
 
 
 Message = Annotated[
-    Union[LogMessage, ProgressMessage, StatusMessage, ResultMessage],
+    LogMessage | ProgressMessage | StatusMessage | ResultMessage,
     Field(discriminator="type"),
 ]
 

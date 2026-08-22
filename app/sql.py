@@ -153,4 +153,4 @@ def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     manifest = payload.get("manifest") or {}
     columns = [c["name"] for c in (manifest.get("schema") or {}).get("columns", [])]
     data = (payload.get("result") or {}).get("data_array") or []
-    return [dict(zip(columns, row)) for row in data]
+    return [dict(zip(columns, row, strict=False)) for row in data]

@@ -104,8 +104,10 @@ def test_a_malformed_message_raises_into_model_code(tmp_path):
     # A transport problem must not raise at a model. A model's own bad message
     # must, or shapes drift silently — which is the failure this contract exists
     # to prevent.
+    from pydantic import ValidationError
+
     emitter, _, _ = make_emitter(tmp_path)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         emitter.emit("progress", elapsed_seconds=1.0, nonsense_field=1)
 
 

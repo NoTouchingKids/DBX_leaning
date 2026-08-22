@@ -33,6 +33,14 @@ haven't arrived yet" — never "the job skipped some seq values on purpose."
 Gaps that are actually normal (e.g. a filtered-out debug line) still consume
 a seq value; they are not renumbered around.
 
+**A gap on the live path is answered by backfilling, not by waiting.** Logs
+are droppable on the live path and `client_visible=false` records are never
+sent live at all, so a live gap is *routine* and the missing records may never
+arrive over that channel. They are always in Delta. So the client's rule is
+"gap → fetch from the durable store when you actually need it", not "gap →
+block until it turns up". The durable record is the one that is gap-free in
+the strong sense; `tests/integration/test_end_to_end.py` asserts that.
+
 ## `log`
 
 Best-effort, for progress display and debugging — not a result, and not
@@ -98,6 +106,21 @@ nothing.
 | `preview` | array of objects, bounded (~500–1000 points) | A **downsampled** preview, not the full result set — enough to render "the pretty graph" (convergence curve, forecast series, trace plot) instantly. Use LTTB (Largest-Triangle-Three-Buckets) for downsampling time-series-shaped results, not naive stride sampling — stride sampling hides spikes exactly where they matter (e.g. a forecast error blow-up) |
 | `row_count` | integer | Total rows actually written to the durable results table — **this is the field that lets "succeeded, wrote 8,760 rows" be distinguished from "succeeded, wrote 0 rows because the write failed."** Always populate it, even when 0 |
 | `fetch_hint` | object | Enough for the client to pull the full result set on demand (table name, run_id, however the per-model results table is keyed) — not the results themselves |
+| `chunk_index` | integer, default 0 | Which chunk of a multi-emission run this is. **Distinct from `seq`**, which counts every message of every type: two result chunks may be chunk 0 and 1 while being seq 40 and 91. 0 for the common once-at-the-end case |
+| `final` | boolean, default true | False while more chunks are still coming. A run's results are complete once a message with `final=true` has been seen |
+
+### Incremental results (added — see the changelog)
+
+A model that produces results in chunks (a rolling-origin backtest, chunked
+batch inference) emits one `result` message **per chunk**, each with its own
+`chunk_index` and its own `row_count` — that chunk's count, never a running
+total. `models/streaming_results/` is the model that exercises this, and its
+tests fail loudly if the harness stops supporting it.
+
+The rows themselves never travel on the message. A model calls
+`emit("result", rows=[...])` and the harness writes them to the model's
+results table, counts what it wrote into `row_count`, and builds the bounded
+`preview`. See `models/README.md`.
 
 Per-model result **tables** are separate from this envelope — each model
 family has its own results schema in Unity Catalog, governed by its own UC
@@ -127,3 +150,27 @@ envelope-shaped keyword arguments; the harness is responsible for stamping
 `run_id`/`seq`/`ts` and getting the message onto every active channel. See
 the relevant `.claude/agents/model-*.md` file for what a model's actual
 Python surface looks like.
+
+
+## Changelog
+
+Amendments to this contract, so a track that built against an earlier reading
+can see what moved. The rule from the top of this file still holds: if the
+spec is ambiguous or missing something a model needs, amend it here and flag
+it — do not improvise locally.
+
+### 2026-08-22 — `result.chunk_index` and `result.final`
+
+Added while implementing `shared/`. `models/streaming_results/` needs to emit
+results repeatedly during one run, and the spec had no way to say which chunk
+a message was, or whether more were coming. `seq` cannot serve: it counts
+every message of every type, so consecutive chunks are not consecutive seqs.
+Both fields default to the once-at-the-end case (`0`, `true`), so no existing
+reading of the contract changes.
+
+### 2026-08-22 — live gaps are backfilled, not waited on
+
+Clarification, not a change. "Gap means these records exist and haven't
+arrived yet" was true but incomplete: on the live path they may never arrive,
+because logs are droppable there by contract. Spelled out under the common
+fields.

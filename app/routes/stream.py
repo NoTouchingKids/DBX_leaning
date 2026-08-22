@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -85,7 +85,7 @@ async def stream_run(run_id: str, request: Request, hub: Hub) -> StreamingRespon
                     return
                 try:
                     msg = await asyncio.wait_for(sub.queue.get(), timeout=keepalive)
-                except (TimeoutError, asyncio.TimeoutError):
+                except TimeoutError:
                     # Comment-only line: keeps the connection warm and lets an
                     # idle timeout be told apart from a duration cap.
                     yield ": keepalive\n\n"

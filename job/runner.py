@@ -185,6 +185,8 @@ class JobHarness:
     async def _drive(self, handle: ModelHandle, emitter: Emitter) -> tuple[RunStatus, str | None]:
         if handle.build is not None:
             await asyncio.to_thread(handle.build)
+            # A model may only produce its solver object during build().
+            handle.refresh()
 
         driver = select_driver(handle, emitter.emit, self.token)
         try:

@@ -78,5 +78,7 @@ def test_batch_frame_round_trips_in_order():
 
 
 def test_decoding_garbage_raises_rather_than_returning_a_partial_object():
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         decode_json(b'{"type":"log","run_id":"r"}')  # no seq/ts/message

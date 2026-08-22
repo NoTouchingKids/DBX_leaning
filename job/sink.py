@@ -57,7 +57,8 @@ class DurableSink:
     # --- flush (event loop side; the write itself goes off-loop) ----------
 
     async def flush_due(self) -> int:
-        return await self._flush(self.buffer.due(max_bytes=self.max_bytes, max_age_s=self.max_age_s))
+        due = self.buffer.due(max_bytes=self.max_bytes, max_age_s=self.max_age_s)
+        return await self._flush(due)
 
     async def flush_all(self) -> int:
         async with self._flush_lock:

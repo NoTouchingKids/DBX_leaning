@@ -11,7 +11,8 @@ deployment artefacts, so it does not get to pull in numpy.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 __all__ = ["lttb", "downsample_rows"]
 

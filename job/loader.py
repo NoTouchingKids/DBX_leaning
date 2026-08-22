@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 __all__ = ["ModelHandle", "ModelLoadError", "load_model", "CONVENTIONS"]
 
@@ -57,12 +58,29 @@ class ModelHandle:
     results: Callable[[], Any] | None = None
     attach: Callable[..., Any] | None = None
     gurobi_model: Any = None
+    #: The attribute name the Gurobi model *will* live under. Recorded even
+    #: when the value is still None, because a model builds its solver object
+    #: in build() — discovery runs before that.
+    gurobi_model_attr: str | None = None
     model_callback: Callable[..., Any] | None = None
     results_table: str | None = None
     #: ``(x, y)`` column names for LTTB preview downsampling, if the model's
     #: results are time-series shaped. Absent = even sampling.
     preview_axes: tuple[str, str] | None = None
     found: dict[str, str] = None  # type: ignore[assignment]
+
+    def refresh(self) -> None:
+        """Re-read the attributes a model only populates during build().
+
+        A Gurobi model has no ``grb_model`` until ``build()`` has run, so the
+        harness looks again once it has.
+        """
+        if self.gurobi_model_attr is not None:
+            self.gurobi_model = getattr(self.obj, self.gurobi_model_attr, None)
+        hit = _find(self.obj, "model_callback")
+        if hit is not None and callable(hit[1]):
+            self.found["model_callback"] = hit[0]
+            self.model_callback = hit[1]
 
     def describe(self) -> str:
         bits = ", ".join(f"{k}={v}" for k, v in sorted((self.found or {}).items()))
@@ -78,8 +96,8 @@ class ModelHandle:
         if self.attach is not None:
             self.attach(emit=emit, should_cancel=should_cancel)
             return
-        setattr(self.obj, "emit", emit)
-        setattr(self.obj, "should_cancel", should_cancel)
+        self.obj.emit = emit
+        self.obj.should_cancel = should_cancel
 
 
 def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
@@ -161,10 +179,15 @@ def describe_object(obj: Any, spec: str = "<object>") -> ModelHandle:
                 found[key] = name
                 setattr(handle, key, value)
 
-    grb = _find(obj, "gurobi_model")
-    if grb is not None and grb[1] is not None:
-        handle.found["gurobi_model"] = grb[0]
-        handle.gurobi_model = grb[1]
+    # Presence of the attribute is the capability signal, not its current
+    # value: a model constructs its solver object in build(), which has not
+    # run yet at discovery time.
+    for name in CONVENTIONS["gurobi_model"]:
+        if hasattr(obj, name):
+            found["gurobi_model"] = name
+            handle.gurobi_model_attr = name
+            handle.gurobi_model = getattr(obj, name)
+            break
 
     table = _find(obj, "results_table")
     if table is not None and isinstance(table[1], str) and table[1]:
@@ -178,7 +201,7 @@ def describe_object(obj: Any, spec: str = "<object>") -> ModelHandle:
             found["preview_axes"] = axes[0]
             handle.preview_axes = (str(value[0]), str(value[1]))
 
-    if handle.run is None and handle.gurobi_model is None:
+    if handle.run is None and handle.gurobi_model_attr is None:
         raise ModelLoadError(
             f"{spec} exposes nothing the harness can run.\n"
             f"  looked for a callable named one of: {', '.join(CONVENTIONS['run'])}\n"

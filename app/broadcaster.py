@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator, Protocol, runtime_checkable
+from collections.abc import AsyncIterator
+from typing import Protocol, runtime_checkable
 
 from shared.envelope import (
     TERMINAL_STATUSES,
@@ -62,7 +63,7 @@ class RunSnapshot:
 class Broadcaster(Protocol):
     async def publish(self, run_id: str, msg: Message) -> None: ...
 
-    def subscribe(self, run_id: str, *, after_seq: int | None = None) -> "Subscription": ...
+    def subscribe(self, run_id: str, *, after_seq: int | None = None) -> Subscription: ...
 
     def snapshot(self, run_id: str) -> RunSnapshot | None: ...
 
@@ -70,7 +71,7 @@ class Broadcaster(Protocol):
 class Subscription:
     """One SSE connection's view of one run."""
 
-    def __init__(self, broadcaster: "InProcessBroadcaster", run_id: str, queue_max: int) -> None:
+    def __init__(self, broadcaster: InProcessBroadcaster, run_id: str, queue_max: int) -> None:
         self._b = broadcaster
         self.run_id = run_id
         self.queue: asyncio.Queue[Message | None] = asyncio.Queue(maxsize=queue_max)
@@ -104,7 +105,7 @@ class Subscription:
         except asyncio.QueueFull:
             pass
 
-    def __enter__(self) -> "Subscription":
+    def __enter__(self) -> Subscription:
         return self
 
     def __exit__(self, *exc: object) -> None:

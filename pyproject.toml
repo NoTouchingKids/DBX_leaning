@@ -41,11 +41,11 @@ delta = [
 # gurobipy: the bundled restricted licence has a FIXED EXPIRY PER RELEASE
 # and fails hard, not gracefully, once past it (docs/free-edition-constraints.md).
 #
-#   PINNED:  gurobipy 12.x
-#   BUNDLED LICENCE EXPIRY:  UNVERIFIED — see models/gurobi_scheduling/LICENCE_EXPIRY.md
+#   PINNED:  gurobipy 13.x
+#   BUNDLED LICENCE EXPIRY:  2027-11-29  (verified 2026-08-22 against 13.0.2)
 #
-# Verify before this track is built for real:  python scripts/check_gurobi_licence.py
-gurobi = ["gurobipy>=12,<13"]
+# Re-verify whenever this pin moves:  python scripts/check_gurobi_licence.py
+gurobi = ["gurobipy>=13,<14"]
 forecasting = ["numpy>=1.26", "scikit-learn>=1.4"]
 mcmc = ["numpy>=1.26", "emcee>=3.1"]
 scenario = ["numpy>=1.26"]
@@ -80,3 +80,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# `class X(str, Enum)` rather than StrEnum, deliberately: the envelope's enums
+# are serialised by Pydantic, msgpack and JSON, and the explicit str mixin is
+# the form every one of those handles identically across versions.
+ignore = ["UP042"]

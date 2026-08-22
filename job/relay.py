@@ -103,7 +103,7 @@ class LiveRelay:
                 self._wake.clear()
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=0.25)
-                except (TimeoutError, asyncio.TimeoutError):
+                except TimeoutError:
                     continue
                 if self._stopped and not self._q:
                     return

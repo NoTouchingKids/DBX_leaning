@@ -27,4 +27,12 @@ def select_driver(handle, emit, should_cancel, **options) -> Driver:
     assert isinstance(handle, ModelHandle)
     if handle.gurobi_model is not None:
         return GurobiDriver(handle, emit, should_cancel, **options)
+    if handle.run is None:
+        # Discovery accepted the model on the *presence* of the attribute; by
+        # now build() has run and it should hold a real model.
+        raise RuntimeError(
+            f"{handle.spec} exposes `{handle.gurobi_model_attr}` but it is still None "
+            f"after build() — the harness has nothing to solve. Build the gurobipy "
+            f"model in build() (or __init__) and assign it to that attribute."
+        )
     return SelfDrivingDriver(handle, emit, should_cancel)

@@ -27,11 +27,42 @@ def _setup_logging() -> None:
     )
 
 
+#: Failures a live channel is *expected* to produce when the app is down —
+#: which is a normal state here, not an error.
+_TRANSPORT_ERRORS = (EOFError, ConnectionError, OSError, asyncio.InvalidStateError)
+
+
+def _install_loop_error_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """Stop a dead live channel from printing a stack trace at ERROR.
+
+    A websocket that cannot reach the app raises inside the transport's own
+    callbacks, where asyncio's default handler logs it at ERROR with a full
+    traceback. On a run that succeeded with nothing listening, that reads like
+    a failure — and "nothing listening" is the normal case, because apps run
+    ~8h/day and jobs do not. Real errors still go to the default handler.
+    """
+    default = loop.get_exception_handler()
+
+    def handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, _TRANSPORT_ERRORS):
+            log.info("live channel transport gave up: %s (the run is unaffected)", exc)
+            return
+        if default is not None:
+            default(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+
+
 async def _amain() -> int:
     cfg = JobConfig.from_env()
     harness = JobHarness(cfg)
 
     loop = asyncio.get_running_loop()
+    _install_loop_error_handler(loop)
+
     for sig in (signal.SIGTERM, signal.SIGINT):
         # Databricks cancels a task with SIGTERM. Treating it as a cancel
         # rather than a kill is what lets results already produced survive.

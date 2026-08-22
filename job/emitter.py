@@ -19,7 +19,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from shared.downsample import downsample_rows
 from shared.envelope import PREVIEW_MAX_POINTS, Message, MessageType, make_message
