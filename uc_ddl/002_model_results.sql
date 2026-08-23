@@ -131,3 +131,54 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_streaming (
 )
 USING DELTA
 COMMENT 'Rolling-origin backtest over sample hourly demand, written incrementally.';
+
+-- The zero-dependency control case: simulated annealing over a shift-planning
+-- knapsack. One row per trip the search chose to take, so the chosen solution
+-- is readable as data rather than as a blob. The solution-level columns
+-- (objective, totals, baseline) repeat on every row of a run deliberately —
+-- Delta is columnar and append-only, and one flat table beats a header/detail
+-- join for a reader with a SQL prompt and a question.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_annealing (
+    run_id      STRING NOT NULL,
+    chunk_index INT    NOT NULL,
+    -- The chosen trips, ranked by value density (fare per minute) — the order
+    -- the preview curve is built in, not the search order.
+    rank         INT    NOT NULL,
+    item_index   INT    NOT NULL,
+    value        DOUBLE,   -- fare for this trip
+    weight       DOUBLE,   -- minutes it consumes of the shift
+    distance     DOUBLE,
+    value_density DOUBLE,
+    -- The solution this row belongs to.
+    objective    DOUBLE,
+    total_value  DOUBLE,
+    total_weight DOUBLE,
+    items_selected INT,
+    -- Planned vs run: a cancelled search stops early and still writes its
+    -- incumbent, so these two disagreeing is the record of that.
+    iterations_run     INT,
+    iterations_planned INT,
+    cancelled          BOOLEAN,
+    -- The seed is part of the result, not a footnote: without it a
+    -- stochastic search is not reproducible and the row cannot be checked.
+    seed         BIGINT,
+    -- What random-greedy shift-filling achieved on the same instance. The
+    -- column that answers "was the search worth its iterations?" without
+    -- re-running anything.
+    baseline_objective            DOUBLE,
+    improvement_over_baseline_pct DOUBLE,
+    -- The instance the search ran on.
+    items_offered        INT,
+    capacity_minutes     DOUBLE,
+    total_weight_offered DOUBLE,
+    total_value_offered  DOUBLE,
+    -- Provenance of the trips (models._data). A run over real `samples` rows
+    -- and one that fell back to the deterministic generator must not look
+    -- identical after the fact.
+    data_source          STRING,
+    data_synthetic       BOOLEAN,
+    data_rows            BIGINT,
+    data_fallback_reason STRING
+)
+USING DELTA
+COMMENT 'One row per trip in the annealed shift; solution-level columns repeat per row.';
