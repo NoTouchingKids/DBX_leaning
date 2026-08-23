@@ -56,14 +56,9 @@ class DeltaRsWriter:
         from deltalake import write_deltalake
 
         batch = pa.Table.from_pylist(rows)
+        options = {"storage_options": self._storage_options} if self._storage_options else {}
         with self._lock:
-            write_deltalake(
-                table,
-                batch,
-                mode="append",
-                storage_options=self._storage_options or None,
-                schema_mode="merge",
-            )
+            write_deltalake(table, batch, mode="append", schema_mode="merge", **options)
         return len(rows)
 
     def close(self) -> None:  # nothing to release

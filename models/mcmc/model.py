@@ -71,7 +71,9 @@ class McmcModel:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
-        self.data = cfg.get("data")
+        #: ndarray of observations. Any, because numpy is imported lazily in
+        #: this module — the [mcmc] extra is optional.
+        self.data: Any = cfg.get("data")
         if self.data is None:
             self.data = gaussian_problem(
                 n=int(cfg.get("n", 200)), seed=int(cfg.get("seed", 11))

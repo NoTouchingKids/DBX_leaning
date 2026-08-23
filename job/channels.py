@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from typing import Any, Protocol
 
 from shared.codec import to_jsonable
 from shared.envelope import Message
@@ -21,7 +22,37 @@ from shared.protocol import ControlFrame, ControlKind, hello, pack_frame, pong, 
 
 log = logging.getLogger(__name__)
 
-__all__ = ["WebSocketChannel", "HttpPushChannel"]
+__all__ = ["WebSocketChannel", "HttpPushChannel", "WebSocketLike", "HttpClientLike"]
+
+
+class WebSocketLike(Protocol):
+    """The whole surface this channel needs from a websocket.
+
+    Stated as a Protocol rather than the concrete ``websockets`` type so the
+    connection can be injected in tests without either side pretending to be
+    the other — and so the contract is three methods, visibly, rather than
+    whatever the library happens to expose.
+    """
+
+    async def send(self, data: bytes) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def __aiter__(self) -> AsyncIterator[bytes | str]: ...
+
+
+class ConnectLike(Protocol):
+    """An async context manager yielding a ``WebSocketLike``."""
+
+    async def __aenter__(self) -> WebSocketLike: ...
+
+    async def __aexit__(self, *exc: object) -> bool | None: ...
+
+
+class HttpClientLike(Protocol):
+    async def post(self, url: str, *, json: Any = ..., headers: Any = ...) -> Any: ...
+
+    async def aclose(self) -> None: ...
 
 
 class WebSocketChannel:
@@ -44,7 +75,7 @@ class WebSocketChannel:
         next_seq: Callable[[], int] | None = None,
         reconnect_s: float = 30.0,
         ping_s: float = 20.0,
-        connect: Callable[..., object] | None = None,
+        connect: Callable[..., ConnectLike] | None = None,
     ) -> None:
         self.url = url
         self.run_id = run_id
@@ -54,7 +85,7 @@ class WebSocketChannel:
         self.reconnect_s = reconnect_s
         self.ping_s = ping_s
         self._connect = connect  # injectable for tests
-        self._ws: object | None = None
+        self._ws: WebSocketLike | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
         self.connect_attempts = 0
@@ -74,7 +105,7 @@ class WebSocketChannel:
             return False
         try:
             for msg in msgs:
-                await ws.send(pack_frame(msg))  # type: ignore[attr-defined]
+                await ws.send(pack_frame(msg))
         except Exception:  # noqa: BLE001
             log.debug("ws send failed; dropping connection", exc_info=True)
             self._ws = None
@@ -86,13 +117,11 @@ class WebSocketChannel:
         ws, self._ws = self._ws, None
         if ws is not None:
             try:
-                await ws.send(  # type: ignore[attr-defined]
-                    pack_frame(ControlFrame(kind=ControlKind.BYE, run_id=self.run_id))
-                )
+                await ws.send(pack_frame(ControlFrame(kind=ControlKind.BYE, run_id=self.run_id)))
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await ws.close()  # type: ignore[attr-defined]
+                await ws.close()
             except Exception:  # noqa: BLE001
                 pass
         if self._task is not None:
@@ -125,7 +154,7 @@ class WebSocketChannel:
         connect = self._connect or _default_connect
         self.connect_attempts += 1
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
-        async with connect(self.url, additional_headers=headers) as ws:  # type: ignore[misc]
+        async with connect(self.url, additional_headers=headers) as ws:
             self._ws = ws
             self.connects += 1
             await ws.send(pack_frame(hello(self.run_id, next_seq=self.next_seq())))
@@ -138,7 +167,7 @@ class WebSocketChannel:
                 ping.cancel()
                 self._ws = None
 
-    async def _ping(self, ws: object) -> None:
+    async def _ping(self, ws: WebSocketLike) -> None:
         # App-level ping, not a WS protocol ping: a proxy can answer a
         # protocol ping without the frame ever reaching the app, which makes
         # it useless for telling a dropped connection from a quiet one.
@@ -147,7 +176,7 @@ class WebSocketChannel:
         while True:
             await asyncio.sleep(self.ping_s)
             try:
-                await ws.send(pack_frame(ping_frame(self.run_id)))  # type: ignore[attr-defined]
+                await ws.send(pack_frame(ping_frame(self.run_id)))
             except Exception:  # noqa: BLE001
                 return
 
@@ -169,17 +198,20 @@ class WebSocketChannel:
             self.on_control(frame)
 
 
-async def _safe_send(ws: object, data: bytes) -> None:
+async def _safe_send(ws: WebSocketLike, data: bytes) -> None:
     try:
-        await ws.send(data)  # type: ignore[attr-defined]
+        await ws.send(data)
     except Exception:  # noqa: BLE001
         pass
 
 
-def _default_connect(url: str, **kwargs: object) -> object:
+def _default_connect(url: str, **kwargs: Any) -> Any:
+    # Returns websockets' own connect object, which satisfies ConnectLike in
+    # practice without being structurally identical to it. The Protocol is
+    # there to constrain what a *test* may inject, which is where it matters.
     from websockets.asyncio.client import connect
 
-    return connect(url, **kwargs)  # type: ignore[arg-type]
+    return connect(url, **kwargs)
 
 
 class HttpPushChannel:
@@ -193,13 +225,13 @@ class HttpPushChannel:
         *,
         token: str | None = None,
         timeout_s: float = 10.0,
-        client: object | None = None,
+        client: HttpClientLike | None = None,
         failure_backoff_s: float = 15.0,
     ) -> None:
         self.url = url
         self.token = token
         self.timeout_s = timeout_s
-        self._client = client
+        self._client: HttpClientLike | None = client
         self._owns_client = client is None
         self._unhealthy_until = 0.0
         self.failure_backoff_s = failure_backoff_s
@@ -220,10 +252,13 @@ class HttpPushChannel:
     async def send_many(self, msgs: list[Message]) -> bool:
         if self._client is None:
             await self.start()
+        client = self._client
+        if client is None:  # start() could not build one
+            return False
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         payload = {"messages": [to_jsonable(m) for m in msgs]}
         try:
-            resp = await self._client.post(self.url, json=payload, headers=headers)  # type: ignore[attr-defined]
+            resp = await client.post(self.url, json=payload, headers=headers)
             ok = 200 <= resp.status_code < 300
         except Exception:  # noqa: BLE001
             ok = False
@@ -238,5 +273,5 @@ class HttpPushChannel:
 
     async def close(self) -> None:
         if self._client is not None and self._owns_client:
-            await self._client.aclose()  # type: ignore[attr-defined]
+            await self._client.aclose()
             self._client = None

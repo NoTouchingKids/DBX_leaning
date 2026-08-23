@@ -54,11 +54,21 @@ models = [
     "dbx-leaning[gurobi,forecasting,mcmc,scenario,streaming]",
 ]
 
+[dependency-groups]
+# PEP 735 group, not an extra: `uv sync` installs these by default for
+# development, and nothing that installs the package can pull them in.
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+    "ty>=0.0.1a1",
 ]
+
+[tool.uv]
+# One resolution covering every extra, so the lockfile describes a single
+# consistent world rather than one per install shape. The job installs a
+# subset of it (--extra job --extra gurobi), never a different resolution.
+default-groups = ["dev"]
 
 [tool.setuptools]
 packages = ["shared", "app", "job", "models"]
@@ -77,6 +87,25 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ty.src]
+# Source only. The test suite is excluded deliberately, not because it is
+# exempt from care: its fixtures splat dicts into dataclasses, inject
+# duck-typed stubs, and call attributes the harness wires at runtime — every
+# one of which a static checker objects to and none of which is a defect.
+# Contorting them to satisfy the checker would cost readability and buy
+# nothing. Scoped this way, `uv run ty check` is a signal that sits at zero.
+include = ["app", "job", "models", "shared", "scripts"]
+
+[tool.ty.rules]
+# ty is pre-1.0, so it runs advisory (`uv run ty check`) rather than as a CI
+# gate — treating a young checker's opinion as a build failure buys churn,
+# not safety. Revisit when it stabilises.
+#
+# pyspark is deliberately absent from the dependency set: on Databricks
+# serverless the runtime provides it, and the SparkWriter imports it lazily
+# for exactly that reason (docs/free-edition-constraints.md).
+unresolved-import = "warn"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]

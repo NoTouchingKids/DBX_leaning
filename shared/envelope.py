@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import time
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, overload
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -200,12 +200,70 @@ Message = Annotated[
 #: encoding step.
 MessageAdapter: TypeAdapter[Message] = TypeAdapter(Message)
 
-_BY_TYPE: dict[MessageType, type[_Common]] = {
+_BY_TYPE: dict[MessageType, type[Message]] = {
     MessageType.LOG: LogMessage,
     MessageType.PROGRESS: ProgressMessage,
     MessageType.STATUS: StatusMessage,
     MessageType.RESULT: ResultMessage,
 }
+
+
+# Overloads so the concrete type is known at the call site: `make_message(
+# "result", ...).row_count` should typecheck, and a reader (or an editor)
+# should not have to widen to the union to find out what came back.
+@overload
+def make_message(
+    type: Literal["log", MessageType.LOG],
+    *,
+    run_id: str,
+    seq: int,
+    ts: int | None = None,
+    **fields: Any,
+) -> LogMessage: ...
+
+
+@overload
+def make_message(
+    type: Literal["progress", MessageType.PROGRESS],
+    *,
+    run_id: str,
+    seq: int,
+    ts: int | None = None,
+    **fields: Any,
+) -> ProgressMessage: ...
+
+
+@overload
+def make_message(
+    type: Literal["status", MessageType.STATUS],
+    *,
+    run_id: str,
+    seq: int,
+    ts: int | None = None,
+    **fields: Any,
+) -> StatusMessage: ...
+
+
+@overload
+def make_message(
+    type: Literal["result", MessageType.RESULT],
+    *,
+    run_id: str,
+    seq: int,
+    ts: int | None = None,
+    **fields: Any,
+) -> ResultMessage: ...
+
+
+@overload
+def make_message(
+    type: str | MessageType,
+    *,
+    run_id: str,
+    seq: int,
+    ts: int | None = None,
+    **fields: Any,
+) -> Message: ...
 
 
 def make_message(
@@ -229,4 +287,4 @@ def make_message(
             f"{', '.join(m.value for m in MessageType)}"
         ) from None
     model = _BY_TYPE[mtype]
-    return model(run_id=run_id, seq=seq, ts=now_ms() if ts is None else ts, **fields)
+    return model(run_id=run_id, seq=seq, ts=now_ms() if ts is None else ts, **fields)  # type: ignore[return-value]

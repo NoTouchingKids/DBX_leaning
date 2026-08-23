@@ -148,12 +148,15 @@ class ServiceHub:
         thing a run depends on. It is a couple of statements per run
         (RUNNING, then terminal), not a loop.
         """
-        if self.repo is None:
+        repo = self.repo
+        if repo is None:
             return
 
         async def write() -> None:
+            # Bound above, not re-read here: the None-check happens now, the
+            # await happens later, and the attribute could have changed.
             try:
-                await self.repo.set_run_status(run_id, msg.status.value, detail=msg.detail)
+                await repo.set_run_status(run_id, msg.status.value, detail=msg.detail)
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(

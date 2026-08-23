@@ -77,6 +77,12 @@ might touch shared files (e.g. a shared requirements/lockfile) — see
 dependency to a shared `pyproject.toml` does; if that comes up, do it as a
 separate, sequential step, not inside a parallel track).
 
+Concretely, that shared file is now `pyproject.toml` **and `uv.lock`**. A
+track adding a dependency runs `uv add --optional <extra> <package>`, which
+rewrites both — so it is a merge conflict waiting to happen across parallel
+worktrees, and belongs in its own sequential commit that every other track
+then syncs onto (`uv sync`) before its next test run.
+
 Pick A if you want true wall-clock parallelism and don't mind multiple
 terminals. Pick B if you'd rather stay in one place and are fine with the
 subagent tool's own scheduling.

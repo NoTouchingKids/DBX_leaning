@@ -58,21 +58,46 @@ scripts/               check_gurobi_licence.py — the bundled-licence expiry
 
 ## Running it locally
 
-```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[app,job,models,dev]"
+[uv](https://docs.astral.sh/uv/) manages the environment, and `uv.lock` is
+committed — everything below resolves to exactly the versions the tests ran
+against.
 
-pytest                                  # everything, offline
+```bash
+uv sync --all-extras                    # or just what you need, see below
+
+uv run pytest                           # everything, offline
+uv run ruff check .                     # lint
+uv run ty check                         # types (advisory — see below)
 
 # a full run with no app listening — the normal unobserved case
 DBX_MODEL=models.scenario DBX_WRITER=jsonl DBX_ALLOW_LOCAL_WRITER=1 \
-  python -m job.main
+  uv run python -m job.main
 
-uvicorn app.main:app --reload           # the observer, on :8000
+uv run uvicorn app.main:app --reload    # the observer, on :8000
 ```
 
-Model extras are separable: `pip install -e ".[job,gurobi]"` gets you the
-scheduling model without pulling in scikit-learn or emcee.
+Extras are separable, and the lockfile covers all of them from one
+resolution — so a partial install is a subset of the tested world, never a
+different resolution of it:
+
+```bash
+uv sync --extra job --extra gurobi      # the scheduling model, no sklearn/emcee
+uv sync --extra app                     # just the observer
+```
+
+For anything that needs pip (a Databricks App's `requirements.txt`, say),
+export from the lock rather than re-resolving:
+
+```bash
+uv export --no-dev --extra app --format requirements-txt -o requirements-app.txt
+```
+
+**Types are advisory.** `ty` is pre-1.0, so it runs on demand rather than
+gating anything, and it is scoped to the source packages — the test fixtures
+splat dicts into dataclasses and inject duck-typed stubs, which a static
+checker objects to and which are not defects. Source sits at zero errors; the
+one standing warning is `pyspark`, deliberately absent from the dependency set
+because the Databricks runtime provides it.
 
 ## API surface
 

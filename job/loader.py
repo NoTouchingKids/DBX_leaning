@@ -17,6 +17,7 @@ import importlib
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any
 
 __all__ = ["ModelHandle", "ModelLoadError", "load_model", "CONVENTIONS"]
@@ -67,7 +68,8 @@ class ModelHandle:
     #: ``(x, y)`` column names for LTTB preview downsampling, if the model's
     #: results are time-series shaped. Absent = even sampling.
     preview_axes: tuple[str, str] | None = None
-    found: dict[str, str] = None  # type: ignore[assignment]
+    #: What discovery actually matched, keyed by role -> attribute name.
+    found: dict[str, str] = dc_field(default_factory=dict)
 
     def refresh(self) -> None:
         """Re-read the attributes a model only populates during build().
@@ -83,10 +85,10 @@ class ModelHandle:
             self.model_callback = hit[1]
 
     def describe(self) -> str:
-        bits = ", ".join(f"{k}={v}" for k, v in sorted((self.found or {}).items()))
+        bits = ", ".join(f"{k}={v}" for k, v in sorted(self.found.items()))
         return f"{self.spec} ({bits or 'nothing discovered'})"
 
-    def wire(self, emit: Callable[..., None], should_cancel: Callable[[], bool]) -> None:
+    def wire(self, emit: Callable[..., Any], should_cancel: Callable[[], bool]) -> None:
         """Hand the model its two capabilities: emit, and a cancel check.
 
         Prefers an ``attach(emit, should_cancel)`` method if the model has
@@ -168,8 +170,8 @@ def describe_object(obj: Any, spec: str = "<object>") -> ModelHandle:
     Split out from ``load_model`` so a model's own tests can check "does the
     harness see what I think it sees" without importing by string.
     """
-    found: dict[str, str] = {}
-    handle = ModelHandle(spec=spec, obj=obj, found=found)
+    handle = ModelHandle(spec=spec, obj=obj)
+    found = handle.found
 
     for key in ("attach", "build", "run", "results", "model_callback"):
         hit = _find(obj, key)

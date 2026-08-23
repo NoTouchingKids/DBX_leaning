@@ -84,6 +84,15 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 
 ## Conventions
 
+- **uv, and the lockfile is the source of truth.** `uv sync`, `uv run pytest`,
+  `uv add` — never bare `pip install` into the venv, which would put something
+  in the environment that `uv.lock` does not describe. Databricks prefers uv,
+  and the job needs an exact dependency set it can reproduce. Commit the lock.
+  For anything that must have a `requirements.txt`, `uv export` from the lock
+  rather than re-resolving.
+- **ruff for lint, ty for types — ty advisory, not a gate.** ty is pre-1.0;
+  run it, fix what it finds, do not fail a build on a young checker's opinion.
+  It is scoped to source, not tests (see the note in `pyproject.toml`).
 - **Async-first FastAPI.** SQL via the Databricks SDK / REST API, not
   `databricks-sql-connector`, not Spark from the app. `httpx` for non-blocking
   HTTP.

@@ -75,13 +75,14 @@ class JobHarness:
     def _build_channels(self) -> list[LiveChannel]:
         if self._channels is not None:
             return self._channels
-        if not self.cfg.app_url:
+        ws_url, push_url = self.cfg.ws_url, self.cfg.push_url
+        if not self.cfg.app_url or ws_url is None or push_url is None:
             # Normal case, not an error: apps run ~8h/day, jobs do not.
             log.info("no DBX_APP_URL — running unobserved, durable path only")
             return []
         return [
             WebSocketChannel(
-                self.cfg.ws_url,  # type: ignore[arg-type]
+                ws_url,
                 self.cfg.run_id,
                 token=self.cfg.app_token,
                 on_control=self._on_control,
@@ -90,7 +91,7 @@ class JobHarness:
                 ping_s=self.cfg.ws_ping_s,
             ),
             HttpPushChannel(
-                self.cfg.push_url,  # type: ignore[arg-type]
+                push_url,
                 token=self.cfg.app_token,
                 timeout_s=self.cfg.http_timeout_s,
             ),

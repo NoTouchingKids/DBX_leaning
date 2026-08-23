@@ -49,29 +49,34 @@ class Param:
 
 
 class P:
-    """Typed parameter constructors. Use these, not raw dicts."""
+    """Typed parameter constructors. Use these, not raw dicts.
+
+    Annotations say ``builtins.str`` because ``P.str`` shadows the builtin
+    inside this class body — it resolves correctly at runtime, but spelling it
+    out costs nothing and removes the ambiguity for a reader.
+    """
 
     @staticmethod
-    def str(name: str, value: Any) -> Param:
+    def str(name: builtins.str, value: Any) -> Param:
         # Coerce here, not at send time: a STRING parameter holding an int is
         # a declared type and a stored value disagreeing, which is the same
         # class of bug the typed parameters exist to prevent.
         return Param(name, None if value is None else builtins.str(value), "STRING")
 
     @staticmethod
-    def int(name: str, value: Any) -> Param:
+    def int(name: builtins.str, value: Any) -> Param:
         return Param(name, int(value) if value is not None else None, "INT")
 
     @staticmethod
-    def bigint(name: str, value: Any) -> Param:
+    def bigint(name: builtins.str, value: Any) -> Param:
         return Param(name, int(value) if value is not None else None, "BIGINT")
 
     @staticmethod
-    def double(name: str, value: Any) -> Param:
+    def double(name: builtins.str, value: Any) -> Param:
         return Param(name, float(value) if value is not None else None, "DOUBLE")
 
     @staticmethod
-    def bool(name: str, value: Any) -> Param:
+    def bool(name: builtins.str, value: Any) -> Param:
         return Param(name, "true" if value else "false", "BOOLEAN")
 
 
