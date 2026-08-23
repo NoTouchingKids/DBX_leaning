@@ -27,6 +27,42 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_gurobi_scheduling (
 USING DELTA
 COMMENT 'One row per staff/day/shift assignment.';
 
+-- One row per stop visit, in the order the vehicle serves them. The routes
+-- are reconstructed from the incumbent, so a cancelled run lands here too --
+-- a suboptimal set of routes is still a set of routes.
+--
+-- The data_* columns are the trips the geometry came from: stop radii,
+-- service times and the price of distance are derived from real trips in the
+-- `samples` catalog when the job can read it, and generated when it cannot.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_gurobi_routing (
+    run_id                   STRING  NOT NULL,
+    chunk_index              INT     NOT NULL,
+    -- Which vehicle, and where in its round this stop falls (1 = first).
+    route                    INT     NOT NULL,
+    visit_order              INT     NOT NULL,
+    stop                     STRING  NOT NULL,
+    -- 'depot' for the first stop of a route, otherwise the previous stop.
+    previous_stop            STRING,
+    x                        DOUBLE,
+    y                        DOUBLE,
+    service_minutes          DOUBLE,
+    leg_distance             DOUBLE,
+    leg_cost                 DOUBLE,
+    distance_to_depot        DOUBLE,
+    -- Repeated per row rather than kept in a second table: the results tables
+    -- are read flat, and a route total is what a reader wants next to a stop.
+    route_stops              INT,
+    route_load_minutes       DOUBLE,
+    route_distance           DOUBLE,
+    vehicle_capacity_minutes DOUBLE,
+    data_source              STRING,
+    data_synthetic           BOOLEAN,
+    data_rows                BIGINT,
+    data_fallback_reason     STRING
+)
+USING DELTA
+COMMENT 'One row per stop visit on a vehicle route.';
+
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_scenario (
     run_id         STRING NOT NULL,
     chunk_index    INT    NOT NULL,
@@ -131,3 +167,197 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_streaming (
 )
 USING DELTA
 COMMENT 'Rolling-origin backtest over sample hourly demand, written incrementally.';
+
+-- The zero-dependency control case: simulated annealing over a shift-planning
+-- knapsack. One row per trip the search chose to take, so the chosen solution
+-- is readable as data rather than as a blob. The solution-level columns
+-- (objective, totals, baseline) repeat on every row of a run deliberately —
+-- Delta is columnar and append-only, and one flat table beats a header/detail
+-- join for a reader with a SQL prompt and a question.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_annealing (
+    run_id      STRING NOT NULL,
+    chunk_index INT    NOT NULL,
+    -- The chosen trips, ranked by value density (fare per minute) — the order
+    -- the preview curve is built in, not the search order.
+    rank         INT    NOT NULL,
+    item_index   INT    NOT NULL,
+    value        DOUBLE,   -- fare for this trip
+    weight       DOUBLE,   -- minutes it consumes of the shift
+    distance     DOUBLE,
+    value_density DOUBLE,
+    -- The solution this row belongs to.
+    objective    DOUBLE,
+    total_value  DOUBLE,
+    total_weight DOUBLE,
+    items_selected INT,
+    -- Planned vs run: a cancelled search stops early and still writes its
+    -- incumbent, so these two disagreeing is the record of that.
+    iterations_run     INT,
+    iterations_planned INT,
+    cancelled          BOOLEAN,
+    -- The seed is part of the result, not a footnote: without it a
+    -- stochastic search is not reproducible and the row cannot be checked.
+    seed         BIGINT,
+    -- What random-greedy shift-filling achieved on the same instance. The
+    -- column that answers "was the search worth its iterations?" without
+    -- re-running anything.
+    baseline_objective            DOUBLE,
+    improvement_over_baseline_pct DOUBLE,
+    -- The instance the search ran on.
+    items_offered        INT,
+    capacity_minutes     DOUBLE,
+    total_weight_offered DOUBLE,
+    total_value_offered  DOUBLE,
+    -- Provenance of the trips (models._data). A run over real `samples` rows
+    -- and one that fell back to the deterministic generator must not look
+    -- identical after the fact.
+    data_source          STRING,
+    data_synthetic       BOOLEAN,
+    data_rows            BIGINT,
+    data_fallback_reason STRING
+)
+USING DELTA
+COMMENT 'One row per trip in the annealed shift; solution-level columns repeat per row.';
+
+-- The conjugate Bayesian A/B test: three rows per run, not a series. Two arm
+-- rows and one comparison row share this schema deliberately — a decision
+-- table is read across its rows, and a reader should not have to join two
+-- shapes to see both sides of the comparison and the difference between them.
+-- `row_type` says which kind of row you are looking at, and the columns that
+-- do not apply to it are NULL rather than absent.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_bayesian_ab (
+    run_id      STRING NOT NULL,
+    chunk_index INT    NOT NULL,
+    -- 'arm' | 'comparison'.
+    row_type    STRING NOT NULL,
+    -- 'A' | 'B' for an arm row, 'B_minus_A' for the comparison.
+    role        STRING NOT NULL,
+    -- The arm's name, e.g. 'weekend_hours'; '<B>_vs_<A>' on the comparison.
+    label       STRING NOT NULL,
+    -- Counts. On the comparison row these are the pooled totals.
+    trials      BIGINT,
+    successes   BIGINT,
+    -- The raw proportion. NULL for an arm with no observations at all, which
+    -- is not the same fact as a rate of zero, and for the comparison row.
+    observed_rate DOUBLE,
+    -- The conjugate posterior, Beta(prior + successes, prior + failures).
+    -- NULL on the comparison row and not by omission: the difference of two
+    -- Betas is not a Beta, so it has no such parameters.
+    posterior_alpha DOUBLE,
+    posterior_beta  DOUBLE,
+    -- Arm row: the posterior rate. Comparison row: the lift, E[p_B] - E[p_A].
+    -- Both exact.
+    posterior_mean  DOUBLE,
+    posterior_sd    DOUBLE,
+    -- Equal-tailed credible interval holding `credible_mass`. Exact on an arm
+    -- row (a Beta quantile); on the comparison row it comes from a grid
+    -- convolution of the two posteriors, accurate to a small multiple of the
+    -- grid step (models/bayesian_ab/conjugate.py).
+    ci_low        DOUBLE,
+    ci_high       DOUBLE,
+    credible_mass DOUBLE,
+    -- P(this arm's rate > the other's). The same number on the comparison
+    -- row, read as P(B > A) — the run's primary metric.
+    prob_beats_other DOUBLE,
+    -- Posterior expected regret, in units of the rate: E[max(other - this, 0)].
+    -- On the comparison row, the regret carried by whichever arm leads.
+    expected_loss DOUBLE,
+    -- The prior actually used. Recorded per run because it is a modelling
+    -- choice, and a posterior cannot be re-read later without it.
+    prior_alpha DOUBLE,
+    prior_beta  DOUBLE,
+    -- Which named comparison ran, and what 'success' was defined as —
+    -- including the threshold, which for the default comparison is derived
+    -- from the data and therefore differs run to run.
+    comparison STRING,
+    outcome    STRING,
+    -- The winning arm's label, or 'inconclusive'. Repeated on every row of the
+    -- run so a single row is self-describing.
+    decision   STRING,
+    conclusive BOOLEAN,
+    -- False when the run was cancelled partway: the arm posteriors are still
+    -- exact, but the comparison may be missing or incomplete.
+    complete   BOOLEAN,
+    -- Provenance of the observations (models/_data). A comparison drawn from
+    -- real `samples` hours and one drawn from the deterministic fallback must
+    -- not look identical after the fact.
+    data_source          STRING,
+    data_synthetic       BOOLEAN,
+    data_rows            BIGINT,
+    -- Null on the real path; why the fallback ran otherwise.
+    data_fallback_reason STRING
+)
+USING DELTA
+COMMENT 'Conjugate Beta-Binomial A/B decision table: one row per arm plus the comparison.';
+
+-- The heavy-dependency model: a torch feed-forward classifier. A new result
+-- shape for this platform — not a series and not a solution, but a
+-- classification report: one row per class, with the run-level metrics
+-- repeated on each so "was this better than a constant?" is answerable
+-- without a join (same flat-table reasoning as results_annealing).
+--
+-- Target is pace_class (minutes per mile), and the columns that were
+-- deliberately withheld from the features are recorded in excluded_features:
+-- on the real table any two of the three trip columns predict the third
+-- almost exactly, so the leakage decision is part of the result, not a
+-- footnote in a docstring.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_neural_net (
+    run_id      STRING NOT NULL,
+    chunk_index INT    NOT NULL,
+    -- Per-class rows. class_index is what the network predicts; class_label
+    -- is the same value spelled for a human.
+    class_index INT    NOT NULL,
+    class_label STRING NOT NULL,
+    precision   DOUBLE,
+    recall      DOUBLE,
+    f1          DOUBLE,
+    support     INT,
+    true_positives  INT,
+    false_positives INT,
+    false_negatives INT,
+    -- This class's row of the confusion matrix, {predicted_label: count} as
+    -- JSON. VARIANT is nice-to-have (CLAUDE.md); a JSON string is the
+    -- portable floor, and the tp/fp/fn columns above stay queryable as ints.
+    confusion_row STRING,
+    -- Run-level metrics, repeated per row.
+    accuracy          DOUBLE,
+    macro_f1          DOUBLE,
+    balanced_accuracy DOUBLE,
+    -- What predicting the majority class alone would have scored. Without
+    -- it a headline accuracy on imbalanced classes hides an expensive
+    -- constant function.
+    baseline_accuracy   DOUBLE,
+    lift_over_baseline  DOUBLE,
+    val_loss            DOUBLE,
+    val_rows            INT,
+    train_rows          INT,
+    -- Planned vs trained: a cancelled run stops early and still reports from
+    -- its best checkpoint, so these two disagreeing is the record of that.
+    epochs_trained      INT,
+    epochs_planned      INT,
+    cancelled           BOOLEAN,
+    -- Reproducibility, in the row rather than in the logs: without the seed
+    -- and the device a neural net's numbers cannot be checked. The device is
+    -- here because this is the model that would later want GPU compute, and
+    -- a CPU run and a GPU run must stay distinguishable after the fact.
+    seed                BIGINT,
+    device              STRING,
+    torch_version       STRING,
+    train_time_seconds  DOUBLE,
+    -- What was learned, and on what.
+    target              STRING,
+    pace_cut_low        DOUBLE,
+    pace_cut_high       DOUBLE,
+    features            STRING,
+    -- Columns withheld to avoid target leakage, comma separated.
+    excluded_features   STRING,
+    -- Provenance of the trips (models/_data). A run on real `samples` rows
+    -- and a run that fell back to the deterministic generator must not look
+    -- identical after the fact.
+    data_source          STRING,
+    data_synthetic       BOOLEAN,
+    data_rows            BIGINT,
+    data_fallback_reason STRING
+)
+USING DELTA
+COMMENT 'Classification report: one row per pace class, run-level metrics repeated.';

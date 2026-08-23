@@ -40,6 +40,13 @@ def repo_for(answers) -> tuple[RunRepository, ScriptedSql]:
     return RunRepository(sql, TableSet()), sql
 
 
+def store_for(repo):
+    """Reconciliation reads run state through the store now, not the repo."""
+    from app.store import WarehouseRunStore
+
+    return WarehouseRunStore(repo)
+
+
 async def test_a_run_the_job_finished_while_we_were_down_is_corrected():
     repo, sql = repo_for(
         {
@@ -47,7 +54,7 @@ async def test_a_run_the_job_finished_while_we_were_down_is_corrected():
             "ORDER BY seq DESC": [{"status": "SUCCEEDED", "detail": "done", "seq": 12, "ts": 1}],
         }
     )
-    report = await reconcile_once(repo, jobs=None)
+    report = await reconcile_once(repo, None, store_for(repo))
 
     assert report.checked == 1
     assert report.corrected == [("r1", "SUCCEEDED")]
@@ -68,7 +75,7 @@ async def test_the_jobs_api_answers_only_when_the_job_never_recorded_an_ending()
     )
     jobs = JobsApi("https://ws.example.com", "tok", client=http)
 
-    report = await reconcile_once(repo, jobs)
+    report = await reconcile_once(repo, jobs, store_for(repo))
     assert report.corrected == [("r1", "SUCCEEDED")]
     assert http.requests[0]["params"] == {"run_id": "99"}
 
@@ -81,7 +88,7 @@ async def test_a_run_that_really_is_still_going_is_left_alone():
         }
     )
     http = FakeHttp({"status": {"state": "RUNNING"}})
-    report = await reconcile_once(repo, JobsApi("https://x", "t", client=http))
+    report = await reconcile_once(repo, JobsApi("https://x", "t", client=http), store_for(repo))
 
     assert report.still_running == ["r1"] and report.corrected == []
     assert sql.count("MERGE INTO") == 0
@@ -97,7 +104,7 @@ async def test_a_cancelled_databricks_run_maps_to_cancelled_not_failed():
     http = FakeHttp(
         {"status": {"state": "TERMINATED", "termination_details": {"code": "CANCELED"}}}
     )
-    report = await reconcile_once(repo, JobsApi("https://x", "t", client=http))
+    report = await reconcile_once(repo, JobsApi("https://x", "t", client=http), store_for(repo))
     assert report.corrected == [("r1", "CANCELLED")]
 
 
@@ -110,13 +117,14 @@ async def test_reconciliation_never_blocks_startup_when_the_read_path_is_broken(
 
         async def close(self): ...
 
-    report = await reconcile_once(RunRepository(Broken(), TableSet()), None)
+    broken = RunRepository(Broken(), TableSet())
+    report = await reconcile_once(broken, None, store_for(broken))
     assert report.errors and report.checked == 0
 
 
 async def test_reconciliation_reads_once_and_does_not_loop():
     repo, sql = repo_for({"NOT IN ('SUCCEEDED'": []})
-    await reconcile_once(repo, None)
+    await reconcile_once(repo, None, store_for(repo))
     assert sql.count("NOT IN ('SUCCEEDED'") == 1
 
 
@@ -180,3 +188,25 @@ def test_backfill_rejects_a_nonsense_cursor(app_and_hub, bad):
     with TestClient(app) as client:
         assert client.get("/api/runs/r1/messages", params={"after_seq": bad}).status_code == 422
     assert http.requests == [], "a rejected cursor must never reach the warehouse"
+
+
+def test_the_app_serves_the_protocol_schema(app_and_hub):
+    """A running client can check the schema it was built against still
+    matches the app it is talking to."""
+    app, _ = app_and_hub()
+    with TestClient(app) as client:
+        body = client.get("/api/schema").json()
+        assert set(body["$defs"]) == {"envelope", "control"}
+
+        envelope = client.get("/api/schema", params={"kind": "envelope"}).json()
+        assert envelope["discriminator"]["propertyName"] == "type"
+
+        assert client.get("/api/schema", params={"kind": "nope"}).status_code == 404
+
+
+def test_health_advertises_the_protocol_version(app_and_hub):
+    from shared.schema import SCHEMA_VERSION
+
+    app, _ = app_and_hub()
+    with TestClient(app) as client:
+        assert client.get("/healthz").json()["protocol_schema_version"] == SCHEMA_VERSION

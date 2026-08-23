@@ -21,6 +21,7 @@ from .config import AppConfig
 from .jobs_api import JobsApi
 from .repository import RunRepository
 from .sql import SqlClient
+from .store import PostgresRunStore, RunStore, WarehouseRunStore
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,9 @@ class ServiceHub:
         self.jobs_api: JobsApi | None = None
         self.sql: SqlClient | None = None
         self.repo: RunRepository | None = None
+        #: Run state. Postgres when Lakebase is configured, else the
+        #: warehouse-backed one — see app/store.py for why it moved.
+        self.store: RunStore | None = None
         self.degraded: dict[str, str] = {}
         self.messages_ingested = 0
         self.status_writes = 0
@@ -102,6 +106,8 @@ class ServiceHub:
             )
             log.warning(self.degraded["sql"])
 
+        await self._start_store(cfg)
+
         jobs_api = JobsApi(cfg.workspace_host, cfg.token)
         if jobs_api.available:
             self.jobs_api = jobs_api
@@ -117,6 +123,40 @@ class ServiceHub:
                 "no DBX_JOB_IDS configured; no model can be triggered from this app"
             )
 
+    async def _start_store(self, cfg: AppConfig) -> None:
+        """Pick the run store once, and say which one loudly.
+
+        A deployment that thinks it is on Lakebase while silently running on
+        the warehouse would keep the concurrency race and the missing primary
+        key without anyone noticing.
+        """
+        if cfg.lakebase_dsn:
+            store: RunStore = PostgresRunStore(cfg.lakebase_dsn)
+            try:
+                await store.ensure_schema()
+            except Exception as exc:  # noqa: BLE001
+                self.degraded["lakebase"] = f"Lakebase configured but unreachable: {exc}"
+                log.error(self.degraded["lakebase"])
+            else:
+                self.store = store
+                log.info("run store: Lakebase (postgres)")
+                return
+
+        if self.repo is not None:
+            self.store = WarehouseRunStore(self.repo)
+            log.info(
+                "run store: SQL warehouse. No Lakebase configured, so the "
+                "concurrency ceiling is checked without a transaction and a "
+                "duplicate run_id is not refused — see app/store.py."
+            )
+            return
+
+        self.degraded["store"] = (
+            "no run store: neither Lakebase nor a SQL warehouse is configured; "
+            "runs cannot be registered, listed or triggered"
+        )
+        log.warning(self.degraded["store"])
+
     async def shutdown(self) -> None:
         for task in tuple(self._status_tasks):
             task.cancel()
@@ -126,6 +166,8 @@ class ServiceHub:
             await self.sql.close()
         if self.jobs_api is not None:
             await self.jobs_api.close()
+        if self.store is not None:
+            await self.store.close()
 
     async def ingest(self, run_id: str, msg: Message) -> None:
         """One entry point for everything arriving from a job, whichever
@@ -148,15 +190,15 @@ class ServiceHub:
         thing a run depends on. It is a couple of statements per run
         (RUNNING, then terminal), not a loop.
         """
-        repo = self.repo
-        if repo is None:
+        store = self.store
+        if store is None:
             return
 
         async def write() -> None:
             # Bound above, not re-read here: the None-check happens now, the
             # await happens later, and the attribute could have changed.
             try:
-                await repo.set_run_status(run_id, msg.status.value, detail=msg.detail)
+                await store.set_status(run_id, msg.status, detail=msg.detail)
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(

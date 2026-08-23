@@ -25,6 +25,7 @@ app = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "httpx>=0.27",
+    "psycopg[binary]>=3.2",
 ]
 job = [
     "websockets>=12",
@@ -49,18 +50,44 @@ delta = [
 gurobi = ["gurobipy>=13,<14"]
 forecasting = ["numpy>=1.26", "scikit-learn>=1.4"]
 mcmc = ["numpy>=1.26", "emcee>=3.1"]
+# Conjugate arithmetic: math.lgamma for the incomplete beta, numpy for one
+# grid convolution. Its own extra rather than sharing mcmc's, which would
+# ship emcee to a job that never imports it — the same unused weight the
+# delta extra was pulled from the job environments for. The "third copy of
+# the numpy pin" this avoids is not a real risk: uv.lock pins numpy once for
+# the whole workspace, and tests/deploy asserts no version drift between
+# environments.
+bayesian = ["numpy>=1.26"]
+# The heavy one, deliberately. This is the model whose dependency actually
+# justifies per-model environments: torch must not reach the four models that
+# do not want it. If the split works, only this job carries it.
+nn = ["torch>=2.4", "numpy>=1.26"]
 scenario = ["numpy>=1.26"]
 # Rolling-origin backtest: numpy's lstsq, deliberately nothing heavier.
 # The platform value here is the chunked result path, not the modelling.
 streaming = ["numpy>=1.26"]
+# Deliberately empty, and that is the whole point of models/annealing: it is
+# the control case proving the microservice split really can produce a
+# minimal environment. Its job deploys with the harness's own transport and
+# nothing else. An empty list is valid PEP 621 and uv/setuptools accept it —
+# verified, not assumed. If anything ever needs adding here, the model has
+# lost its reason to exist and should be reconsidered rather than grown.
+annealing = []
+# Convenience for developing against every model at once. It deliberately
+# EXCLUDES `nn`: torch and its CUDA stack are ~4GB, and dragging that into
+# `pip install dbx-leaning[models]` would defeat the per-model split for
+# everyone who just wanted the light ones. Install [nn] explicitly.
+# tests/deploy/test_requirements.py enforces this rather than trusting it.
 models = [
-    "dbx-leaning[gurobi,forecasting,mcmc,scenario,streaming]",
+    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,streaming,annealing]",
 ]
 
 [dependency-groups]
 # PEP 735 group, not an extra: `uv sync` installs these by default for
 # development, and nothing that installs the package can pull them in.
 dev = [
+    "jsonschema>=4.26.0",
+    "pgserver>=0.1.4",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "pyyaml>=6.0.3",
@@ -73,6 +100,29 @@ dev = [
 # consistent world rather than one per install shape. The job installs a
 # subset of it (--extra job --extra gurobi), never a different resolution.
 default-groups = ["dev"]
+
+# One place naming every model and the extra that carries its libraries.
+# Both scripts/export_requirements.py and scripts/build_model_wheel.py read
+# this, because they were each keeping their own copy of the same fact — and
+# a model registered in one but not the other deploys with the wrong
+# dependencies rather than failing.
+#
+# Directory names and extra names do not all match, which is exactly why this
+# is explicit rather than inferred.
+[tool.dbx-leaning.models]
+gurobi_scheduling = "gurobi"
+# Same extra as the scheduling model, deliberately: one gurobipy pin, one
+# bundled-licence expiry date, two jobs.
+gurobi_routing = "gurobi"
+scenario = "scenario"
+forecasting = "forecasting"
+mcmc = "mcmc"
+bayesian_ab = "bayesian"
+# The heavy one: torch, and only this job carries it.
+neural_net = "nn"
+streaming_results = "streaming"
+# Maps to an intentionally empty extra — see the note above it.
+annealing = "annealing"
 
 [tool.setuptools]
 packages = ["shared", "app", "job", "models"]

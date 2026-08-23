@@ -44,9 +44,12 @@ class RecordingSql:
 
 
 def wire(hub, *, job_http=None, sql=None, active=0):
+    from app.store import WarehouseRunStore
+
     sql = sql or RecordingSql({"COUNT(*)": [{"active": active}]})
     hub.sql = sql
     hub.repo = RunRepository(sql, hub.tables)
+    hub.store = WarehouseRunStore(hub.repo)
     hub.jobs_api = JobsApi(
         "https://ws.example.com", "tok", client=job_http or FakeHttp({"run_id": 987654})
     )
@@ -99,7 +102,13 @@ def test_triggering_launches_the_job_and_registers_the_run(triggerable):
     assert registered["model"].value == "scenario"
     assert registered["status"].value == "QUEUED"
     assert registered["requested_by"].value == "kp@example.com"
-    assert registered["job_run_id"].value == "987654"
+
+    # Reserve, then launch, then attach: the slot is taken before the job
+    # exists, so the registry can never lag behind a running job.
+    order = [i for i, (stmt, _) in enumerate(sql.queries) if "INSERT INTO" in stmt]
+    assert order, "the run was never registered"
+    assert body["job_run_id_stored"] is True
+    assert sql.params_of("MERGE INTO")["job_run_id"].value == "987654"
 
 
 def test_a_caller_supplied_run_id_is_honoured(triggerable):
@@ -150,12 +159,14 @@ def test_a_refused_launch_does_not_register_a_phantom_run(triggerable):
         resp = client.post("/api/runs", json={"model": "scenario"})
 
     assert resp.status_code == 502
-    assert sql.statements("INSERT INTO") == []
+    # The slot was claimed before the launch was attempted, so what matters is
+    # that it is given back — not that nothing was ever written.
+    assert sql.statements("INSERT INTO"), "the slot should have been claimed first"
 
 
-def test_a_launched_run_that_cannot_be_registered_still_reports_its_ids(triggerable):
-    """The job is already running; returning a bare error would read as
-    'nothing happened' and lose the only handle on it."""
+def test_a_registry_that_cannot_be_written_stops_the_launch(triggerable):
+    """Reserving first means a registry failure happens BEFORE anything is
+    launched — no orphan job, rather than a job nothing knows about."""
 
     class InsertFails(RecordingSql):
         async def query(self, sql, params=None):
@@ -164,15 +175,36 @@ def test_a_launched_run_that_cannot_be_registered_still_reports_its_ids(triggera
             return await super().query(sql, params)
 
     app, hub = triggerable()
-    wire(hub, sql=InsertFails({"COUNT(*)": [{"active": 0}]}))
+    job_http = FakeHttp({"run_id": 1})
+    wire(hub, sql=InsertFails({"COUNT(*)": [{"active": 0}]}), job_http=job_http)
 
     with TestClient(app) as client:
         resp = client.post("/api/runs", json={"model": "scenario"})
 
-    body = resp.json()
-    assert resp.status_code == 202
+    assert resp.status_code == 503
+    assert "nothing was launched" in resp.json()["detail"]
+    assert job_http.requests == [], "nothing should have been launched"
+
+
+def test_a_run_whose_job_run_id_cannot_be_stored_is_still_registered(triggerable):
+    """The job IS running by this point, so this reports rather than fails —
+    but the run is already in the registry, unlike before."""
+
+    class MergeFails(RecordingSql):
+        async def query(self, sql, params=None):
+            if "MERGE INTO" in sql:
+                raise RuntimeError("warehouse asleep")
+            return await super().query(sql, params)
+
+    app, hub = triggerable()
+    wire(hub, sql=MergeFails({"COUNT(*)": [{"active": 0}]}))
+
+    with TestClient(app) as client:
+        body = client.post("/api/runs", json={"model": "scenario"}).json()
+
+    assert body["registered"] is True
     assert body["job_run_id"] == 987654
-    assert body["registered"] is False and "warning" in body
+    assert body["job_run_id_stored"] is False
 
 
 def test_triggering_without_a_workspace_is_a_clean_503(app_and_hub, config):
@@ -240,12 +272,14 @@ async def test_a_status_message_updates_the_registry(app_and_hub, config):
     truth. This is what keeps them in step while the app is up."""
     import asyncio
 
+    from app.store import WarehouseRunStore
     from shared.envelope import make_message
 
     app, hub = app_and_hub()
     sql = RecordingSql()
     hub.sql = sql
     hub.repo = RunRepository(sql, hub.tables)
+    hub.store = WarehouseRunStore(hub.repo)
 
     await hub.ingest("r1", make_message("status", run_id="r1", seq=0, status="RUNNING"))
     await hub.ingest(
@@ -261,12 +295,14 @@ async def test_a_status_message_updates_the_registry(app_and_hub, config):
 
 
 async def test_non_status_messages_do_not_touch_the_warehouse(app_and_hub):
+    from app.store import WarehouseRunStore
     from shared.envelope import make_message
 
     app, hub = app_and_hub()
     sql = RecordingSql()
     hub.sql = sql
     hub.repo = RunRepository(sql, hub.tables)
+    hub.store = WarehouseRunStore(hub.repo)
 
     await hub.ingest("r1", make_message("log", run_id="r1", seq=0, message="x"))
     await hub.ingest("r1", make_message("progress", run_id="r1", seq=1, elapsed_seconds=1.0))
@@ -284,9 +320,12 @@ async def test_a_failed_status_write_does_not_break_ingest(app_and_hub):
         async def query(self, sql, params=None):
             raise RuntimeError("warehouse asleep")
 
+    from app.store import WarehouseRunStore
+
     app, hub = app_and_hub()
     hub.sql = Broken()
     hub.repo = RunRepository(hub.sql, hub.tables)
+    hub.store = WarehouseRunStore(hub.repo)
 
     sub = hub.broadcaster.subscribe("r1")
     await hub.ingest("r1", make_message("status", run_id="r1", seq=0, status="RUNNING"))
@@ -301,6 +340,6 @@ async def test_status_persistence_is_skipped_entirely_without_a_warehouse(app_an
     from shared.envelope import make_message
 
     app, hub = app_and_hub()
-    assert hub.repo is None
+    assert hub.store is None
     await hub.ingest("r1", make_message("status", run_id="r1", seq=0, status="RUNNING"))
     assert hub._status_tasks == set()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 __all__ = ["AppConfig"]
@@ -61,6 +62,11 @@ class AppConfig:
     #: letting Databricks queue or reject the run opaquely.
     max_concurrent_runs: int = 5
 
+    #: Lakebase (managed Postgres) for run_status — the one OLTP-shaped
+    #: thing here. Absent means fall back to the warehouse-backed store, so a
+    #: deployment is never blocked on provisioning a database.
+    lakebase_dsn: str | None = None
+
     #: Shared secret a job presents on the WS/push ingress. Distinct from any
     #: user auth: the platform proxy authenticates humans, this authenticates
     #: the job process.
@@ -84,6 +90,7 @@ class AppConfig:
             ) from None
 
         public_url = (e.get("DBX_APP_PUBLIC_URL") or "").strip().rstrip("/") or None
+        lakebase_dsn = _lakebase_dsn(e)
         default_job = (e.get("DBX_JOB_ID") or "").strip()
 
         return cls(
@@ -100,6 +107,7 @@ class AppConfig:
             job_ids=job_ids,
             default_job_id=int(default_job) if default_job else None,
             public_url=public_url,
+            lakebase_dsn=lakebase_dsn,
             max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
             job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
@@ -112,3 +120,32 @@ class AppConfig:
     @property
     def triggerable_models(self) -> list[str]:
         return sorted(self.job_ids)
+
+
+def _lakebase_dsn(e: Mapping[str, str]) -> str | None:
+    """Build the Lakebase connection string, if one is configured.
+
+    Either a whole DSN, or the parts. The password is a short-lived
+    Databricks OAuth token, which is why ``app/store.py`` opens a connection
+    per operation rather than pooling — resolving the credential at connect
+    time makes rotation a non-issue.
+    """
+    dsn = (e.get("DBX_LAKEBASE_DSN") or "").strip()
+    if dsn:
+        return dsn
+
+    host = (e.get("DBX_LAKEBASE_HOST") or "").strip()
+    if not host:
+        return None
+
+    database = (e.get("DBX_LAKEBASE_DATABASE") or "databricks_postgres").strip()
+    user = (e.get("DBX_LAKEBASE_USER") or "").strip()
+    password = (e.get("DBX_LAKEBASE_PASSWORD") or e.get("DATABRICKS_TOKEN") or "").strip()
+    port = (e.get("DBX_LAKEBASE_PORT") or "5432").strip()
+
+    credentials = user
+    if password:
+        credentials = f"{user}:{password}"
+    prefix = f"{credentials}@" if credentials else ""
+    # Lakebase requires TLS.
+    return f"postgresql://{prefix}{host}:{port}/{database}?sslmode=require"
