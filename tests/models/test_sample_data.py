@@ -4,6 +4,8 @@ ones when it is not, and never a model that cannot tell the difference.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
 from models._data import Dataset, nyc_taxi_hourly, nyc_taxi_trips
@@ -165,3 +167,60 @@ def test_describe_always_has_the_same_keys():
     assert set(real.describe()) == set(fell_back.describe())
     assert real.describe()["data_fallback_reason"] is None
     assert fell_back.describe()["data_fallback_reason"] == "no Spark"
+
+
+def test_hour_ts_is_epoch_ms_whatever_the_source_returned():
+    """Spark returns a datetime for a TimestampType while the fallback returns
+    an int. A model doing int(row["hour_ts"]) would work offline and raise on
+    a workspace — the contract has to be true on the path that matters."""
+    from datetime import date, datetime
+
+    from models._data.datasets import epoch_ms
+
+    expected = 1_600_000_000_000
+    assert epoch_ms(expected) == expected
+    assert epoch_ms(datetime(2020, 9, 13, 12, 26, 40, tzinfo=UTC)) == expected
+    assert epoch_ms("2020-09-13T12:26:40+00:00") == expected
+    # A naive datetime is read as UTC rather than as local time, so the same
+    # table read from two machines does not produce two different series.
+    assert epoch_ms(datetime(2020, 9, 13, 12, 26, 40)) == expected
+    assert epoch_ms(date(2020, 9, 13)) == 1_599_955_200_000
+
+
+def test_a_boolean_is_not_quietly_accepted_as_a_timestamp():
+    from models._data.datasets import epoch_ms
+
+    with pytest.raises(TypeError, match="boolean"):
+        epoch_ms(True)
+
+
+def test_an_unreadable_timestamp_says_what_it_got():
+    from models._data.datasets import epoch_ms
+
+    with pytest.raises(TypeError, match="cannot read"):
+        epoch_ms(object())
+
+
+def test_a_workspace_returning_datetimes_still_honours_the_contract(monkeypatch):
+    """Belt and braces over the SQL cast: normalise whatever comes back."""
+    from datetime import datetime
+
+    from models._data import datasets
+    from models._data import sample_data as sd
+
+    rows = [
+        {
+            "hour_ts": datetime(2020, 9, 13, h, tzinfo=UTC),
+            "trips": 100 + h,
+            "avg_fare": 12.0,
+            "avg_distance": 2.5,
+        }
+        for h in range(24)
+    ] * 3
+    monkeypatch.setattr(sd, "query", lambda sql, limit=None: (rows, None))
+
+    data = datasets.nyc_taxi_hourly(days=3)
+    assert not data.synthetic
+    assert all(isinstance(row["hour_ts"], int) for row in data.rows)
+    # And the thing a model actually does with it now works.
+    assert [int(row["hour_ts"]) for row in data.rows][:1] == [1_599_955_200_000]

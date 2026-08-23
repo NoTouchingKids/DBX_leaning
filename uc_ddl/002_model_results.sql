@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_gurobi_scheduling (
     demand               INT,
     data_source          STRING,
     data_synthetic       BOOLEAN,
-    data_rows            INT,
+    data_rows            BIGINT,
     data_fallback_reason STRING
 )
 USING DELTA
