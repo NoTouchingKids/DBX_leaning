@@ -27,6 +27,42 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_gurobi_scheduling (
 USING DELTA
 COMMENT 'One row per staff/day/shift assignment.';
 
+-- One row per stop visit, in the order the vehicle serves them. The routes
+-- are reconstructed from the incumbent, so a cancelled run lands here too --
+-- a suboptimal set of routes is still a set of routes.
+--
+-- The data_* columns are the trips the geometry came from: stop radii,
+-- service times and the price of distance are derived from real trips in the
+-- `samples` catalog when the job can read it, and generated when it cannot.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_gurobi_routing (
+    run_id                   STRING  NOT NULL,
+    chunk_index              INT     NOT NULL,
+    -- Which vehicle, and where in its round this stop falls (1 = first).
+    route                    INT     NOT NULL,
+    visit_order              INT     NOT NULL,
+    stop                     STRING  NOT NULL,
+    -- 'depot' for the first stop of a route, otherwise the previous stop.
+    previous_stop            STRING,
+    x                        DOUBLE,
+    y                        DOUBLE,
+    service_minutes          DOUBLE,
+    leg_distance             DOUBLE,
+    leg_cost                 DOUBLE,
+    distance_to_depot        DOUBLE,
+    -- Repeated per row rather than kept in a second table: the results tables
+    -- are read flat, and a route total is what a reader wants next to a stop.
+    route_stops              INT,
+    route_load_minutes       DOUBLE,
+    route_distance           DOUBLE,
+    vehicle_capacity_minutes DOUBLE,
+    data_source              STRING,
+    data_synthetic           BOOLEAN,
+    data_rows                BIGINT,
+    data_fallback_reason     STRING
+)
+USING DELTA
+COMMENT 'One row per stop visit on a vehicle route.';
+
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_scenario (
     run_id         STRING NOT NULL,
     chunk_index    INT    NOT NULL,
