@@ -95,6 +95,39 @@ gets its own `chunk_index`, its own count, and `final=False` until the last.
 If you never call it, the harness calls your `results()` accessor once at the
 end instead. It will not do both.
 
+## Getting data
+
+Free Edition ships Databricks' `samples` catalog, and `models/_data` reads it
+— falling back to a deterministic generator when there is no workspace, so
+your model and its tests run anywhere.
+
+```python
+from models._data import nyc_taxi_hourly
+
+data = nyc_taxi_hourly(days=60)      # Dataset
+data.rows                             # list[dict]: hour_ts (epoch ms), trips, avg_fare, avg_distance
+data.floats("trips")                  # raises on a NULL; pass default= to substitute
+data.dropna("trips")                  # or drop whole rows, keeping columns aligned
+data.synthetic                        # did it fall back?
+data.provenance                       # a line for a log message
+data.describe()                       # data_source / data_synthetic / data_rows / data_fallback_reason
+```
+
+Three rules that come out of this, learned the hard way:
+
+- **Load in `build()`, not `__init__`.** The harness wires `emit` *after*
+  constructing your model, so a provenance log emitted from `__init__` goes
+  nowhere.
+- **Put `data.describe()` on your result rows**, not only in a log. Logs are
+  droppable by contract; the question "was this real data?" has to survive to
+  the durable record.
+- **Never assume a column is non-null.** A real `AVG()` over an empty hour
+  returns NULL, and that only ever shows up on a workspace.
+
+Run `scripts/probe_sample_data.py` on a workspace to see what is actually
+there. "Falls back cleanly" and "is reading real data" are different states,
+and only a workspace can tell you which one you are in.
+
 ## Cancellation
 
 ```python

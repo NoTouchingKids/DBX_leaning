@@ -6,6 +6,14 @@ train/val loss), which looks nothing like a MIP gap or a completion
 percentage. If a generic progress view cannot render this model without
 special-casing, the envelope itself needs revisiting.
 
+The series is hourly NYC taxi trip volume from Databricks' free ``samples``
+catalog (``models/_data``), which has genuine daily *and* weekly seasonality —
+a demand curve rather than a sine wave any linear model fits perfectly. Off a
+workspace the loader falls back to a deterministic generator, so this still
+runs standalone; which of the two happened is logged at the ``input`` phase
+and carried into every result row, because a run on real data and a run that
+fell back must not look identical afterwards.
+
 Deliberately light: ``SGDRegressor.partial_fit`` over lag features gives a
 genuine epoch boundary, early-stopping-style best-checkpoint tracking, and
 trains in under a second. No deep-learning stack for a platform test.
@@ -18,24 +26,17 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-__all__ = ["ForecastingModel", "build_model", "synthetic_series"]
+from models._data import Dataset, nyc_taxi_hourly
 
+__all__ = ["ForecastingModel", "build_model"]
 
-def synthetic_series(n: int = 720, *, seed: int = 7, period: int = 24) -> list[float]:
-    """A daily-seasonal series with trend and noise. Deterministic for a seed.
+#: The dataset is hourly, so a forecast step is an hour unless the timestamps
+#: say otherwise.
+HOUR_MS = 3_600_000
 
-    Free Edition ships sample data (the ``samples`` catalog) that would do just
-    as well; this keeps the model runnable — and testable — with no workspace.
-    """
-    import numpy as np
-
-    rng = np.random.default_rng(seed)
-    t = np.arange(n)
-    seasonal = 10.0 * np.sin(2 * np.pi * t / period)
-    weekly = 4.0 * np.sin(2 * np.pi * t / (period * 7))
-    trend = 0.01 * t
-    noise = rng.normal(0, 1.5, size=n)
-    return (50.0 + seasonal + weekly + trend + noise).tolist()
+#: What a caller-supplied ``series`` reports as its provenance. Not synthetic
+#: — we simply did not generate it and cannot vouch for where it came from.
+CALLER_SUPPLIED = "config:series"
 
 
 class ForecastingModel:
@@ -44,13 +45,29 @@ class ForecastingModel:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
-        self.series: list[float] = list(cfg.get("series") or synthetic_series(
-            n=int(cfg.get("n", 720)), seed=int(cfg.get("seed", 7))
-        ))
+        self.days = int(cfg.get("days", 60))
+        self.column = str(cfg.get("column", "trips"))
         self.lags = int(cfg.get("lags", 24))
         self.horizon = int(cfg.get("horizon", 48))
         self.epochs = int(cfg.get("epochs", 40))
         self.seed = int(cfg.get("seed", 7))
+
+        # A caller can always bring its own data; otherwise the series is
+        # loaded in build(), where emit() exists to report where it came from.
+        supplied = cfg.get("series")
+        self.series: list[float] = [float(v) for v in supplied] if supplied else []
+        self.timestamps: list[int] = []
+        self.data: Dataset | None = None
+        self.data_meta: dict[str, Any] = (
+            {
+                "data_source": CALLER_SUPPLIED,
+                "data_synthetic": False,
+                "data_rows": len(self.series),
+                "data_fallback_reason": None,
+            }
+            if supplied
+            else {}
+        )
 
         self.emit: Callable[..., Any] | None = None
         self.should_cancel: Callable[[], bool] | None = None
@@ -63,10 +80,47 @@ class ForecastingModel:
 
     # --- data -------------------------------------------------------------
 
+    def _load_series(self) -> None:
+        """Real hourly taxi volume if there is a workspace, generated if not.
+
+        Either way the provenance is emitted, and kept on ``data_meta`` for
+        the result rows: nobody should have to guess afterwards which one a
+        run was looking at.
+        """
+        if self.series:
+            self._log(
+                f"forecasting a caller-supplied series of {len(self.series)} points",
+                phase="input",
+            )
+            return
+
+        data = nyc_taxi_hourly(days=self.days, seed=self.seed)
+        self.data = data
+        usable = [row for row in data.rows if _finite(row.get(self.column))]
+        self.series = [float(row[self.column]) for row in usable]
+        self.timestamps = [int(row["hour_ts"]) for row in usable if row.get("hour_ts")]
+        # describe() omits data_fallback_reason on success; defaulting it keeps
+        # the results table one shape regardless of how the run went.
+        self.data_meta = data.describe()
+
+        self._log(f"hourly NYC taxi {self.column}: {data.provenance}", phase="input")
+        dropped = len(data.rows) - len(usable)
+        if dropped:
+            self._log(
+                f"dropped {dropped} rows with a missing or non-finite {self.column}",
+                phase="input",
+                level="WARNING",
+            )
+
     def _windows(self):
         import numpy as np
 
         y = np.asarray(self.series, dtype=float)
+        if len(y) < self.lags + 10:
+            raise ValueError(
+                f"need at least {self.lags + 10} points for {self.lags} lags, "
+                f"got {len(y)}"
+            )
         rows = [y[i - self.lags : i] for i in range(self.lags, len(y))]
         X = np.vstack(rows)
         target = y[self.lags :]
@@ -76,6 +130,8 @@ class ForecastingModel:
     def build(self) -> None:
         import numpy as np
         from sklearn.linear_model import SGDRegressor
+
+        self._load_series()
 
         X_train, y_train, X_val, y_val = self._windows()
         mean, std = float(X_train.mean()), float(X_train.std() or 1.0)
@@ -145,6 +201,8 @@ class ForecastingModel:
                 "train_loss": train_loss,
                 "best_val_loss": self.best_val,
                 "learning_rate": float(self._model.eta0),
+                # So a live view can badge "synthetic" before results exist.
+                "data_synthetic": self.data_meta.get("data_synthetic"),
             },
         )
 
@@ -154,8 +212,9 @@ class ForecastingModel:
         """A recursive forecast over the horizon, from the best checkpoint.
 
         One row per forecasted timestep, plus the evaluation metrics on the
-        held-out window — this is the model where a forecast-vs-actual preview
-        matters most.
+        held-out window and the data's provenance — this is the model where a
+        forecast-vs-actual preview matters most, and a preview of a fallback
+        run had better say so.
         """
         import numpy as np
 
@@ -168,19 +227,32 @@ class ForecastingModel:
 
         rows: list[dict[str, Any]] = []
         mae, rmse = self._val_metrics(coef, intercept)
+        last_ts = self.timestamps[-1] if self.timestamps else None
+        interval = self._step_interval_ms()
         for step in range(self.horizon):
             scaled = float(np.dot(window, coef) + intercept)
             window = np.append(window[1:], scaled)
             rows.append(
                 {
                     "step": step,
+                    "ts": None if last_ts is None else last_ts + (step + 1) * interval,
                     "forecast": round(scaled * std + mean, 6),
                     "val_mae": round(mae, 6),
                     "val_rmse": round(rmse, 6),
                     "epochs_trained": len(self.history),
+                    **self.data_meta,
                 }
             )
         return rows
+
+    def _step_interval_ms(self) -> int:
+        """The spacing of one forecast step, taken from the data if it says."""
+        ts = self.timestamps
+        if len(ts) < 2:
+            return HOUR_MS
+        deltas = sorted(b - a for a, b in zip(ts, ts[1:], strict=False))
+        median = deltas[len(deltas) // 2]
+        return int(median) if median > 0 else HOUR_MS
 
     def _val_metrics(self, coef, intercept) -> tuple[float, float]:
         import numpy as np
@@ -194,6 +266,14 @@ class ForecastingModel:
     def _log(self, message: str, *, phase: str = "run", level: str = "INFO") -> None:
         if self.emit is not None:
             self.emit("log", message=message, level=level, source="model", phase=phase)
+
+
+def _finite(value: Any) -> bool:
+    """A real table has NULLs in it; a lag window with one is worthless."""
+    try:
+        return math.isfinite(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
 
 
 def build_model(config: dict[str, Any] | None = None) -> ForecastingModel:

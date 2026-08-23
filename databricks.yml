@@ -1,0 +1,66 @@
+# Databricks Asset Bundle for DBX_leaning.
+#
+# Shape: **one job per model**, each with its own serverless environment and
+# its own dependency list. A model is a microservice — the MCMC job does not
+# carry gurobipy, and a model that later needs GPU compute changes its own
+# file and nothing else. That is why the job definitions live one-per-file
+# under resources/ and repeat a little YAML rather than sharing an anchor:
+# the duplication is what lets them diverge.
+#
+# Code reaches the workspace by **file sync**, not as a wheel. Each job runs
+# entrypoints/run_model.py from the synced tree. When that changes to a wheel
+# later, the task definition changes and nothing else does.
+
+bundle:
+  name: dbx-leaning
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog holding the platform's tables.
+    default: main
+  schema:
+    description: Schema within that catalog.
+    default: dbx_leaning
+  warehouse_id:
+    description: >-
+      SQL warehouse for the app's READ path only (backfill, reconciliation).
+      Free Edition allows one, 2X-Small. Nothing writes through it.
+    default: ""
+  app_secret_scope:
+    description: Secret scope holding the token a job presents to the app.
+    default: dbx-leaning
+  app_public_url:
+    description: >-
+      The app's externally reachable URL, handed to each job so it knows where
+      to attach. Empty is valid and normal — the run proceeds unobserved and
+      stays fully durable. Fill this in after the first deploy, once the app
+      has a URL.
+    default: ""
+
+# The workspace sync is the deployment mechanism, so what it excludes matters.
+sync:
+  exclude:
+    - .venv/**
+    - .git/**
+    - "**/__pycache__/**"
+    - "**/.pytest_cache/**"
+    - .ruff_cache/**
+    - .delta-local/**
+    - frontend/**
+    - tests/**
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    # `mode: production` requires an explicit run_as; jobs and the app run as
+    # the deploying principal unless this says otherwise.
+    permissions:
+      - level: CAN_MANAGE
+        service_principal_name: ${workspace.current_user.userName}
