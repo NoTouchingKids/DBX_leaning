@@ -4,6 +4,24 @@ description: Builds frontend/ — the React SPA. Explicitly low priority; do not
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
+## Do not hand-write the protocol types
+
+`schema/envelope.schema.json` is generated from the server's own Pydantic
+models and checked against them in tests, so it cannot drift. Generate the
+TypeScript from it rather than transcribing `docs/message-envelope-spec.md`
+into interfaces by hand:
+
+```bash
+npx json-schema-to-typescript schema/envelope.schema.json -o src/protocol.ts
+```
+
+It is a discriminated union on `type`, so `switch (msg.type)` narrows with
+compiler support, and `LogLevel`/`RunStatus` arrive as string-literal unions.
+The app also serves it at `GET /api/schema`, and reports
+`protocol_schema_version` on `/healthz` — worth comparing at startup, because
+a cached bundle talking to a redeployed server is otherwise invisible until
+something quietly fails to parse.
+
 You are building `frontend/` — the React SPA. Read `CLAUDE.md`,
 `docs/message-envelope-spec.md`, and `docs/architecture.md` before writing
 anything.

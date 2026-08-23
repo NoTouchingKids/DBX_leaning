@@ -118,6 +118,7 @@ because the Databricks runtime provides it.
 | `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `models/` |
 | `WS /ws/job/{id}` | The job's ingress, and the only inbound path to a running job |
 | `POST /api/runs/{id}/push` | One-way HTTP fallback ingress |
+| `GET /api/schema` | The wire protocol as JSON Schema — generate the client's types from this |
 | `GET /api/whoami`, `GET /healthz` | Cosmetic identity; health with per-service degradation |
 
 Triggering needs `DBX_JOB_IDS` (a JSON map of model name to Databricks job

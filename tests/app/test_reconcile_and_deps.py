@@ -188,3 +188,25 @@ def test_backfill_rejects_a_nonsense_cursor(app_and_hub, bad):
     with TestClient(app) as client:
         assert client.get("/api/runs/r1/messages", params={"after_seq": bad}).status_code == 422
     assert http.requests == [], "a rejected cursor must never reach the warehouse"
+
+
+def test_the_app_serves_the_protocol_schema(app_and_hub):
+    """A running client can check the schema it was built against still
+    matches the app it is talking to."""
+    app, _ = app_and_hub()
+    with TestClient(app) as client:
+        body = client.get("/api/schema").json()
+        assert set(body["$defs"]) == {"envelope", "control"}
+
+        envelope = client.get("/api/schema", params={"kind": "envelope"}).json()
+        assert envelope["discriminator"]["propertyName"] == "type"
+
+        assert client.get("/api/schema", params={"kind": "nope"}).status_code == 404
+
+
+def test_health_advertises_the_protocol_version(app_and_hub):
+    from shared.schema import SCHEMA_VERSION
+
+    app, _ = app_and_hub()
+    with TestClient(app) as client:
+        assert client.get("/healthz").json()["protocol_schema_version"] == SCHEMA_VERSION
