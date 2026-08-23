@@ -68,6 +68,15 @@ Edition) is a drop-in, not a rewrite that touches every call site.
      `EventSource`'s built-in `Last-Event-ID` reconnect header work with
      zero custom handshake code — do not hand-roll a `from_seq` opening
      message; let the browser's native mechanism do it.
+   - Set `event:` to the envelope's `type` field (`log`, `progress`,
+     `status`, `result`) on every message, not just `data:`. This is
+     additive — it doesn't change `Last-Event-ID` resume mechanics at all —
+     but it's what lets the frontend's SharedWorker call
+     `addEventListener('progress', ...)` etc. natively instead of parsing
+     every message on the main thread to find out what it is. See
+     `.claude/agents/frontend.md` ("SharedWorker + named SSE events") for
+     why this matters on that end; on this end it's one extra line per
+     message, so just do it.
    - On a fresh connection (no `Last-Event-ID`), send whatever the app's
      current snapshot is (current status, most recent progress point) so a
      new viewer isn't blank while waiting for the next live push.
