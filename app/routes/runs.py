@@ -32,6 +32,42 @@ CANCEL_ESCAPE_HATCH = (
 )
 
 
+#: Every parameter the trigger endpoint may send. A Databricks job rejects a
+#: run-now parameter it has not declared, so each job in resources/*.job.yml
+#: must declare exactly these — tests/deploy/test_bundle.py fails if the two
+#: drift apart.
+JOB_PARAMETER_NAMES = frozenset(
+    {
+        "DBX_RUN_ID",
+        "DBX_MODEL",
+        "DBX_MODEL_CONFIG",
+        "DBX_CATALOG",
+        "DBX_SCHEMA",
+        "DBX_APP_URL",
+        "DBX_APP_TOKEN",
+    }
+)
+
+
+def build_job_parameters(
+    run_id: str, model: str, config: dict[str, Any], app_config: Any
+) -> dict[str, str]:
+    """What the job is launched with. Every key must be in JOB_PARAMETER_NAMES."""
+    parameters = {
+        "DBX_RUN_ID": run_id,
+        "DBX_MODEL": f"models.{model}",
+        "DBX_MODEL_CONFIG": json.dumps(config),
+        "DBX_CATALOG": app_config.catalog,
+        "DBX_SCHEMA": app_config.schema,
+    }
+    if app_config.public_url:
+        # Where to attach. Absent is fine — the run proceeds unobserved.
+        parameters["DBX_APP_URL"] = app_config.public_url
+    if app_config.job_token:
+        parameters["DBX_APP_TOKEN"] = app_config.job_token
+    return parameters
+
+
 class TriggerRequest(BaseModel):
     """What the client sends to start a run."""
 
@@ -79,18 +115,7 @@ async def trigger_run(body: TriggerRequest, request: Request, repo: Repo, hub: H
     run_id = body.run_id or f"run-{uuid.uuid4().hex[:12]}"
     requested_by = request.headers.get("x-forwarded-email")
 
-    parameters = {
-        "DBX_RUN_ID": run_id,
-        "DBX_MODEL": f"models.{body.model}",
-        "DBX_MODEL_CONFIG": json.dumps(body.config),
-        "DBX_CATALOG": hub.config.catalog,
-        "DBX_SCHEMA": hub.config.schema,
-    }
-    if hub.config.public_url:
-        # Where to attach. Absent is fine — the run proceeds unobserved.
-        parameters["DBX_APP_URL"] = hub.config.public_url
-    if hub.config.job_token:
-        parameters["DBX_APP_TOKEN"] = hub.config.job_token
+    parameters = build_job_parameters(run_id, body.model, body.config, hub.config)
 
     try:
         job_run_id = await hub.jobs_api.run_now(job_id, parameters)

@@ -1,0 +1,67 @@
+# The Databricks App: the optional observer.
+#
+# It is not a model and gets none of their libraries — no Delta writer, no
+# gurobipy, no scikit-learn. Its requirements.txt lives at the repo root
+# because that is where Databricks Apps looks, and it too is exported from
+# uv.lock.
+#
+# The app's config is declared here rather than in a committed app.yaml so
+# that DBX_JOB_IDS can be built from the real job ids the bundle creates —
+# they do not exist until deploy, and hand-maintaining them would go stale
+# the first time a job is recreated.
+
+resources:
+  apps:
+    dbx_leaning:
+      name: dbx-leaning
+      description: >-
+        Triggers and observes long-running models. Jobs run whether or not
+        this is up; when it is, it relays their telemetry live over SSE.
+
+      source_code_path: ../
+
+      # The token a job presents on the WS/HTTP ingress. Held as a secret and
+      # injected here; the *job* never stores it — the app passes it per run
+      # as a job parameter at trigger time (app/routes/runs.py).
+      resources:
+        - name: app-token
+          description: Shared secret authenticating a job's ingress connection.
+          secret:
+            scope: ${var.app_secret_scope}
+            key: app-token
+            permission: READ
+
+      config:
+        command:
+          - uvicorn
+          - app.main:app
+          - --host
+          - 0.0.0.0
+          - --port
+          - "8000"
+        env:
+          - name: DBX_CATALOG
+            value: ${var.catalog}
+          - name: DBX_SCHEMA
+            value: ${var.schema}
+          - name: DBX_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+
+          # Which job runs which model. This map is also the app's allow-list:
+          # a model with no job here cannot be triggered, so the app never
+          # imports models/ just to validate a request.
+          - name: DBX_JOB_IDS
+            value: >-
+              {"gurobi_scheduling": ${resources.jobs.model_gurobi_scheduling.id},
+               "scenario": ${resources.jobs.model_scenario.id},
+               "forecasting": ${resources.jobs.model_forecasting.id},
+               "mcmc": ${resources.jobs.model_mcmc.id},
+               "streaming_results": ${resources.jobs.model_streaming_results.id}}
+
+          # Where a job should attach. Empty until the app has a URL — jobs
+          # then run unobserved, which is a normal state, not a failure.
+          - name: DBX_APP_PUBLIC_URL
+            value: ${var.app_public_url}
+
+          - name: DBX_APP_TOKEN
+            value_from: app-token
