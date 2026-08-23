@@ -50,6 +50,14 @@ delta = [
 gurobi = ["gurobipy>=13,<14"]
 forecasting = ["numpy>=1.26", "scikit-learn>=1.4"]
 mcmc = ["numpy>=1.26", "emcee>=3.1"]
+# Conjugate arithmetic: math.lgamma for the incomplete beta, numpy for one
+# grid convolution. Its own extra rather than sharing mcmc's, which would
+# ship emcee to a job that never imports it — the same unused weight the
+# delta extra was pulled from the job environments for. The "third copy of
+# the numpy pin" this avoids is not a real risk: uv.lock pins numpy once for
+# the whole workspace, and tests/deploy asserts no version drift between
+# environments.
+bayesian = ["numpy>=1.26"]
 # The heavy one, deliberately. This is the model whose dependency actually
 # justifies per-model environments: torch must not reach the four models that
 # do not want it. If the split works, only this job carries it.
@@ -65,8 +73,13 @@ streaming = ["numpy>=1.26"]
 # verified, not assumed. If anything ever needs adding here, the model has
 # lost its reason to exist and should be reconsidered rather than grown.
 annealing = []
+# Convenience for developing against every model at once. It deliberately
+# EXCLUDES `nn`: torch and its CUDA stack are ~4GB, and dragging that into
+# `pip install dbx-leaning[models]` would defeat the per-model split for
+# everyone who just wanted the light ones. Install [nn] explicitly.
+# tests/deploy/test_requirements.py enforces this rather than trusting it.
 models = [
-    "dbx-leaning[gurobi,forecasting,mcmc,scenario,streaming,annealing]",
+    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,streaming,annealing]",
 ]
 
 [dependency-groups]
@@ -98,14 +111,13 @@ default-groups = ["dev"]
 # is explicit rather than inferred.
 [tool.dbx-leaning.models]
 gurobi_scheduling = "gurobi"
+# Same extra as the scheduling model, deliberately: one gurobipy pin, one
+# bundled-licence expiry date, two jobs.
+gurobi_routing = "gurobi"
 scenario = "scenario"
 forecasting = "forecasting"
 mcmc = "mcmc"
-# Reuses the [mcmc] extra rather than adding one: this model is conjugate
-# arithmetic with math.lgamma and a single numpy convolution, so it needs a
-# strict subset of what mcmc already carries (numpy; not emcee). A separate
-# numpy-only extra would be a third copy of the same pin to keep in step.
-bayesian_ab = "mcmc"
+bayesian_ab = "bayesian"
 # The heavy one: torch, and only this job carries it.
 neural_net = "nn"
 streaming_results = "streaming"

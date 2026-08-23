@@ -83,3 +83,28 @@ def test_the_generated_files_still_match_the_lock():
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_aggregate_models_extra_excludes_the_heavy_one():
+    """`pip install dbx-leaning[models]` must not pull torch.
+
+    torch plus its CUDA stack is around 4GB. Adding `nn` to the aggregate
+    would be a one-word change that quietly defeats the per-model split for
+    everyone who only wanted the light models — so it is asserted, not left
+    to a comment.
+    """
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        extras = tomllib.load(fh)["project"]["optional-dependencies"]
+
+    aggregate = " ".join(extras["models"])
+    assert "nn" not in aggregate.replace("dbx-leaning", "").split(","), aggregate
+    assert any("torch" in dep for dep in extras["nn"]), "the nn extra should carry torch"
+
+
+def test_torch_reaches_exactly_one_job_environment():
+    """The claim the whole microservice split rests on."""
+    carrying = [p.name for p in REQUIREMENTS.glob("*.txt") if "torch" in pins(p)]
+    assert carrying == ["neural_net.txt"], carrying
+    assert "torch" not in pins(ROOT / "requirements.txt"), "the app must not install torch"

@@ -1,19 +1,25 @@
-# Job: models.bayesian_ab
+# Job: models.neural_net
 #
 # Self-contained on purpose. This file owns the model's environment, its
 # dependency list and its compute — change any of them here without touching
 # another model.
 #
-# Its own `bayesian` extra — numpy only. It briefly shared mcmc's, which
-# shipped emcee to a job whose posteriors are closed-form and which never
-# imports a sampler. The per-model leak test caught it.
+# The heavy one, and the reason per-model environments exist: torch and its
+# CUDA stack make this environment ~43 packages against the annealing job's
+# 13. Only this job carries it — tests/deploy/test_requirements.py asserts
+# torch reaches exactly one environment.
+#
+# This is also where GPU compute would be requested if the model ever needs
+# it: the environment spec below changes, and no other model's file does.
+# The model already reports its torch device in telemetry, so a CPU run and a
+# GPU run are distinguishable after the fact.
 
 resources:
   jobs:
-    model_bayesian_ab:
-      name: "[${bundle.target}] dbx-leaning · bayesian_ab"
+    model_neural_net:
+      name: "[${bundle.target}] dbx-leaning · neural_net"
       description: >-
-        Runs models.bayesian_ab through the job harness. Simulated bayesian_ab
+        Runs models.neural_net through the job harness. Simulated neural_net
         over a knapsack — standard library only, no third-party solver.
 
       # The account ceiling is 5 concurrent job TASKS across ALL models
@@ -21,13 +27,13 @@ resources:
       # enforces it globally before triggering (app/routes/runs.py) and this
       # only bounds this one model.
       max_concurrent_runs: 1
-      timeout_seconds: 900
+      timeout_seconds: 3600
       queue:
         enabled: true
 
       tags:
         project: dbx-leaning
-        model: bayesian_ab
+        model: neural_net
 
       # Declared so run-now can set them. The trigger endpoint sends exactly
       # these names; tests/deploy/test_bundle.py fails if the two drift.
@@ -35,7 +41,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.bayesian_ab
+          default: models.neural_net
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG
@@ -48,17 +54,17 @@ resources:
           default: ""
 
       environments:
-        - environment_key: bayesian_ab
+        - environment_key: neural_net
           spec:
             client: "3"
             # Exported from uv.lock — what deploys is what the tests ran
             # against. Regenerate with scripts/export_requirements.py.
             dependencies:
-              - -r ${workspace.file_path}/deploy/requirements/bayesian_ab.txt
+              - -r ${workspace.file_path}/deploy/requirements/neural_net.txt
 
       tasks:
         - task_key: run
-          environment_key: bayesian_ab
+          environment_key: neural_net
           spark_python_task:
             python_file: ${workspace.file_path}/entrypoints/run_model.py
             source: WORKSPACE

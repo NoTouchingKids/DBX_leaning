@@ -234,6 +234,10 @@ app = [
     { name = "psycopg", extra = ["binary"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
+bayesian = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 delta = [
     { name = "deltalake" },
     { name = "pyarrow" },
@@ -289,7 +293,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dbx-leaning", extras = ["gurobi", "forecasting", "mcmc", "scenario", "streaming", "annealing"], marker = "extra == 'models'" },
+    { name = "dbx-leaning", extras = ["gurobi", "forecasting", "mcmc", "bayesian", "scenario", "streaming", "annealing"], marker = "extra == 'models'" },
     { name = "deltalake", marker = "extra == 'delta'", specifier = ">=0.18" },
     { name = "emcee", marker = "extra == 'mcmc'", specifier = ">=3.1" },
     { name = "fastapi", marker = "extra == 'app'", specifier = ">=0.110" },
@@ -297,6 +301,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'app'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'job'", specifier = ">=0.27" },
     { name = "msgpack", specifier = ">=1.0,<2" },
+    { name = "numpy", marker = "extra == 'bayesian'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'forecasting'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'mcmc'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'nn'", specifier = ">=1.26" },
@@ -310,7 +315,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'app'", specifier = ">=0.29" },
     { name = "websockets", marker = "extra == 'job'", specifier = ">=12" },
 ]
-provides-extras = ["app", "job", "delta", "gurobi", "forecasting", "mcmc", "nn", "scenario", "streaming", "annealing", "models"]
+provides-extras = ["app", "job", "delta", "gurobi", "forecasting", "mcmc", "bayesian", "nn", "scenario", "streaming", "annealing", "models"]
 
 [package.metadata.requires-dev]
 dev = [
