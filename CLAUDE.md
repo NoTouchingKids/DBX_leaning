@@ -96,15 +96,6 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **Async-first FastAPI.** SQL via the Databricks SDK / REST API, not
   `databricks-sql-connector`, not Spark from the app. `httpx` for non-blocking
   HTTP.
-- **Run state lives in Lakebase (Postgres); telemetry lives in Delta.**
-  `run_status` is the one OLTP-shaped thing here — one row per run, updated on
-  every transition, point-looked-up, counted against the concurrency ceiling.
-  Delta is poor at all three and reading it costs warehouse *uptime*. Postgres
-  also buys what Delta structurally cannot: a primary key on `run_id`, and a
-  transaction around the count-and-claim so the 5-task ceiling is real rather
-  than advisory. Everything append-only — logs, progress, events, results —
-  stays in Delta. See `app/store.py`; the warehouse-backed store remains as
-  the unconfigured default so a deploy is never blocked on provisioning.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -117,14 +108,9 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   2000 variables / 2000 constraints (200 quadratic) — size models to fit.
   The bundled licence has **a fixed expiry per gurobipy release**; whatever
   version is pinned, record its expiry next to the pin.
-- **Delta writes go through Spark**, behind one `write_batch(table, rows)`
-  interface, implementation chosen once at startup. delta-rs remains the
-  target but is **not implemented and must not be selected**: it takes a
-  storage URI, not a UC name, and given a three-part name it writes to a
-  local directory without erroring — a run would report SUCCEEDED with its
-  telemetry in a container that is about to disappear. It raises
-  `NotImplementedError` rather than doing that. Building it needs credential
-  vending; see `job/delta.py`. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
+- **Delta writes: delta-rs preferred, Spark fallback**, behind one
+  `write_batch(table, rows)` interface, implementation chosen once at
+  startup. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
   end-of-run** — the age bound is what caps data loss on a crash; size alone
   is not a durability guarantee.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string

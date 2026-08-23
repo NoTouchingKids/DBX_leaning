@@ -42,10 +42,6 @@ idna==3.19
     #   httpx
 msgpack==1.2.1
     # via dbx-leaning
-psycopg==3.3.4
-    # via dbx-leaning
-psycopg-binary==3.3.4 ; implementation_name != 'pypy'
-    # via psycopg
 pydantic==2.13.4
     # via
     #   dbx-leaning
@@ -62,7 +58,6 @@ typing-extensions==4.16.0
     # via
     #   anyio
     #   fastapi
-    #   psycopg
     #   pydantic
     #   pydantic-core
     #   starlette
@@ -71,8 +66,6 @@ typing-inspection==0.4.4
     # via
     #   fastapi
     #   pydantic
-tzdata==2026.3 ; sys_platform == 'win32'
-    # via psycopg
 uvicorn==0.52.4
     # via dbx-leaning
 uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'

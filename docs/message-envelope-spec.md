@@ -129,36 +129,6 @@ grants, because different models serve different audiences. The `result`
 that model's own table and is read directly, not replayed through this
 envelope.
 
-## The schema, generated
-
-The tables above are the contract in prose; `schema/envelope.schema.json` is
-the same contract a machine can read, generated from `shared/envelope.py` by
-`scripts/export_schema.py` and checked against the models in CI-shaped tests
-so it cannot drift.
-
-```bash
-uv run python scripts/export_schema.py          # regenerate
-uv run python scripts/export_schema.py --check  # verify
-```
-
-It is a JSON Schema 2020-12 discriminated union keyed on `type`, with the
-enums (`LogLevel`, `RunStatus`) published as string enums — so a frontend gets
-a TypeScript union it can narrow on, and string-literal types for the enums,
-rather than retyping either by hand and going stale the first time one gains
-a member:
-
-```bash
-npx json-schema-to-typescript schema/envelope.schema.json -o src/protocol.ts
-```
-
-The app also serves it at `GET /api/schema` (`?kind=envelope|control|protocol`),
-and reports `protocol_schema_version` on `/healthz`, so a cached client bundle
-and a redeployed server can notice they disagree instead of failing silently
-somewhere further downstream.
-
-**Serialization mode, deliberately:** the schema describes what actually goes
-out, not what the server is willing to accept.
-
 ## Encoding (not part of the contract — this is a delivery detail)
 
 - msgpack: job → app, and in the Delta write buffer.

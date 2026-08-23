@@ -9,46 +9,13 @@ this rewrite exists to avoid.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from shared.tables import EVENTS, LOGS, PROGRESS, RESULT_META, TableSet
 
 from .sql import P, SqlClient
 
-__all__ = ["RunRepository", "UnsafeTableName", "validate_table_name"]
-
-#: catalog.schema.table, ordinary identifiers only.
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-class UnsafeTableName(ValueError):
-    """A results table name that will not be interpolated into SQL."""
-
-
-def validate_table_name(table: str, *, catalog: str, schema: str) -> str:
-    """Vet a table name before it goes into SQL text.
-
-    A table name **cannot be a bound parameter** — it is an identifier, not a
-    value — so this is the one place in the app where something reaches a
-    statement by interpolation. The name comes from ``fetch_hint``, which the
-    *job* wrote, so it is not user input; but "not user input" is not the same
-    as "safe to concatenate", and a compromised or buggy job should not be
-    able to reach outside the platform's own schema.
-
-    Two gates: every part must be a plain identifier, and the catalog/schema
-    must be the ones this app is configured for.
-    """
-    parts = table.split(".")
-    if len(parts) != 3 or not all(_IDENTIFIER.match(part) for part in parts):
-        raise UnsafeTableName(
-            f"{table!r} is not a plain three-part identifier; refusing to build SQL from it"
-        )
-    if (parts[0], parts[1]) != (catalog, schema):
-        raise UnsafeTableName(
-            f"{table!r} is outside {catalog}.{schema}; this app only reads its own schema"
-        )
-    return table
+__all__ = ["RunRepository"]
 
 RUN_STATUS = "run_status"
 
@@ -173,66 +140,6 @@ class RunRepository:
             """
         )
         return int(rows[0]["active"]) if rows else 0
-
-    async def results_table_for(self, run_id: str) -> str | None:
-        """Which table holds this run's results, per what the job recorded.
-
-        Read from ``fetch_hint`` rather than derived from the model name: the
-        job is what actually chose the destination, and a run triggered with
-        an overridden results table would otherwise be unreadable.
-        """
-        rows = await self.sql.query(
-            f"""
-            SELECT fetch_hint_json
-            FROM {self.t(RESULT_META)}
-            WHERE run_id = :run_id AND fetch_hint_json IS NOT NULL
-            ORDER BY seq DESC
-            LIMIT 1
-            """,
-            [P.str("run_id", run_id)],
-        )
-        if not rows:
-            return None
-        try:
-            hint = json.loads(rows[0]["fetch_hint_json"] or "{}")
-        except (TypeError, ValueError):
-            return None
-        table = hint.get("table")
-        return str(table) if table else None
-
-    async def read_results(
-        self, table: str, run_id: str, *, limit: int, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        """A page of a model's own results.
-
-        ``table`` must already have been through :func:`validate_table_name`.
-        Ordered by ``chunk_index`` so a streaming model's pages come back in
-        the order it produced them; ordering *within* a chunk is whatever the
-        table gives, because the platform does not know a model's columns.
-        """
-        return await self.sql.query(
-            f"""
-            SELECT * FROM {table}
-            WHERE run_id = :run_id
-            ORDER BY chunk_index
-            LIMIT :row_limit OFFSET :row_offset
-            """,
-            [
-                P.str("run_id", run_id),
-                P.int("row_limit", limit),
-                P.int("row_offset", offset),
-            ],
-        )
-
-    async def count_results(self, table: str, run_id: str) -> int:
-        return int(
-            (
-                await self.sql.query(
-                    f"SELECT COUNT(*) AS n FROM {table} WHERE run_id = :run_id",
-                    [P.str("run_id", run_id)],
-                )
-            )[0]["n"]
-        )
 
     async def run_status(self, run_id: str) -> dict[str, Any] | None:
         rows = await self.sql.query(

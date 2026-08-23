@@ -16,19 +16,8 @@ from .broadcaster import Broadcaster
 from .config import AppConfig
 from .repository import RunRepository
 from .services import ServiceHub
-from .store import RunStore
 
-__all__ = [
-    "get_hub",
-    "get_broadcaster",
-    "get_repo",
-    "get_store",
-    "get_config",
-    "Hub",
-    "Repo",
-    "Store",
-    "Caster",
-]
+__all__ = ["get_hub", "get_broadcaster", "get_repo", "get_config", "Hub", "Repo", "Caster"]
 
 
 def get_hub(request: Request) -> ServiceHub:
@@ -57,16 +46,6 @@ def get_repo(hub: Annotated[ServiceHub, Depends(get_hub)]) -> RunRepository:
     return hub.repo
 
 
-def get_store(hub: Annotated[ServiceHub, Depends(get_hub)]) -> RunStore:
-    if hub.store is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            hub.degraded.get("store") or hub.degraded.get("lakebase") or "no run store",
-        )
-    return hub.store
-
-
 Hub = Annotated[ServiceHub, Depends(get_hub)]
 Repo = Annotated[RunRepository, Depends(get_repo)]
-Store = Annotated[RunStore, Depends(get_store)]
 Caster = Annotated[Broadcaster, Depends(get_broadcaster)]
