@@ -5,6 +5,12 @@ vertical slice. It exists to prove the platform's transport and envelope work
 for a real MILP with genuine branch-and-bound behaviour to stream — it is not
 a production optimisation deployment.
 
+Coverage requirements come from a real hourly demand curve (Databricks'
+``samples`` catalog, via ``models._data``), not a random number generator —
+see ``instance.py``. The provenance of that curve is logged at the ``input``
+phase and carried on every result row, so a run on real data and a run that
+fell back to the deterministic synthetic curve stay distinguishable.
+
 Note what this class does *not* do: it never calls ``optimize()``. The harness
 owns the solve, so it can attach its own progress/log/cancellation observers to
 the single callback slot Gurobi allows, composed with ours. Calling
@@ -27,11 +33,16 @@ class SchedulingModel:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
+        trips_per_staff = cfg.get("trips_per_staff")
         self.instance: Instance = cfg.pop("instance", None) or build_instance(
             staff_count=int(cfg.get("staff_count", 20)),
             days=int(cfg.get("days", 14)),
             seed=int(cfg.get("seed", 20260822)),
             max_shifts_per_staff=int(cfg.get("max_shifts_per_staff", 10)),
+            # Coverage comes from the sample-catalog demand curve by default.
+            # Turn it off for a run that must not read anything at all.
+            use_sample_data=bool(cfg.get("use_sample_data", True)),
+            trips_per_staff=None if trips_per_staff is None else float(trips_per_staff),
         )
         self.time_limit_s = cfg.get("time_limit_s")
         self.mip_gap = cfg.get("mip_gap")
@@ -50,6 +61,17 @@ class SchedulingModel:
         from gurobipy import GRB
 
         inst = self.instance
+        # Where the coverage requirement came from, before anything else — a
+        # run on real data and a run that fell back must not look the same.
+        self._log(inst.provenance, phase="input")
+        clipped = inst.demand_meta.get("demand_clipped_to_capacity")
+        self._log(
+            f"coverage: {inst.total_demand} staff-shifts over {inst.days} days, from "
+            f"{inst.demand_meta.get('demand_derived_from')}"
+            f"{', clipped to workforce capacity' if clipped else ''}",
+            phase="input",
+            level="WARNING" if clipped else "INFO",
+        )
         self._log(f"building: {len(inst.staff)} staff x {inst.days} days x {len(SHIFTS)} shifts")
 
         model = gp.Model("staff_scheduling")
@@ -134,6 +156,15 @@ class SchedulingModel:
             return []
 
         inst = self.instance
+        # Provenance travels with every row: the results table is what someone
+        # reads six months later, and "was this real demand?" is not a question
+        # they should have to answer from the log stream.
+        provenance = {
+            "data_source": inst.data_meta.get("data_source"),
+            "data_synthetic": inst.data_meta.get("data_synthetic"),
+            "data_rows": inst.data_meta.get("data_rows"),
+            "data_fallback_reason": inst.data_meta.get("data_fallback_reason"),
+        }
         rows = []
         for (s, d, shift), var in self._x.items():
             if var.X > 0.5:
@@ -144,6 +175,8 @@ class SchedulingModel:
                         "shift": shift,
                         "cost": round(inst.cost[(s, shift)], 4),
                         "preferred": inst.preference[(s, shift)] > 0,
+                        "demand": inst.demand[(d, shift)],
+                        **provenance,
                     }
                 )
         rows.sort(key=lambda r: (r["day"], r["shift"], r["staff"]))
