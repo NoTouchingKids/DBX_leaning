@@ -41,20 +41,17 @@ import sys
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _registry import UnregisteredModel, extra_for, model_names  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: models/<dir> -> pyproject.toml optional-dependencies extra.
-#: Explicit, not inferred, because they don't all match ("gurobi" extra ->
-#: "gurobi_scheduling" package, "streaming" extra -> "streaming_results"
-#: package). A model added without an entry here fails loudly rather than
-#: silently shipping with no dependencies.
-MODEL_PACKAGE_TO_EXTRA: dict[str, str] = {
-    "gurobi_scheduling": "gurobi",
-    "forecasting": "forecasting",
-    "mcmc": "mcmc",
-    "scenario": "scenario",
-    "streaming_results": "streaming",
-}
+#: The model registry lives in pyproject.toml's [tool.dbx-leaning.models],
+#: read through scripts/_registry.py — this script and the requirements
+#: exporter used to keep separate copies of the same map, which is a
+#: divergence waiting to deploy the wrong dependencies.
+
 
 #: Nested subpackages that must be listed explicitly for setuptools' literal
 #: ``packages`` list (it does not auto-discover subpackages the way
@@ -151,13 +148,10 @@ def stage_and_build(
             f"models/{model_dir_name} does not exist "
             f"(looked under {REPO_ROOT / 'models'})"
         )
-    if model_dir_name not in MODEL_PACKAGE_TO_EXTRA:
-        raise BuildError(
-            f"{model_dir_name!r} has no entry in MODEL_PACKAGE_TO_EXTRA at the top "
-            f"of this script — add one (models/{model_dir_name} -> the matching "
-            f"pyproject.toml extra) before this model can be built"
-        )
-    extra = MODEL_PACKAGE_TO_EXTRA[model_dir_name]
+    try:
+        extra = extra_for(model_dir_name)
+    except UnregisteredModel as exc:
+        raise BuildError(str(exc)) from None
     dependencies = resolve_dependencies(root, model_extra=extra, include_delta=include_delta)
 
     stage = REPO_ROOT / ".build" / f"wheel-{model_dir_name}"
@@ -223,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.all:
-        targets = sorted(MODEL_PACKAGE_TO_EXTRA)
+        targets = model_names()
     elif args.models:
         targets = args.models
     else:

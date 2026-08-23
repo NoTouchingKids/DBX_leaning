@@ -77,6 +77,21 @@ dev = [
 # subset of it (--extra job --extra gurobi), never a different resolution.
 default-groups = ["dev"]
 
+# One place naming every model and the extra that carries its libraries.
+# Both scripts/export_requirements.py and scripts/build_model_wheel.py read
+# this, because they were each keeping their own copy of the same fact — and
+# a model registered in one but not the other deploys with the wrong
+# dependencies rather than failing.
+#
+# Directory names and extra names do not all match, which is exactly why this
+# is explicit rather than inferred.
+[tool.dbx-leaning.models]
+gurobi_scheduling = "gurobi"
+scenario = "scenario"
+forecasting = "forecasting"
+mcmc = "mcmc"
+streaming_results = "streaming"
+
 [tool.setuptools]
 packages = ["shared", "app", "job", "models"]
 

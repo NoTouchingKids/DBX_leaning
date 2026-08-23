@@ -22,25 +22,24 @@ import pathlib
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from _registry import model_extras  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "deploy" / "requirements"
 
-#: environment name -> the extras that make it up.
+#: environment name -> the extras that make it up, derived from the single
+#: registry in pyproject.toml rather than repeated here.
 #:
 #: Every job carries `job` (the harness's own transport) plus its own model
 #: extra, and nothing else.
 #:
 #: Notably NOT `delta`: the durable writer is Spark, which the runtime already
 #: provides, and the delta-rs writer is not implemented (see job/delta.py).
-#: Shipping deltalake+pyarrow to five job environments to satisfy an import
-#: that never runs is exactly the bloat the per-model split exists to avoid.
 #: Add it back in the same commit that makes DeltaRsWriter real.
 ENVIRONMENTS: dict[str, list[str]] = {
-    "gurobi_scheduling": ["job", "gurobi"],
-    "scenario": ["job", "scenario"],
-    "forecasting": ["job", "forecasting"],
-    "mcmc": ["job", "mcmc"],
-    "streaming_results": ["job", "streaming"],
+    model: ["job", extra] for model, extra in sorted(model_extras().items())
 }
 
 #: The app is not a model, and does not get a Delta writer or any model
