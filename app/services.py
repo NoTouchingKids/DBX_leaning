@@ -8,15 +8,17 @@ degraded and stays ``None``, so a route depending on it can return a clean
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
-from shared.envelope import Message
+from shared.envelope import Message, StatusMessage
 from shared.protocol import ControlFrame, pack_frame
 from shared.tables import TableSet
 
 from .broadcaster import Broadcaster, InProcessBroadcaster
 from .config import AppConfig
+from .jobs_api import JobsApi
 from .repository import RunRepository
 from .sql import SqlClient
 
@@ -68,11 +70,16 @@ class ServiceHub:
         self.config = config
         self.tables = TableSet(catalog=config.catalog, schema=config.schema)
         self.broadcaster: Broadcaster = InProcessBroadcaster(queue_max=config.sse_queue_max)
-        self.jobs = JobConnections()
+        #: Live WebSockets from jobs. Named apart from `jobs_api` on purpose —
+        #: one is a socket registry, the other is the Databricks REST client.
+        self.job_sockets = JobConnections()
+        self.jobs_api: JobsApi | None = None
         self.sql: SqlClient | None = None
         self.repo: RunRepository | None = None
         self.degraded: dict[str, str] = {}
         self.messages_ingested = 0
+        self.status_writes = 0
+        self._status_tasks: set[asyncio.Task] = set()
 
     async def startup(self) -> None:
         cfg = self.config
@@ -95,12 +102,68 @@ class ServiceHub:
             )
             log.warning(self.degraded["sql"])
 
+        jobs_api = JobsApi(cfg.workspace_host, cfg.token)
+        if jobs_api.available:
+            self.jobs_api = jobs_api
+        else:
+            self.degraded["jobs_api"] = (
+                "no workspace host configured (DATABRICKS_HOST); runs cannot be triggered "
+                "from here, though jobs triggered elsewhere are still observed"
+            )
+            log.warning(self.degraded["jobs_api"])
+
+        if not cfg.job_ids and cfg.default_job_id is None:
+            self.degraded["job_ids"] = (
+                "no DBX_JOB_IDS configured; no model can be triggered from this app"
+            )
+
     async def shutdown(self) -> None:
+        for task in tuple(self._status_tasks):
+            task.cancel()
+        if self._status_tasks:
+            await asyncio.gather(*self._status_tasks, return_exceptions=True)
         if self.sql is not None:
             await self.sql.close()
+        if self.jobs_api is not None:
+            await self.jobs_api.close()
 
     async def ingest(self, run_id: str, msg: Message) -> None:
         """One entry point for everything arriving from a job, whichever
         channel it came in on. WS and HTTP push must not diverge."""
         self.messages_ingested += 1
         await self.broadcaster.publish(run_id, msg)
+        if isinstance(msg, StatusMessage):
+            self._persist_status(run_id, msg)
+
+    def _persist_status(self, run_id: str, msg: StatusMessage) -> None:
+        """Reflect a lifecycle transition into ``run_status``.
+
+        The status *message* is a notification; the ``run_status`` row is the
+        record of truth (docs/message-envelope-spec.md). This is what keeps
+        the two in step while the app is up — when it is not, the job's own
+        ``run_events`` carries the truth and startup reconciliation catches up.
+
+        Off the ingest path deliberately: a cold warehouse can take seconds to
+        answer, and blocking the job's socket on that would make the app the
+        thing a run depends on. It is a couple of statements per run
+        (RUNNING, then terminal), not a loop.
+        """
+        if self.repo is None:
+            return
+
+        async def write() -> None:
+            try:
+                await self.repo.set_run_status(run_id, msg.status.value, detail=msg.detail)
+                self.status_writes += 1
+            except Exception:  # noqa: BLE001 - the durable record still stands
+                log.warning(
+                    "could not update run_status for %s -> %s; run_events has it and "
+                    "startup reconciliation will pick it up",
+                    run_id,
+                    msg.status.value,
+                    exc_info=True,
+                )
+
+        task = asyncio.create_task(write(), name=f"run-status-{run_id}")
+        self._status_tasks.add(task)
+        task.add_done_callback(self._status_tasks.discard)

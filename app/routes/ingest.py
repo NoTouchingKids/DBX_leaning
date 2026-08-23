@@ -51,7 +51,7 @@ async def job_socket(websocket: WebSocket, run_id: str) -> None:
         return
 
     await websocket.accept()
-    hub.jobs.register(run_id, websocket)
+    hub.job_sockets.register(run_id, websocket)
     log.info("job attached for run %s", run_id)
 
     try:
@@ -77,7 +77,7 @@ async def job_socket(websocket: WebSocket, run_id: str) -> None:
     except Exception:  # noqa: BLE001
         log.exception("job socket for %s failed")
     finally:
-        hub.jobs.unregister(run_id, websocket)
+        hub.job_sockets.unregister(run_id, websocket)
 
 
 async def _handle_control(

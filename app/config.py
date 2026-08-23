@@ -7,8 +7,9 @@ takes a user token: this build has no on-behalf-of-user path at all.
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 __all__ = ["AppConfig"]
 
@@ -43,6 +44,23 @@ class AppConfig:
     #: 25 MiB, so this stays well clear of it.
     backfill_page_size: int = 5000
 
+    #: Which Databricks job runs which model: {"scenario": 1234, ...}. This
+    #: map is also the allow-list — a model with no job here cannot be
+    #: triggered, so the app never needs to import models/ (and its gurobipy /
+    #: sklearn / emcee weight) just to validate a request.
+    job_ids: dict[str, int] = field(default_factory=dict)
+    #: Fallback for a single generic harness job parameterised by model.
+    default_job_id: int | None = None
+
+    #: This app's own externally reachable URL, handed to the job so it knows
+    #: where to attach. Absent = jobs run unobserved, which is a normal case.
+    public_url: str | None = None
+
+    #: Free Edition allows **5 concurrent job tasks per account**, across all
+    #: models combined. The trigger endpoint refuses past this rather than
+    #: letting Databricks queue or reject the run opaquely.
+    max_concurrent_runs: int = 5
+
     #: Shared secret a job presents on the WS/push ingress. Distinct from any
     #: user auth: the platform proxy authenticates humans, this authenticates
     #: the job process.
@@ -56,6 +74,18 @@ class AppConfig:
         host = (e.get("DATABRICKS_HOST") or "").strip().rstrip("/") or None
         if host and not host.startswith("http"):
             host = f"https://{host}"
+        raw_jobs = (e.get("DBX_JOB_IDS") or "").strip()
+        try:
+            job_ids = {str(k): int(v) for k, v in json.loads(raw_jobs).items()} if raw_jobs else {}
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f'DBX_JOB_IDS must be a JSON object of model -> job id, e.g. '
+                f'{{"scenario": 1234}}; got {raw_jobs!r} ({exc})'
+            ) from None
+
+        public_url = (e.get("DBX_APP_PUBLIC_URL") or "").strip().rstrip("/") or None
+        default_job = (e.get("DBX_JOB_ID") or "").strip()
+
         return cls(
             catalog=e.get("DBX_CATALOG", "main"),
             schema=e.get("DBX_SCHEMA", "dbx_leaning"),
@@ -67,6 +97,18 @@ class AppConfig:
             sse_keepalive_s=float(e.get("DBX_SSE_KEEPALIVE_S", "10")),
             sse_queue_max=int(e.get("DBX_SSE_QUEUE_MAX", "1000")),
             backfill_page_size=int(e.get("DBX_BACKFILL_PAGE_SIZE", "5000")),
+            job_ids=job_ids,
+            default_job_id=int(default_job) if default_job else None,
+            public_url=public_url,
+            max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
             job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
         )
+
+    def job_id_for(self, model: str) -> int | None:
+        """Which job runs this model, or None if it cannot be triggered."""
+        return self.job_ids.get(model, self.default_job_id)
+
+    @property
+    def triggerable_models(self) -> list[str]:
+        return sorted(self.job_ids)

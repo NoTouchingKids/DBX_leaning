@@ -87,3 +87,13 @@ async def test_backfill_rehydrates_nested_json_columns():
     assert messages[0]["payload"] == {"nodes": 12}
     assert messages[0]["seq"] == 7 and messages[0]["type"] == "progress"
     assert "payload_json" not in messages[0]
+
+
+def test_a_string_parameter_stores_a_string_not_whatever_it_was_given():
+    # A STRING param holding an int is the declared type and the stored value
+    # disagreeing — the same class of bug typed parameters exist to prevent.
+    assert P.str("job_run_id", 987654).value == "987654"
+    assert P.str("detail", None).value is None
+    assert P.str("job_run_id", 987654).as_api() == {
+        "name": "job_run_id", "value": "987654", "type": "STRING"
+    }

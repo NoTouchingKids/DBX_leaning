@@ -1,7 +1,10 @@
-"""Just enough of the Jobs API for startup reconciliation.
+"""Just enough of the Jobs API: launching a run, and asking how one ended.
 
-Used once, at startup, to answer "did this run actually finish while we were
-down?" — the normal case when apps run ~8h/day and jobs do not.
+Two uses, both event-driven and neither on a timer:
+
+- ``run_now`` when someone triggers a model from the UI;
+- ``get_run`` once at startup, to answer "did this run actually finish while
+  we were down?" — the normal case when apps run ~8h/day and jobs do not.
 """
 
 from __future__ import annotations
@@ -11,7 +14,15 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-__all__ = ["JobsApi", "TERMINAL_LIFE_CYCLE"]
+__all__ = ["JobsApi", "JobsApiError", "JobsApiUnavailable", "TERMINAL_LIFE_CYCLE"]
+
+
+class JobsApiError(RuntimeError):
+    """The Jobs API refused something. Distinct from it being unreachable."""
+
+
+class JobsApiUnavailable(JobsApiError):
+    """No workspace configured — a degraded app, not a bad request."""
 
 TERMINAL_LIFE_CYCLE = {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}
 
@@ -45,6 +56,33 @@ class JobsApi:
 
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
+
+    async def run_now(self, job_id: int, parameters: dict[str, str]) -> int:
+        """Launch a job run. Returns Databricks' own run id.
+
+        Parameters go through ``job_parameters``, which the bundle maps onto
+        the environment variables ``job/config.py`` reads. Nothing is
+        interpolated into a command line.
+        """
+        if not self.available:
+            raise JobsApiUnavailable("no workspace host configured (DATABRICKS_HOST)")
+
+        http = await self._http()
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        resp = await http.post(
+            f"{self.host}/api/2.2/jobs/run-now",
+            json={"job_id": job_id, "job_parameters": parameters},
+            headers=headers,
+        )
+        if resp.status_code >= 400:
+            raise JobsApiError(
+                f"run-now failed for job {job_id}: HTTP {resp.status_code} {resp.text[:400]}"
+            )
+        payload = resp.json()
+        run_id = payload.get("run_id")
+        if run_id is None:
+            raise JobsApiError(f"run-now returned no run_id: {payload}")
+        return int(run_id)
 
     async def get_run(self, job_run_id: str | int) -> dict[str, Any] | None:
         if not self.available:

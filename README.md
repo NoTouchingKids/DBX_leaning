@@ -74,10 +74,34 @@ uvicorn app.main:app --reload           # the observer, on :8000
 Model extras are separable: `pip install -e ".[job,gurobi]"` gets you the
 scheduling model without pulling in scikit-learn or emcee.
 
+## API surface
+
+| Endpoint | What |
+|---|---|
+| `POST /api/runs` | Trigger a model. Launches the Databricks job and registers the run |
+| `GET /api/runs` | Recent runs, each flagged with whether a job is live on it |
+| `GET /api/runs/{id}` | One run's current state |
+| `GET /api/runs/{id}/stream` | SSE. `id:` is the message `seq`, so `EventSource`'s own `Last-Event-ID` resume works unmodified |
+| `GET /api/runs/{id}/messages` | Explicit backfill from Unity Catalog, client-triggered, paged by seq |
+| `POST /api/runs/{id}/cancel` | Forwards over the job's WebSocket, or 409s naming the CLI escape hatch |
+| `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `models/` |
+| `WS /ws/job/{id}` | The job's ingress, and the only inbound path to a running job |
+| `POST /api/runs/{id}/push` | One-way HTTP fallback ingress |
+| `GET /api/whoami`, `GET /healthz` | Cosmetic identity; health with per-service degradation |
+
+Triggering needs `DBX_JOB_IDS` (a JSON map of model name to Databricks job
+id), `DATABRICKS_HOST`, and — to be observed rather than merely run —
+`DBX_APP_PUBLIC_URL` so the job knows where to attach.
+
 ## State of play
 
-`shared/`, `job/`, `app/` and all five models are built and tested. What is
-**not** done is the part no amount of local testing can settle: neither
-ingress probe has run (`docs/spike-results.md`), so which live channel this
-actually uses in production is still unknown. Both paths are implemented and
-the code degrades cleanly either way — but "designed for" is not "measured".
+`shared/`, `job/`, `app/` and all five models are built and tested, and
+**WebSocket and SSE are both confirmed working through the Databricks Apps
+ingress** — the question that stayed open across all three builds of this
+platform (`docs/spike-results.md`). The transport in `docs/architecture.md` is
+the one being built, not a hopeful guess.
+
+What is **not** done: nothing is deployable yet. There is no `app.yaml`, no
+`databricks.yml` bundle, and no secrets wiring, so `DBX_JOB_IDS`,
+`DATABRICKS_HOST` and `DBX_APP_TOKEN` have no source and the job has no
+defined path onto a cluster. That is the next piece of work.

@@ -27,8 +27,25 @@ async def healthz(hub: Hub) -> dict:
     return {
         "status": "degraded" if hub.degraded else "ok",
         "degraded": hub.degraded,
-        "live_jobs": len(hub.jobs.run_ids),
+        "live_jobs": len(hub.job_sockets.run_ids),
         "messages_ingested": hub.messages_ingested,
+    }
+
+
+@router.get("/api/models")
+async def models(hub: Hub) -> dict:
+    """What can be triggered from here.
+
+    Derived from the configured job map, not from importing ``models/`` — the
+    app has no business pulling in gurobipy, scikit-learn and emcee just to
+    list names, and a model with no job behind it cannot be run anyway.
+    """
+    return {
+        "models": [
+            {"name": name, "job_id": hub.config.job_ids[name]}
+            for name in hub.config.triggerable_models
+        ],
+        "default_job_id": hub.config.default_job_id,
     }
 
 

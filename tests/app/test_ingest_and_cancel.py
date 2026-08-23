@@ -17,8 +17,8 @@ def test_a_job_attaches_over_websocket_and_is_acknowledged(app_and_hub):
             ws.send_bytes(pack_frame(hello("r1", next_seq=4000)))
             ack = unpack_frame(ws.receive_bytes())
             assert isinstance(ack, ControlFrame) and ack.kind is ControlKind.HELLO_ACK
-            assert hub.jobs.is_connected("r1")
-    assert not hub.jobs.is_connected("r1"), "the connection should be forgotten on disconnect"
+            assert hub.job_sockets.is_connected("r1")
+    assert not hub.job_sockets.is_connected("r1"), "the socket should be forgotten on disconnect"
 
 
 def test_messages_from_the_job_reach_subscribers(app_and_hub):
@@ -159,4 +159,4 @@ def test_an_unauthorised_websocket_is_closed_rather_than_served(app_and_hub, con
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect("/ws/job/r1") as ws:
                 ws.receive_bytes()
-    assert not hub.jobs.is_connected("r1")
+    assert not hub.job_sockets.is_connected("r1")

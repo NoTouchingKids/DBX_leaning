@@ -77,6 +77,70 @@ class RunRepository:
         )
         return [_rehydrate(r) for r in rows]
 
+    async def create_run(
+        self,
+        run_id: str,
+        *,
+        model: str,
+        job_run_id: int | str | None,
+        status: str = "QUEUED",
+        requested_by: str | None = None,
+    ) -> None:
+        """Register a run at trigger time.
+
+        Without this the registry is never populated on the happy path, and
+        startup reconciliation — which finds work by reading ``run_status`` —
+        has nothing to find.
+        """
+        now = _now_ms()
+        await self.sql.query(
+            f"""
+            INSERT INTO {self.t(RUN_STATUS)}
+                (run_id, job_run_id, model, status, detail, started_ts, updated_ts, requested_by)
+            VALUES (:run_id, :job_run_id, :model, :status, NULL, :started_ts, :updated_ts,
+                    :requested_by)
+            """,
+            [
+                P.str("run_id", run_id),
+                P.str("job_run_id", job_run_id),
+                P.str("model", model),
+                P.str("status", status),
+                P.bigint("started_ts", now),
+                P.bigint("updated_ts", now),
+                P.str("requested_by", requested_by),
+            ],
+        )
+
+    async def list_runs(
+        self, *, limit: int = 50, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        where = "WHERE status = :status" if status else ""
+        params = [P.int("row_limit", limit)]
+        if status:
+            params.append(P.str("status", status))
+        return await self.sql.query(
+            f"""
+            SELECT run_id, job_run_id, model, status, detail, started_ts, updated_ts, requested_by
+            FROM {self.t(RUN_STATUS)}
+            {where}
+            ORDER BY updated_ts DESC
+            LIMIT :row_limit
+            """,
+            params,
+        )
+
+    async def active_run_count(self) -> int:
+        """How many runs are not finished — checked against Free Edition's
+        ceiling of 5 concurrent job tasks per account, across all models."""
+        rows = await self.sql.query(
+            f"""
+            SELECT COUNT(*) AS active
+            FROM {self.t(RUN_STATUS)}
+            WHERE status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'INFEASIBLE')
+            """
+        )
+        return int(rows[0]["active"]) if rows else 0
+
     async def run_status(self, run_id: str) -> dict[str, Any] | None:
         rows = await self.sql.query(
             f"SELECT * FROM {self.t(RUN_STATUS)} WHERE run_id = :run_id",

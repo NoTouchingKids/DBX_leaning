@@ -16,6 +16,7 @@ Three rules this module enforces rather than trusts:
 
 from __future__ import annotations
 
+import builtins
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -52,7 +53,10 @@ class P:
 
     @staticmethod
     def str(name: str, value: Any) -> Param:
-        return Param(name, value, "STRING")
+        # Coerce here, not at send time: a STRING parameter holding an int is
+        # a declared type and a stored value disagreeing, which is the same
+        # class of bug the typed parameters exist to prevent.
+        return Param(name, None if value is None else builtins.str(value), "STRING")
 
     @staticmethod
     def int(name: str, value: Any) -> Param:
