@@ -377,9 +377,10 @@ def build_instance(
     )
     demand_meta["demand_total"] = sum(demand.values())
 
-    # The result table has a fixed schema, so the provenance keys are always
-    # present — absent-vs-null is not a distinction a Delta writer should have
-    # to make on a per-run basis.
+    # The results table has a fixed schema: every provenance key is present on
+    # every row, null rather than absent. `Dataset.describe()` guarantees this
+    # too; the setdefault covers the hand-built branch above and any loader
+    # that stops.
     data_meta.setdefault("data_fallback_reason", None)
 
     return Instance(

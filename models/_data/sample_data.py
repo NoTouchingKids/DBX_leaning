@@ -25,6 +25,7 @@ a model using it stays independently deployable.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,8 +64,63 @@ class Dataset:
     def column(self, name: str) -> list[Any]:
         return [row[name] for row in self.rows]
 
-    def floats(self, name: str) -> list[float]:
-        return [float(row[name]) for row in self.rows]
+    def floats(self, name: str, *, default: float | None = None) -> list[float]:
+        """Numeric column.
+
+        A real aggregate can be NULL — ``AVG(fare_amount)`` over an hour whose
+        fares are all null returns nothing — and ``float(None)`` raises a bare
+        TypeError from deep inside a model. That failure only ever happens on
+        a workspace, never in the offline suite, which is the worst shape a
+        bug can have. So: either substitute an explicit ``default``, or get an
+        error that names the column and the row.
+
+        To drop the offending rows instead, and keep every column aligned
+        while doing it, use :meth:`dropna`.
+        """
+        out: list[float] = []
+        for index, row in enumerate(self.rows):
+            value = row.get(name)
+            if value is None or (isinstance(value, float) and not math.isfinite(value)):
+                if default is None:
+                    raise ValueError(
+                        f"{self.source} row {index}: column {name!r} is {value!r}. "
+                        f"Pass a default, or drop the row with .dropna({name!r})."
+                    )
+                out.append(default)
+                continue
+            out.append(float(value))
+        return out
+
+    def dropna(self, *columns: str) -> Dataset:
+        """Rows where every named column is present and finite.
+
+        Returns a new Dataset so provenance travels with the filtered rows —
+        including a row count that reflects what a model actually used, not
+        what the table happened to contain.
+        """
+        wanted = columns or tuple(self.rows[0]) if self.rows else ()
+
+        def usable(row: dict[str, Any]) -> bool:
+            for name in wanted:
+                value = row.get(name)
+                if value is None:
+                    return False
+                if isinstance(value, float) and not math.isfinite(value):
+                    return False
+            return True
+
+        kept = [row for row in self.rows if usable(row)]
+        dropped = len(self.rows) - len(kept)
+        meta = dict(self.meta)
+        if dropped:
+            meta["rows_dropped"] = meta.get("rows_dropped", 0) + dropped
+        return Dataset(
+            rows=kept,
+            source=self.source,
+            synthetic=self.synthetic,
+            reason=self.reason,
+            meta=meta,
+        )
 
     @property
     def provenance(self) -> str:
@@ -74,12 +130,19 @@ class Dataset:
         return f"{len(self.rows)} rows from {self.source}"
 
     def describe(self) -> dict[str, Any]:
-        """Provenance as fields, for a result row or an envelope payload."""
+        """Provenance as fields, for a result row or an envelope payload.
+
+        Always the same keys, including ``data_fallback_reason: None`` on a
+        successful read. An earlier version omitted it on success, which gave
+        one results table two different row schemas depending on how the run
+        went — and every model track independently wrote the same workaround
+        for it, which was the signal that the omission was the bug.
+        """
         return {
             "data_source": self.source,
             "data_synthetic": self.synthetic,
             "data_rows": len(self.rows),
-            **({"data_fallback_reason": self.reason} if self.reason else {}),
+            "data_fallback_reason": self.reason,
         }
 
 
