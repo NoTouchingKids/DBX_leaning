@@ -27,8 +27,11 @@ more precision than it has:
   parameters, not by integration.
 - the *difference* between two Betas has no closed-form quantile. Its mean and
   sd are exact (they are just sums); its credible interval comes from a grid
-  convolution of the two densities and is accurate to about one grid step,
-  which :func:`difference_summary` reports so a caller can see it.
+  convolution of the two densities and is accurate to a small multiple of one
+  grid step, which :func:`difference_summary` reports so a caller can judge it
+  rather than take it on trust. The grid is scaled to the posteriors' own
+  width, so for the concentrated posteriors this model actually produces the
+  error is a fraction of a percent of one standard deviation.
 """
 
 from __future__ import annotations
@@ -216,7 +219,9 @@ def prob_greater(a1: float, b1: float, a2: float, b2: float) -> float:
     return _prob_greater_quadrature(a1, b1, a2, b2)
 
 
-def _prob_greater_quadrature(a1: float, b1: float, a2: float, b2: float, *, points: int = 4001) -> float:
+def _prob_greater_quadrature(
+    a1: float, b1: float, a2: float, b2: float, *, points: int = 4001
+) -> float:
     """P(X2 > X1) = integral of f2(p) I_p(a1, b1) dp, by Simpson's rule.
 
     Only reached for a non-whole ``a2`` — a fractional prior such as Jeffreys'
@@ -282,8 +287,9 @@ def difference_summary(
     The difference of two Betas is not a Beta and has no closed-form quantile,
     so this is the one quantity here that is approximated. Both densities are
     evaluated exactly on grids sharing a step, and their discrete convolution
-    is the density of the difference — deterministic, and accurate to about one
-    step, which is returned as ``grid_step`` so nobody has to guess.
+    is the density of the difference — deterministic, and accurate to a small
+    multiple of one step, which is returned as ``grid_step`` so nobody has to
+    guess at it.
 
     ``mean`` and ``sd`` are *not* taken off the grid: they are exact
     (``E[X2] - E[X1]`` and ``sqrt(Var X1 + Var X2)``, the arms being
