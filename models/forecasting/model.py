@@ -101,7 +101,7 @@ class ForecastingModel:
         self.timestamps = [int(row["hour_ts"]) for row in usable if row.get("hour_ts")]
         # describe() omits data_fallback_reason on success; defaulting it keeps
         # the results table one shape regardless of how the run went.
-        self.data_meta = {"data_fallback_reason": None, **data.describe()}
+        self.data_meta = data.describe()
 
         self._log(f"hourly NYC taxi {self.column}: {data.provenance}", phase="input")
         dropped = len(data.rows) - len(usable)

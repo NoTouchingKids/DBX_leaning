@@ -156,7 +156,7 @@ class ScenarioModel:
             # Always present, even on real data, so the results table has one
             # schema wherever it ran.
             provenance=data.provenance,
-            data_fields={"data_fallback_reason": None, **data.describe()},
+            data_fields=data.describe(),
         )
 
         self._log(self._baseline.provenance, phase="input")

@@ -116,7 +116,7 @@ class StreamingResultsModel:
         # `data_fallback_reason` is always present, even when null, so the
         # results table's schema does not depend on whether a given run
         # happened to fall back.
-        self._provenance = {"data_fallback_reason": None, **data.describe()}
+        self._provenance = data.describe()
         self._log(
             f"backtest input: {data.provenance}; "
             f"using {len(series)} points of '{self.column}'",

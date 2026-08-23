@@ -10,6 +10,7 @@ never has to branch on whether it is running on a workspace.
 from __future__ import annotations
 
 import math
+from datetime import UTC, date, datetime
 from typing import Any
 
 from .sample_data import Dataset, load
@@ -29,7 +30,14 @@ def nyc_taxi_hourly(*, days: int = 60, seed: int = 7) -> Dataset:
     """
     sql = f"""
         SELECT
-            date_trunc('HOUR', tpep_pickup_datetime) AS hour_ts,
+            -- Epoch MILLISECONDS, cast here rather than left as a timestamp.
+            -- date_trunc returns a Spark TimestampType, which row.asDict()
+            -- hands back as a Python datetime — while the synthetic fallback
+            -- returns an int. A model doing int(row["hour_ts"]) would then
+            -- work offline and raise on a workspace, which is precisely the
+            -- failure this module exists to prevent.
+            CAST(unix_timestamp(date_trunc('HOUR', tpep_pickup_datetime)) AS BIGINT) * 1000
+                                                     AS hour_ts,
             COUNT(*)                                 AS trips,
             AVG(fare_amount)                         AS avg_fare,
             AVG(trip_distance)                       AS avg_distance
@@ -40,13 +48,17 @@ def nyc_taxi_hourly(*, days: int = 60, seed: int = 7) -> Dataset:
         ORDER BY 1
         LIMIT {days * 24}
     """
-    return load(
+    data = load(
         sql,
         source=TAXI_TRIPS_TABLE,
         fallback=lambda: _synthetic_hourly(days * 24, seed=seed),
         fallback_name="synthetic:hourly-demand",
         minimum_rows=48,
     )
+    # Belt and braces: the cast above should make this a no-op, but a
+    # workspace that returns something else must still honour the contract
+    # rather than hand a model a type it will only meet in production.
+    return _with_epoch_ms(data, "hour_ts")
 
 
 def nyc_taxi_trips(*, limit: int = 2000, seed: int = 11) -> Dataset:
@@ -74,6 +86,39 @@ def nyc_taxi_trips(*, limit: int = 2000, seed: int = 11) -> Dataset:
         fallback=lambda: _synthetic_trips(limit, seed=seed),
         fallback_name="synthetic:trips",
         minimum_rows=100,
+    )
+
+
+def epoch_ms(value: Any) -> int:
+    """Whatever a timestamp column came back as, in epoch milliseconds.
+
+    Spark returns ``datetime`` for a TimestampType, the synthetic fallback
+    returns an int, and a JSON-shaped path could hand over an ISO string. A
+    model should not have to know or care which.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; never a timestamp
+        raise TypeError("a boolean is not a timestamp")
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        stamped = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return int(stamped.timestamp() * 1000)
+    if isinstance(value, date):
+        return int(datetime(value.year, value.month, value.day, tzinfo=UTC).timestamp() * 1000)
+    if isinstance(value, str):
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+    raise TypeError(f"cannot read {value!r} ({type(value).__name__}) as a timestamp")
+
+
+def _with_epoch_ms(data: Dataset, column: str) -> Dataset:
+    if not data.rows or column not in data.rows[0]:
+        return data
+    return Dataset(
+        rows=[{**row, column: epoch_ms(row[column])} for row in data.rows],
+        source=data.source,
+        synthetic=data.synthetic,
+        reason=data.reason,
+        meta=data.meta,
     )
 
 

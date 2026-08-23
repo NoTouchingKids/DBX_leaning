@@ -27,3 +27,10 @@ Free Edition restricts outbound to trusted domains. See
 
 This model stays linear and is asserted under the cap in its own tests, not by
 eyeballing the generator.
+
+Coverage demand comes from a real hourly curve (`models/_data`), which does
+**not** change the model's size — demand values are right-hand sides on
+coverage constraints that exist either way. Where a real curve could push past
+the cap is by implying a bigger workforce, so `instance.py` clips the
+requirement to the workforce that exists instead of adding staff. The cap wins;
+the demand yields.

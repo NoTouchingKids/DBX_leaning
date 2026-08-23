@@ -339,8 +339,9 @@ class McmcModel:
             usable = chain
         flat = usable.reshape(-1, usable.shape[-1])
         rhat_by_param = _rhat_per_param(np.transpose(usable, (1, 0, 2)))
-        # ``data_fallback_reason`` is spelled out even when there is none, so
-        # every row of this table has the same columns whichever path ran.
+        # Seeded so the caller-supplied-numbers path (no Dataset at all) still
+        # produces the same columns as a loaded one. Dataset.describe() now
+        # always includes the key itself.
         provenance: dict[str, Any] = {"data_fallback_reason": None}
         if self.dataset is not None:
             provenance.update(self.dataset.describe())
