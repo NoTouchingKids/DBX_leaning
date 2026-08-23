@@ -48,6 +48,8 @@ def test_real_data_reports_itself_as_real():
         "data_source": "samples.nyctaxi.trips",
         "data_synthetic": False,
         "data_rows": 1,
+        # Present and null, not absent — see test_describe_always_has_the_same_keys.
+        "data_fallback_reason": None,
     }
     assert real.provenance == "1 rows from samples.nyctaxi.trips"
 
@@ -97,3 +99,69 @@ def test_spark_helpers_are_safe_without_pyspark():
 def test_every_loader_returns_a_usable_dataset_offline(loader):
     data = loader()
     assert len(data) > 0 and data.synthetic
+
+
+# --- regressions found by the model tracks --------------------------------
+
+
+def test_a_null_aggregate_gives_a_clear_error_not_a_bare_typeerror():
+    """AVG() over an hour whose values are all NULL returns NULL, and
+    float(None) used to raise from deep inside a model. That failure only ever
+    happens on a workspace, never offline — the worst shape a bug can have."""
+    data = Dataset(rows=[{"v": 1.0}, {"v": None}], source="samples.x", synthetic=False)
+    with pytest.raises(ValueError, match=r"row 1: column 'v' is None"):
+        data.floats("v")
+
+
+def test_a_default_can_be_substituted_for_a_null():
+    data = Dataset(rows=[{"v": 1.0}, {"v": None}], source="samples.x", synthetic=False)
+    assert data.floats("v", default=0.0) == [1.0, 0.0]
+
+
+def test_non_finite_values_are_treated_as_missing_too():
+    data = Dataset(rows=[{"v": float("nan")}], source="samples.x", synthetic=False)
+    with pytest.raises(ValueError):
+        data.floats("v")
+    assert data.dropna("v").rows == []
+
+
+def test_dropna_keeps_every_column_aligned():
+    """Filtering per-column in a model desynchronises parallel series; this
+    drops whole rows so a timestamp never outlives its value."""
+    data = Dataset(
+        rows=[{"t": 1, "v": 10.0}, {"t": 2, "v": None}, {"t": 3, "v": 30.0}],
+        source="samples.x",
+        synthetic=False,
+    )
+    clean = data.dropna("v")
+    assert clean.column("t") == [1, 3]
+    assert clean.floats("v") == [10.0, 30.0]
+
+
+def test_dropna_carries_provenance_and_reports_what_it_dropped():
+    data = Dataset(
+        rows=[{"v": 1.0}, {"v": None}],
+        source="samples.nyctaxi.trips",
+        synthetic=False,
+    )
+    clean = data.dropna("v")
+    assert clean.source == "samples.nyctaxi.trips" and clean.synthetic is False
+    assert clean.meta["rows_dropped"] == 1
+    # The row count reflects what a model actually used, not what the table held.
+    assert clean.describe()["data_rows"] == 1
+
+
+def test_dropna_with_no_columns_named_checks_them_all():
+    data = Dataset(rows=[{"a": 1, "b": None}, {"a": 2, "b": 3}], source="s", synthetic=False)
+    assert data.dropna().rows == [{"a": 2, "b": 3}]
+
+
+def test_describe_always_has_the_same_keys():
+    """One results table must not have two row schemas depending on whether
+    the run happened to fall back."""
+    real = Dataset(rows=[{"a": 1}], source="samples.x", synthetic=False)
+    fell_back = Dataset(rows=[{"a": 1}], source="synthetic", synthetic=True, reason="no Spark")
+
+    assert set(real.describe()) == set(fell_back.describe())
+    assert real.describe()["data_fallback_reason"] is None
+    assert fell_back.describe()["data_fallback_reason"] == "no Spark"
