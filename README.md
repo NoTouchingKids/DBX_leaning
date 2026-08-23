@@ -50,7 +50,8 @@ app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
                        backfill, startup reconciliation, ServiceHub/DI
 models/                Five model packages. See models/README.md for the
                        duck-typed contract a model has to satisfy.
-uc_ddl/                Unity Catalog DDL, idempotent, apply in order
+uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
+lakebase_ddl/          Postgres DDL (run state) — applied at startup too
 databricks.yml         Asset bundle: five jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide

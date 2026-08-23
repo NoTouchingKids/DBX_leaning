@@ -15,9 +15,10 @@ from pydantic import BaseModel, Field
 
 from shared.protocol import cancel as cancel_frame
 
-from ..deps import Hub, Repo
+from ..deps import Hub, Repo, Store
 from ..jobs_api import JobsApiError
 from ..repository import UnsafeTableName, validate_table_name
+from ..store import DuplicateRun, SlotDenied
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -81,12 +82,15 @@ class TriggerRequest(BaseModel):
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
-async def trigger_run(body: TriggerRequest, request: Request, repo: Repo, hub: Hub) -> dict:
+async def trigger_run(body: TriggerRequest, request: Request, store: Store, hub: Hub) -> dict:
     """Launch a model as a Databricks Job, and register the run.
 
-    The registration is the part that matters beyond the launch: without a
-    ``run_status`` row nothing can list this run, and startup reconciliation —
-    which finds work by reading that table — would never see it.
+    **Reserve, then launch, then attach** — in that order. Registering after
+    the launch left a window where the job was running and the registry did
+    not know: nothing could list it, and startup reconciliation, which finds
+    work by reading that table, would never see it. Claiming the slot first
+    also makes the concurrency ceiling real rather than advisory, because on
+    Lakebase the count and the insert happen in one transaction.
     """
     if hub.jobs_api is None:
         raise HTTPException(
@@ -102,44 +106,49 @@ async def trigger_run(body: TriggerRequest, request: Request, repo: Repo, hub: H
             f"triggerable models are {hub.config.triggerable_models or '(none)'}",
         )
 
+    run_id = body.run_id or f"run-{uuid.uuid4().hex[:12]}"
+    requested_by = request.headers.get("x-forwarded-email")
+
     # Free Edition allows 5 concurrent job tasks per account, across all
     # models. Refusing here with a clear reason beats Databricks queueing or
     # rejecting the run somewhere the user cannot see.
-    active = await repo.active_run_count()
-    if active >= hub.config.max_concurrent_runs:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"{active} runs already active and the account ceiling is "
-            f"{hub.config.max_concurrent_runs} concurrent job tasks; wait for one to finish",
+    try:
+        await store.claim_slot(
+            run_id,
+            model=body.model,
+            ceiling=hub.config.max_concurrent_runs,
+            requested_by=requested_by,
         )
-
-    run_id = body.run_id or f"run-{uuid.uuid4().hex[:12]}"
-    requested_by = request.headers.get("x-forwarded-email")
+    except SlotDenied as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    except DuplicateRun as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - the store being down is not a crash
+        # Nothing has been launched yet, so this is a clean refusal: better an
+        # honest 503 than an orphan job the registry never heard of.
+        log.exception("could not claim a slot for %s", run_id)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"could not register the run, so nothing was launched: {exc}",
+        ) from exc
 
     parameters = build_job_parameters(run_id, body.model, body.config, hub.config)
 
     try:
         job_run_id = await hub.jobs_api.run_now(job_id, parameters)
     except JobsApiError as exc:
+        # Nothing was launched, so give the slot back rather than leaving a
+        # phantom holding a place in the ceiling.
+        await store.release_slot(run_id)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
     try:
-        await repo.create_run(
-            run_id, model=body.model, job_run_id=job_run_id, requested_by=requested_by
-        )
-    except Exception:
-        # The job is already running — losing the registry row must not read
-        # as "nothing happened". Return the ids so the caller can still watch.
-        log.exception("run %s launched as job run %s but could not be registered",
+        await store.attach_job_run(run_id, job_run_id)
+        attached = True
+    except Exception:  # noqa: BLE001 - the job is running; that is what matters
+        log.exception("run %s launched as job run %s but the id could not be stored",
                       run_id, job_run_id)
-        return {
-            "run_id": run_id,
-            "job_run_id": job_run_id,
-            "model": body.model,
-            "registered": False,
-            "warning": "the job is running but run_status could not be written; "
-                       "startup reconciliation will not see this run",
-        }
+        attached = False
 
     log.info("triggered %s as job run %s (model=%s)", run_id, job_run_id, body.model)
     return {
@@ -148,33 +157,34 @@ async def trigger_run(body: TriggerRequest, request: Request, repo: Repo, hub: H
         "model": body.model,
         "status": "QUEUED",
         "registered": True,
+        "job_run_id_stored": attached,
         "stream": f"/api/runs/{run_id}/stream",
     }
 
 
 @router.get("")
 async def list_runs(
-    repo: Repo,
+    store: Store,
     hub: Hub,
     limit: int = Query(50, ge=1, le=500),
     status_filter: str | None = Query(None, alias="status"),
 ) -> dict:
-    runs = await repo.list_runs(limit=limit, status=status_filter)
+    runs = await store.list_runs(limit=limit, status=status_filter)
     live = set(hub.job_sockets.run_ids)
     return {
         "count": len(runs),
-        "runs": [{**row, "live": row["run_id"] in live} for row in runs],
+        "runs": [{**r.as_dict(), "live": r.run_id in live} for r in runs],
     }
 
 
 @router.get("/{run_id}")
-async def get_run(run_id: str, repo: Repo, hub: Hub) -> dict:
-    row = await repo.run_status(run_id)
-    if row is None:
+async def get_run(run_id: str, store: Store, hub: Hub) -> dict:
+    record = await store.get(run_id)
+    if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such run {run_id}")
     snapshot = hub.broadcaster.snapshot(run_id)
     return {
-        "run": row,
+        "run": record.as_dict(),
         "live": hub.job_sockets.is_connected(run_id),
         "last_seq_seen": snapshot.last_seq if snapshot else None,
     }
