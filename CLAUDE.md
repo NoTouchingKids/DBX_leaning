@@ -108,9 +108,14 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   2000 variables / 2000 constraints (200 quadratic) — size models to fit.
   The bundled licence has **a fixed expiry per gurobipy release**; whatever
   version is pinned, record its expiry next to the pin.
-- **Delta writes: delta-rs preferred, Spark fallback**, behind one
-  `write_batch(table, rows)` interface, implementation chosen once at
-  startup. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
+- **Delta writes go through Spark**, behind one `write_batch(table, rows)`
+  interface, implementation chosen once at startup. delta-rs remains the
+  target but is **not implemented and must not be selected**: it takes a
+  storage URI, not a UC name, and given a three-part name it writes to a
+  local directory without erroring — a run would report SUCCEEDED with its
+  telemetry in a container that is about to disappear. It raises
+  `NotImplementedError` rather than doing that. Building it needs credential
+  vending; see `job/delta.py`. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
   end-of-run** — the age bound is what caps data loss on a crash; size alone
   is not a durability guarantee.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string

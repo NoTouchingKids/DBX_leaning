@@ -17,6 +17,7 @@ from shared.protocol import cancel as cancel_frame
 
 from ..deps import Hub, Repo
 from ..jobs_api import JobsApiError
+from ..repository import UnsafeTableName, validate_table_name
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -203,6 +204,52 @@ async def backfill(
         # A full page probably means there is more; the client pages by seq.
         "more": len(messages) >= page,
         "next_after_seq": messages[-1]["seq"] if messages else after_seq,
+    }
+
+
+@router.get("/{run_id}/results")
+async def read_results(
+    run_id: str,
+    repo: Repo,
+    hub: Hub,
+    limit: int = Query(1000, ge=1, le=50_000),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """The full result set a `result` message only previews.
+
+    The envelope deliberately carries a bounded preview and a `fetch_hint`
+    rather than the rows themselves — the data lives in the model's own table,
+    under its own grants. This is the endpoint that hint points at: a browser
+    cannot query Unity Catalog, so without it the "pull the full set on
+    demand" half of the contract does not exist.
+
+    Client-triggered, like backfill. Nothing here runs on a timer.
+    """
+    table = await repo.results_table_for(run_id)
+    if table is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"no results recorded for {run_id}; the run may not have reached results yet",
+        )
+
+    try:
+        # A table name is an identifier, not a value, so it cannot be bound —
+        # this is the gate that stands in for that.
+        table = validate_table_name(table, catalog=hub.config.catalog, schema=hub.config.schema)
+    except UnsafeTableName as exc:
+        log.error("refusing results read for %s: %s", run_id, exc)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+    rows = await repo.read_results(table, run_id, limit=limit, offset=offset)
+    return {
+        "run_id": run_id,
+        "table": table,
+        "count": len(rows),
+        "offset": offset,
+        "rows": rows,
+        # A full page probably means more; the client pages by offset.
+        "more": len(rows) >= limit,
+        "next_offset": offset + len(rows),
     }
 
 
