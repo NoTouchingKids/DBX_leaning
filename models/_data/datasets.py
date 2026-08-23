@@ -17,7 +17,15 @@ from .sample_data import Dataset, load
 
 __all__ = ["nyc_taxi_hourly", "nyc_taxi_trips", "TAXI_TRIPS_TABLE"]
 
-#: Databricks' standard sample dataset. Read-only, present on Free Edition.
+#: Verified present on Free Edition 2026-08-23 (docs/sample-data-inventory.md).
+#: Note it is a *sample*: aggregated hourly it yields far fewer rows than a
+#: 60-day request implies, which is what `minimum_rows` in load() is for.
+#:
+#: The catalog holds much more than this — bakehouse retail transactions,
+#: hourly AccuWeather series, wanderbricks bookings, TPC-DS/TPC-H. Some are
+#: better fits than taxi trips for particular models; see the inventory doc.
+#: None of it should be wired up from a guess at its columns: run
+#: scripts/probe_sample_data.py and write the loader against what it reports.
 TAXI_TRIPS_TABLE = "samples.nyctaxi.trips"
 
 
