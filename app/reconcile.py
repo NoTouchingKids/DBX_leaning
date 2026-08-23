@@ -17,7 +17,6 @@ from shared.envelope import TERMINAL_STATUSES, RunStatus
 
 from .jobs_api import JobsApi
 from .repository import RunRepository
-from .store import RunStore
 
 log = logging.getLogger(__name__)
 
@@ -38,15 +37,10 @@ class ReconcileReport:
         )
 
 
-async def reconcile_once(
-    repo: RunRepository, jobs: JobsApi | None = None, store: RunStore | None = None
-) -> ReconcileReport:
+async def reconcile_once(repo: RunRepository, jobs: JobsApi | None = None) -> ReconcileReport:
     report = ReconcileReport()
-    if store is None:
-        report.errors.append("no run store; cannot reconcile")
-        return report
     try:
-        stale = [r.as_dict() for r in await store.non_terminal()]
+        stale = await repo.non_terminal_runs()
     except Exception as exc:  # noqa: BLE001 - a degraded read path must not block startup
         report.errors.append(f"could not list non-terminal runs: {exc}")
         log.warning(report.errors[-1])
@@ -66,7 +60,7 @@ async def reconcile_once(
             continue
 
         status, detail = resolved
-        await store.set_status(run_id, status, detail=detail)
+        await repo.set_run_status(run_id, status.value, detail=detail)
         report.corrected.append((run_id, status.value))
         log.info("reconciled %s -> %s (%s)", run_id, status.value, detail)
 

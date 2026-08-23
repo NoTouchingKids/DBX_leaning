@@ -38,15 +38,6 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   v11's expired 2025-11-24, v10's 2024-10-28, v9's 2023-10-25. Whichever
   version is pinned, record its expiry; it fails hard, not gracefully, once
   past it.
-- **Lazy constraints do not count against the 2000-constraint cap.** Measured
-  2026-08-23 against gurobipy 13.0.2: a capacitated routing model separating
-  ~412 rounded-capacity cuts kept `NumConstrs` at 25 — Gurobi holds separated
-  cuts in the lazy pool rather than adding them to the model. This is what
-  makes cut-based formulations (routing, subtour elimination) viable at all
-  under the restricted licence, where the same constraints stated up front
-  would blow the cap immediately. `models/gurobi_routing/` relies on it and
-  pins the behaviour in a test, because it is a licence-relevant assumption
-  and not documented by Gurobi as a guarantee.
 - **WLS (Web License Service)** contacts `token.gurobi.com` over the internet
   on environment creation. Free Edition's restricted egress makes this risky
   unless the trusted-domain list is confirmed to include it. **This build
@@ -68,19 +59,12 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
 - **VARIANT type support in the Python `deltalake` bindings lags the Rust
   kernel** (delta-rs issue #3637) — treat VARIANT as unavailable for delta-rs
   writes; fall back to a JSON string column where needed.
-- **Spark is the write path, not a fallback.** On Databricks serverless jobs a
-  Spark session already exists, so its cost is paid once per run, not per
-  flush. At the flush granularities this project uses (~1MB/30s), Delta commit
-  overhead is per-flush, not per-row.
-- **delta-rs cannot address a Unity Catalog table by name, and fails silently
-  when you try.** `write_deltalake()` takes a path or URI. Handed
-  `"main.dbx_leaning.run_logs"` it does not raise — it creates a *local
-  directory* with that literal name and writes there. Verified 2026-08-23. Any
-  job doing this would report SUCCEEDED with an accurate `row_count` while its
-  telemetry sat in an ephemeral container filesystem. Making delta-rs usable
-  means resolving the table to a storage location and obtaining credentials
-  via UC credential vending; until then `DeltaRsWriter` raises
-  `NotImplementedError` and `select_writer("auto")` never picks it.
+- **Spark is not a disaster fallback.** On Databricks serverless jobs a Spark
+  session already exists, so its cost is paid once per run, not per flush.
+  At the flush granularities this project uses (~1MB/30s), Delta commit
+  overhead is per-flush, not per-row. Build `write_batch(table, rows)` with
+  delta-rs preferred and Spark as the real second implementation, selected
+  once at startup — not as an emergency path.
 - **Delta's own conflict rule:** concurrent blind `INSERT`/append operations
   cannot conflict with each other (optimistic concurrency control treats
   disjoint appends as non-overlapping). The one documented exception:

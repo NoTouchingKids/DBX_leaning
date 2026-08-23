@@ -14,15 +14,6 @@ CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
 
 -- Current state, one row per run. The ONLY table the app mutates, and it does
 -- so on a lifecycle transition — never on a timer.
---
--- NOTE: this table is the FALLBACK home for run state. When Lakebase is
--- configured (DBX_LAKEBASE_*), run_status lives in Postgres instead — see
--- lakebase_ddl/001_run_status.sql and app/store.py. It is OLTP-shaped
--- (one row per run, updated constantly, point-looked-up, counted against a
--- ceiling), which Delta is poor at and which costs warehouse uptime to read.
--- This definition stays so a deployment works before Lakebase is provisioned,
--- with two known limitations the Postgres version does not have: no primary
--- key on run_id, and no transaction around the concurrency check.
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_status (
     run_id       STRING  NOT NULL,
     job_run_id   STRING,            -- Databricks' own run id, for reconciliation

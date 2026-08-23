@@ -35,13 +35,13 @@ async def lifespan(app: FastAPI):
 
     await hub.startup()
 
-    if hub.config.reconcile_on_startup and hub.repo is not None and hub.store is not None:
+    if hub.config.reconcile_on_startup and hub.repo is not None:
         # Once, on the way up. A job that started or finished while the app
         # was down is the normal case here — apps run ~8h/day, jobs do not.
         # There is deliberately no periodic version of this.
         jobs = JobsApi(hub.config.workspace_host, hub.config.token)
         try:
-            report = await reconcile_once(hub.repo, jobs, hub.store)
+            report = await reconcile_once(hub.repo, jobs)
             log.info("startup reconciliation: %r", report)
         except Exception:  # noqa: BLE001 - never block startup on this
             log.exception("startup reconciliation failed")

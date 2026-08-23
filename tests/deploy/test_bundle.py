@@ -44,12 +44,7 @@ def jobs() -> dict[str, dict]:
 
 
 def test_there_are_models_to_deploy():
-    """Deliberately not an exact count. Free Edition caps *concurrent* job
-    tasks at 5, not how many models exist — the app enforces the concurrency
-    ceiling and Databricks queues beyond it, so more models than slots is a
-    supported state and the thing the microservice split exists to be tested
-    against."""
-    assert len(MODELS) >= 5, MODELS
+    assert len(MODELS) == 5, MODELS
 
 
 def test_every_model_has_its_own_job_file():
@@ -182,40 +177,3 @@ def test_the_bundle_declares_the_variables_the_resources_use(bundle):
             if f"${{var.{name}}}" in text:
                 used.add(name)
     assert used <= declared, f"undeclared variables used: {sorted(used - declared)}"
-
-
-def test_every_model_on_disk_is_in_the_registry():
-    """pyproject.toml's [tool.dbx-leaning.models] is what both the wheel
-    builder and the requirements exporter read. A package missing from it
-    deploys with the wrong dependencies rather than failing."""
-    import sys
-
-    sys.path.insert(0, str(ROOT / "scripts"))
-    from _registry import discovered_packages, model_extras
-
-    assert set(discovered_packages()) == set(model_extras()), (
-        "models/ and [tool.dbx-leaning.models] disagree"
-    )
-
-
-def test_every_registered_model_has_a_dependency_extra():
-    import sys
-
-    sys.path.insert(0, str(ROOT / "scripts"))
-    import tomllib
-
-    from _registry import model_extras
-
-    with (ROOT / "pyproject.toml").open("rb") as fh:
-        declared = tomllib.load(fh)["project"]["optional-dependencies"]
-    for model, extra in model_extras().items():
-        assert extra in declared, f"{model} names extra {extra!r}, which does not exist"
-
-
-def test_more_models_than_concurrent_slots_is_expected(jobs):
-    """The point of the split: models are cheap to add, slots are not. What
-    must hold is that no single job can exceed the account ceiling on its
-    own — the app enforces the global one."""
-    ceiling = 5
-    for model in MODELS:
-        assert jobs[f"model_{model}"]["max_concurrent_runs"] <= ceiling
