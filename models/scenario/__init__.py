@@ -1,5 +1,5 @@
 """Cheap, deterministic scenario sweep — the fan-out case."""
 
-from .model import DEFAULT_GRID, ScenarioModel, build_model
+from .model import DEFAULT_GRID, Baseline, ScenarioModel, build_model
 
-__all__ = ["ScenarioModel", "build_model", "DEFAULT_GRID"]
+__all__ = ["ScenarioModel", "Baseline", "build_model", "DEFAULT_GRID"]
