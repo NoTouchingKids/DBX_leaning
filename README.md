@@ -51,6 +51,10 @@ app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
 models/                Five model packages. See models/README.md for the
                        duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL, idempotent, apply in order
+databricks.yml         Asset bundle: five jobs (one per model) and the app
+resources/             One job file per model — the microservice boundary
+deploy/                Generated per-model requirements + the deployment guide
+entrypoints/           What a Databricks job actually runs
 frontend/              Not started, on purpose — see frontend/README.md
 tests/                 ~220 tests, none needing a Databricks connection
 scripts/               check_gurobi_licence.py — the bundled-licence expiry
@@ -126,7 +130,12 @@ ingress** — the question that stayed open across all three builds of this
 platform (`docs/spike-results.md`). The transport in `docs/architecture.md` is
 the one being built, not a hopeful guess.
 
-What is **not** done: nothing is deployable yet. There is no `app.yaml`, no
-`databricks.yml` bundle, and no secrets wiring, so `DBX_JOB_IDS`,
-`DATABRICKS_HOST` and `DBX_APP_TOKEN` have no source and the job has no
-defined path onto a cluster. That is the next piece of work.
+Deployment exists as an Asset Bundle — five jobs, one per model, each with
+its own serverless environment and dependency list exported from `uv.lock`.
+See `deploy/README.md`.
+
+What is **not** done: `databricks bundle deploy` has never actually been run
+against a workspace from here. The bundle validates against the CLI's schema
+and every contract it shares with the application code is tested, but
+validation is not deployment. There is also no CI — nothing runs the suite on
+a push.

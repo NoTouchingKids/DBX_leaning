@@ -133,9 +133,31 @@ shared/         The message envelope + protocol helpers, imported by both
                 they're handed — models never import shared/ directly)
 frontend/       React SPA (back burner until app/job/one model works)
 uc_ddl/         Unity Catalog DDL
+entrypoints/    What a Databricks job runs (workspace-file sync, not a wheel)
+resources/      One job definition per model — see below
+deploy/         Generated per-model requirements, and the deployment guide
 docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
+
+## Deployment shape: a model is a microservice
+
+**One job per model**, each with its own serverless environment and its own
+dependency list. The MCMC job does not carry gurobipy; a model that later
+needs GPU compute changes `resources/model_<name>.job.yml` and nothing else.
+The job files repeat a little YAML rather than sharing an anchor — that
+duplication is what lets them diverge.
+
+- **Code travels by workspace file sync**, not as a wheel, for now. Moving to
+  a wheel changes the task definition and nothing else.
+- **Dependencies are exported from `uv.lock`** by
+  `scripts/export_requirements.py`, never re-resolved — what deploys is what
+  the tests ran against, and `tests/deploy/` fails if that stops being true.
+- **Job parameters are a contract with `app/routes/runs.py`.** Databricks
+  rejects a `run-now` parameter a job has not declared, so both sides are
+  pinned to `JOB_PARAMETER_NAMES` and tested against each other.
+
+Full procedure: `deploy/README.md`.
 
 ## How to work in this repo
 

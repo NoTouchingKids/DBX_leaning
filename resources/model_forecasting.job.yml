@@ -1,0 +1,70 @@
+# Job: models.forecasting
+#
+# Self-contained on purpose. This file owns the model's environment, its
+# dependency list and its compute — change any of them here without touching
+# another model. CPU only today. A GPU variant would change this file's environment spec alone.
+
+resources:
+  jobs:
+    model_forecasting:
+      name: "[${bundle.target}] dbx-leaning · forecasting"
+      description: >-
+        Runs models.forecasting through the job harness. Autonomous: it does not
+        need the app to be up, and writes durably either way.
+
+      # The account ceiling is 5 concurrent job TASKS across ALL models
+      # combined, which Databricks has no way to express per-job — so the app
+      # enforces it globally before triggering (app/routes/runs.py) and this
+      # only bounds this one model.
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      queue:
+        enabled: true
+
+      tags:
+        project: dbx-leaning
+        model: forecasting
+
+      # Declared so run-now can set them. The trigger endpoint sends exactly
+      # these names; tests/deploy/test_bundle.py fails if the two drift.
+      parameters:
+        - name: DBX_RUN_ID
+          default: ""
+        - name: DBX_MODEL
+          default: models.forecasting
+        - name: DBX_MODEL_CONFIG
+          default: "{}"
+        - name: DBX_CATALOG
+          default: ${var.catalog}
+        - name: DBX_SCHEMA
+          default: ${var.schema}
+        - name: DBX_APP_URL
+          default: ${var.app_public_url}
+        - name: DBX_APP_TOKEN
+          default: ""
+
+      environments:
+        - environment_key: forecasting
+          spec:
+            client: "3"
+            # Exported from uv.lock — what deploys is what the tests ran
+            # against. Regenerate with scripts/export_requirements.py.
+            dependencies:
+              - -r ${workspace.file_path}/deploy/requirements/forecasting.txt
+
+      tasks:
+        - task_key: run
+          environment_key: forecasting
+          spark_python_task:
+            python_file: ${workspace.file_path}/entrypoints/run_model.py
+            source: WORKSPACE
+            # Serverless tasks have no spark_env_vars, so parameters travel as
+            # KEY=VALUE arguments and the entrypoint exports them.
+            parameters:
+              - DBX_RUN_ID={{job.parameters.DBX_RUN_ID}}
+              - DBX_MODEL={{job.parameters.DBX_MODEL}}
+              - DBX_MODEL_CONFIG={{job.parameters.DBX_MODEL_CONFIG}}
+              - DBX_CATALOG={{job.parameters.DBX_CATALOG}}
+              - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
+              - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
+              - DBX_APP_TOKEN={{job.parameters.DBX_APP_TOKEN}}
