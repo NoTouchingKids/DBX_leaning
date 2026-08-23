@@ -101,6 +101,13 @@ gurobi_scheduling = "gurobi"
 scenario = "scenario"
 forecasting = "forecasting"
 mcmc = "mcmc"
+# Reuses the [mcmc] extra rather than adding one: this model is conjugate
+# arithmetic with math.lgamma and a single numpy convolution, so it needs a
+# strict subset of what mcmc already carries (numpy; not emcee). A separate
+# numpy-only extra would be a third copy of the same pin to keep in step.
+bayesian_ab = "mcmc"
+# The heavy one: torch, and only this job carries it.
+neural_net = "nn"
 streaming_results = "streaming"
 # Maps to an intentionally empty extra — see the note above it.
 annealing = "annealing"
