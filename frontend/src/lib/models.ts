@@ -76,8 +76,20 @@ export const GUROBI_SCHEDULING: ModelSpec = {
 
 /** From `job/drivers/gurobi.py`, sampled every ~2s during the MIP phase. */
 export interface GurobiProgressPayload {
-  best_bound: number;
-  incumbent: number;
+  /**
+   * NULLABLE, both of them. `job/drivers/gurobi.py::_real_or_none` maps
+   * Gurobi's ±1e100 pre-incumbent sentinel to `None`, which arrives as JSON
+   * null — so every message before the first feasible solution has
+   * `incumbent: null`, and `best_bound` is null until the root relaxation
+   * solves.
+   *
+   * They were declared non-null here, which is the kind of error that does
+   * not throw: a chart trusting it plots null as 0 and drags the objective
+   * axis to the origin for the whole run. Filter with a finite check and let
+   * the pre-feasible stretch be a gap.
+   */
+  best_bound: number | null;
+  incumbent: number | null;
   nodes_explored: number;
   nodes_remaining: number;
   solution_count: number;
@@ -213,14 +225,23 @@ export interface McmcProgressPayload {
    *  not exploring. The single most diagnostic number on this page. */
   stuck_chains: number;
   per_chain_acceptance: number[];
+  /**
+   * Each chain's current position, as one list of parameter values per chain
+   * in `parameters` order. This is what the live trace chart is drawn from.
+   *
+   * Capped at `models/mcmc/model.py::MAX_TRACE_CHAINS` (32) so a
+   * high-walker configuration cannot turn every progress message into a
+   * large payload; `chain_positions_truncated` says whether that happened,
+   * and a view must report it rather than quietly plotting a subset.
+   *
+   * This field is the model-side extension that the design note recorded as
+   * outstanding. It has landed — the note is stale.
+   */
+  chain_positions: number[][];
+  chain_positions_truncated: boolean;
 }
 /** `primary_metric` is `max_rhat`, and it is null whenever rhat is
- *  non-finite — a real value, not a loading state.
- *
- *  NOTE: there are NO per-chain (mu, log_sigma) positions in this payload
- *  today. The "live trace" chart in the design REQUIRES a bounded model-side
- *  extension (one extra payload field) that has not been implemented. Build
- *  the chain-health bars first; the trace chart is blocked on backend work. */
+ *  non-finite — a real value, not a loading state. */
 
 /* ================================================================== *
  * scenario
@@ -455,8 +476,17 @@ export interface BayesianAbArmSummary {
   label: string;
   trials: number;
   successes: number;
-  /** Null until the `posteriors` stage has run for this arm. With these two
-   *  and the prior, a view can redraw both densities with no round trip. */
+  /**
+   * Null before the `posteriors` stage has run for this arm. In practice
+   * that means the RESULT ROWS only: `_progress` is called after
+   * `stages_done = index`, i.e. after `_stage_posteriors`, so the arms on a
+   * progress message are already fitted from stage 1 onward. Kept nullable
+   * because the result path is real and because a stage-0 message would have
+   * it null.
+   *
+   * With these two and the prior, a view can redraw both densities with no
+   * round trip.
+   */
   posterior_alpha: number | null;
   posterior_beta: number | null;
   posterior_mean: number | null;
@@ -500,8 +530,17 @@ export interface BayesianAbProgressPayload {
  *  done as the normal case.
  *
  *  `decision` is one of the two arm LABELS (e.g. "weekend_hours") or the
- *  string "inconclusive" — not "A"/"B", and not a boolean. An arm can lead
- *  without being conclusive; both numbers have to be shown. */
+ *  string "inconclusive" — not "A"/"B", and not a boolean.
+ *
+ *  CORRECTED: this said "an arm can lead without being conclusive". True of
+ *  the underlying state, but the payload collapses it. `_stage_decision`
+ *  sets `decision` to the leader's label only when `conclusive`, so a
+ *  leading-but-lossy arm reports "inconclusive" and `decision !=
+ *  "inconclusive"` implies `conclusive === true`. Worse, neither
+ *  `decision_threshold` nor `loss_tolerance` reaches the payload OR the
+ *  result rows, so a view cannot recover which arm was leading in that case
+ *  — show P(B>A), both expected losses and the lift instead of inventing a
+ *  leader. */
 
 /* ================================================================== *
  * neural_net
