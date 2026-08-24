@@ -1,15 +1,28 @@
 """``write_batch(table, rows)`` — one interface, chosen once at startup.
 
-delta-rs preferred, Spark the real second implementation (not an emergency
-path: on Databricks serverless a Spark session already exists, so its cost is
-paid once per run, not per flush). Nothing outside this module branches on
-which one is in use.
+**Spark is the implementation. delta-rs is the target, and is not built.**
 
-Cloud caveat carried over from ``docs/free-edition-constraints.md``: delta-rs
-writing to **S3** needs a locking provider for safe concurrent writers.
-Concurrent blind appends cannot conflict at the Delta protocol level, so this
-only bites on S3 — check the workspace's cloud before relying on several jobs
-appending to one table through delta-rs.
+That is a reversal of the original design, forced by how delta-rs actually
+behaves. ``write_deltalake()`` takes a *path or URI*, not a Unity Catalog
+name — and handed ``"main.dbx_leaning.run_logs"`` it does not raise. It
+creates a local directory with that literal name and writes there. On a
+deployed job that means every log, progress point and result lands in the
+container's ephemeral filesystem and disappears with it, while the run
+reports SUCCEEDED with an accurate-looking ``row_count``.
+
+That is the worst failure this codebase can have: it defeats the "SUCCEEDED
+is impossible over a lost write" rule in ``job/runner.py``, because from the
+writer's point of view nothing failed. So ``DeltaRsWriter`` now refuses to
+run rather than doing that quietly.
+
+Making it real needs a storage URI plus Unity Catalog credential vending —
+see ``docs/free-edition-constraints.md``. Until then Spark is not a fallback,
+it is the write path, and it is a legitimate one: on serverless a session
+already exists, so the cost is paid once per run rather than per flush.
+
+Cloud caveat for whoever does build it: delta-rs writing to **S3** needs a
+locking provider for safe concurrent writers. Concurrent blind appends cannot
+conflict at the Delta protocol level, so this only bites on S3.
 """
 
 from __future__ import annotations
@@ -23,7 +36,14 @@ from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
 
-__all__ = ["BatchWriter", "DeltaRsWriter", "SparkWriter", "JsonlWriter", "select_writer"]
+__all__ = [
+    "BatchWriter",
+    "DeltaRsWriter",
+    "SparkWriter",
+    "JsonlWriter",
+    "select_writer",
+    "DELTA_RS_UNIMPLEMENTED",
+]
 
 
 @runtime_checkable
@@ -38,30 +58,34 @@ class BatchWriter(Protocol):
     def close(self) -> None: ...
 
 
+#: What a caller has to supply before delta-rs can be built for real.
+DELTA_RS_UNIMPLEMENTED = (
+    "the delta-rs writer is not implemented. write_deltalake() takes a storage "
+    "URI, not a Unity Catalog name — given a three-part name it silently writes "
+    "to a local directory of that name, so a deployed run would report SUCCEEDED "
+    "while its telemetry went nowhere. Building it needs a table location plus UC "
+    "credential vending. Use the Spark writer (DBX_WRITER=spark, or auto)."
+)
+
+
 class DeltaRsWriter:
-    """Preferred. Writes straight to the table's storage location."""
+    """The intended implementation. Deliberately not built — see the module
+    docstring, and ``DELTA_RS_UNIMPLEMENTED`` for what it would need.
+
+    Kept as a named class rather than deleted so the interface it is meant to
+    satisfy stays visible, and so ``DBX_WRITER=delta-rs`` fails with a reason
+    instead of an unknown-writer error.
+    """
 
     name = "delta-rs"
 
     def __init__(self, *, storage_options: dict[str, str] | None = None) -> None:
-        from deltalake import write_deltalake  # noqa: F401  (import = availability check)
-
-        self._storage_options = storage_options or {}
-        self._lock = threading.Lock()
+        raise NotImplementedError(DELTA_RS_UNIMPLEMENTED)
 
     def write_batch(self, table: str, rows: list[dict[str, Any]]) -> int:
-        if not rows:
-            return 0
-        import pyarrow as pa
-        from deltalake import write_deltalake
+        raise NotImplementedError(DELTA_RS_UNIMPLEMENTED)
 
-        batch = pa.Table.from_pylist(rows)
-        options = {"storage_options": self._storage_options} if self._storage_options else {}
-        with self._lock:
-            write_deltalake(table, batch, mode="append", schema_mode="merge", **options)
-        return len(rows)
-
-    def close(self) -> None:  # nothing to release
+    def close(self) -> None:
         return None
 
 
@@ -137,28 +161,22 @@ class JsonlWriter:
 def select_writer(kind: str = "auto", *, local_root: str = ".delta-local") -> BatchWriter:
     """Pick the implementation once, at process start.
 
-    ``auto`` prefers delta-rs, falls back to Spark, and only then to local
-    JSONL — which is a development convenience and says so loudly, because
-    silently writing a production run's telemetry to a local file that the
-    container throws away would be worse than failing.
+    ``auto`` means Spark, then local JSONL — which is a development
+    convenience and says so loudly, because silently writing a production
+    run's telemetry to a local file the container throws away would be worse
+    than failing. delta-rs is skipped: it is not implemented, and picking it
+    automatically is exactly how the silent-local-write bug would return.
     """
     kind = (kind or "auto").lower()
 
     if kind == "delta-rs":
-        return DeltaRsWriter()
+        return DeltaRsWriter()  # raises NotImplementedError, with the reason
     if kind == "spark":
         return SparkWriter()
     if kind == "jsonl":
         return JsonlWriter(local_root)
     if kind != "auto":
         raise ValueError(f"unknown writer {kind!r}; expected auto|delta-rs|spark|jsonl")
-
-    try:
-        writer = DeltaRsWriter()
-        log.info("durable writer: delta-rs")
-        return writer
-    except Exception as exc:  # noqa: BLE001 - any import/runtime problem means "not available"
-        log.info("delta-rs unavailable (%s), trying Spark", exc)
 
     try:
         writer = SparkWriter()
@@ -175,7 +193,8 @@ def select_writer(kind: str = "auto", *, local_root: str = ".delta-local") -> Ba
         return JsonlWriter(local_root)
 
     raise RuntimeError(
-        "no durable writer available: delta-rs is not importable and there is no "
-        "active Spark session. Install the [delta] extra, run on a cluster with "
-        "Spark, or set DBX_ALLOW_LOCAL_WRITER=1 to write local JSONL for development."
+        "no durable writer available: there is no active Spark session, and "
+        "delta-rs is not implemented (see DELTA_RS_UNIMPLEMENTED). Run on a "
+        "cluster with Spark, or set DBX_ALLOW_LOCAL_WRITER=1 to write local "
+        "JSONL for development."
     )

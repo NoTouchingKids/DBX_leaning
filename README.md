@@ -50,7 +50,8 @@ app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
                        backfill, startup reconciliation, ServiceHub/DI
 models/                Five model packages. See models/README.md for the
                        duck-typed contract a model has to satisfy.
-uc_ddl/                Unity Catalog DDL, idempotent, apply in order
+uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
+lakebase_ddl/          Postgres DDL (run state) — applied at startup too
 databricks.yml         Asset bundle: five jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
@@ -112,10 +113,12 @@ because the Databricks runtime provides it.
 | `GET /api/runs/{id}` | One run's current state |
 | `GET /api/runs/{id}/stream` | SSE. `id:` is the message `seq`, so `EventSource`'s own `Last-Event-ID` resume works unmodified |
 | `GET /api/runs/{id}/messages` | Explicit backfill from Unity Catalog, client-triggered, paged by seq |
+| `GET /api/runs/{id}/results` | The full result set a `result` message only previews — the table its `fetch_hint` points at, paged |
 | `POST /api/runs/{id}/cancel` | Forwards over the job's WebSocket, or 409s naming the CLI escape hatch |
 | `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `models/` |
 | `WS /ws/job/{id}` | The job's ingress, and the only inbound path to a running job |
 | `POST /api/runs/{id}/push` | One-way HTTP fallback ingress |
+| `GET /api/schema` | The wire protocol as JSON Schema — generate the client's types from this |
 | `GET /api/whoami`, `GET /healthz` | Cosmetic identity; health with per-service degradation |
 
 Triggering needs `DBX_JOB_IDS` (a JSON map of model name to Databricks job

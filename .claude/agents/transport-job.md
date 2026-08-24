@@ -75,7 +75,9 @@ or subtly broken.
 
 4. **Durable channel — always, regardless of live channel state.**
    - Write via one `write_batch(table, rows)` interface with two
-     implementations: delta-rs (preferred) and Spark (fallback), selected
+     implementations: Spark (the one that works) and delta-rs (the target,
+     currently raising NotImplementedError — it cannot address a UC table by
+     name and writes to a local directory instead of failing), selected
      once at process start based on what's importable/working in the
      environment. Do not branch on implementation anywhere else in the code.
    - Flush on **whichever comes first**: buffered size ≥ 1 MB (configurable),

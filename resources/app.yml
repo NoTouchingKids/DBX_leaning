@@ -53,9 +53,13 @@ resources:
           - name: DBX_JOB_IDS
             value: >-
               {"gurobi_scheduling": ${resources.jobs.model_gurobi_scheduling.id},
+               "gurobi_routing": ${resources.jobs.model_gurobi_routing.id},
                "scenario": ${resources.jobs.model_scenario.id},
                "forecasting": ${resources.jobs.model_forecasting.id},
                "mcmc": ${resources.jobs.model_mcmc.id},
+               "bayesian_ab": ${resources.jobs.model_bayesian_ab.id},
+               "annealing": ${resources.jobs.model_annealing.id},
+               "neural_net": ${resources.jobs.model_neural_net.id},
                "streaming_results": ${resources.jobs.model_streaming_results.id}}
 
           # Where a job should attach. Empty until the app has a URL — jobs

@@ -1,0 +1,313 @@
+{
+  "$defs": {
+    "LogLevel": {
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR"
+      ],
+      "title": "LogLevel",
+      "type": "string"
+    },
+    "LogMessage": {
+      "additionalProperties": false,
+      "description": "Best-effort. May be dropped on the live path; never on the durable one.",
+      "properties": {
+        "client_visible": {
+          "default": true,
+          "title": "Client Visible",
+          "type": "boolean"
+        },
+        "level": {
+          "$ref": "#/$defs/LogLevel",
+          "default": "INFO"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "phase": {
+          "default": "run",
+          "title": "Phase",
+          "type": "string"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 0,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "source": {
+          "default": "model",
+          "title": "Source",
+          "type": "string"
+        },
+        "ts": {
+          "description": "epoch milliseconds",
+          "minimum": 0,
+          "title": "Ts",
+          "type": "integer"
+        },
+        "type": {
+          "const": "log",
+          "default": "log",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "seq",
+        "ts",
+        "message"
+      ],
+      "title": "LogMessage",
+      "type": "object"
+    },
+    "ProgressMessage": {
+      "additionalProperties": false,
+      "description": "One sampled point on \"how is this run doing\". Sampled, not per-iteration.",
+      "properties": {
+        "elapsed_seconds": {
+          "minimum": 0,
+          "title": "Elapsed Seconds",
+          "type": "number"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "percent_complete": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Percent Complete"
+        },
+        "primary_metric": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Metric"
+        },
+        "primary_metric_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Metric Label"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 0,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "ts": {
+          "description": "epoch milliseconds",
+          "minimum": 0,
+          "title": "Ts",
+          "type": "integer"
+        },
+        "type": {
+          "const": "progress",
+          "default": "progress",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "seq",
+        "ts",
+        "elapsed_seconds"
+      ],
+      "title": "ProgressMessage",
+      "type": "object"
+    },
+    "ResultMessage": {
+      "additionalProperties": false,
+      "description": "Not best-effort. Written whenever the model reaches results, whatever\nthe terminal status turns out to be.\n\nCarries a pointer and a preview, never the result set itself: the full\ndata lives in the model's own UC table, governed by its own grants.",
+      "properties": {
+        "chunk_index": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "fetch_hint": {
+          "additionalProperties": true,
+          "title": "Fetch Hint",
+          "type": "object"
+        },
+        "final": {
+          "default": true,
+          "title": "Final",
+          "type": "boolean"
+        },
+        "preview": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Preview",
+          "type": "array"
+        },
+        "row_count": {
+          "minimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 0,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "ts": {
+          "description": "epoch milliseconds",
+          "minimum": 0,
+          "title": "Ts",
+          "type": "integer"
+        },
+        "type": {
+          "const": "result",
+          "default": "result",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "seq",
+        "ts",
+        "row_count"
+      ],
+      "title": "ResultMessage",
+      "type": "object"
+    },
+    "RunStatus": {
+      "enum": [
+        "QUEUED",
+        "RUNNING",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "INFEASIBLE"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "StatusMessage": {
+      "additionalProperties": false,
+      "description": "A lifecycle transition \u2014 a notification, not the record of truth.\n\nThe record of truth is the ``run_status`` row; this announces a change to\nit. See ``docs/architecture.md``.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 0,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus"
+        },
+        "ts": {
+          "description": "epoch milliseconds",
+          "minimum": 0,
+          "title": "Ts",
+          "type": "integer"
+        },
+        "type": {
+          "const": "status",
+          "default": "status",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "seq",
+        "ts",
+        "status"
+      ],
+      "title": "StatusMessage",
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/NoTouchingKids/DBX_leaning/schema/envelope.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Everything a run produces: log, progress, status, result. One shape, discriminated on `type`, identical over WebSocket, HTTP push and Delta. Generated from shared/envelope.py \u2014 do not edit by hand.",
+  "discriminator": {
+    "mapping": {
+      "log": "#/$defs/LogMessage",
+      "progress": "#/$defs/ProgressMessage",
+      "result": "#/$defs/ResultMessage",
+      "status": "#/$defs/StatusMessage"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/LogMessage"
+    },
+    {
+      "$ref": "#/$defs/ProgressMessage"
+    },
+    {
+      "$ref": "#/$defs/StatusMessage"
+    },
+    {
+      "$ref": "#/$defs/ResultMessage"
+    }
+  ],
+  "title": "DBX_leaning run message envelope",
+  "x-schema-version": "1.0.0"
+}
