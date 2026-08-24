@@ -511,6 +511,23 @@ export interface BayesianAbProgressPayload {
  *  order, so a result row's `class_index` joins to this without a lookup. */
 export const NEURAL_NET_CLASS_LABELS = ["fast", "typical", "congested"] as const;
 
+/**
+ * `models/neural_net/model.py::FEATURE_NAMES` — the network's input layer, in
+ * order. Four basis transforms of ONE column, `trip_distance`; the width of
+ * the input layer is therefore a fixed property of the model, unlike the
+ * hidden widths, which are config and never reach the payload.
+ *
+ * Mirrored here because a view that draws the architecture would otherwise
+ * hardcode the number 4 with a comment pointing at Python, which is the same
+ * drift this file exists to prevent — just smaller.
+ */
+export const NEURAL_NET_FEATURE_NAMES = [
+  "distance",
+  "log1p_distance",
+  "sqrt_distance",
+  "inv_distance",
+] as const;
+
 export const NEURAL_NET: ModelSpec = {
   name: "neural_net",
   label: "Neural net",

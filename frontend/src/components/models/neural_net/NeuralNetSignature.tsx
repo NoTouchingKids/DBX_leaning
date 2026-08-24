@@ -29,7 +29,7 @@
  */
 
 import type { UiRunState } from "@/lib/envelope";
-import { NEURAL_NET_CLASS_LABELS } from "@/lib/models";
+import { NEURAL_NET_CLASS_LABELS, NEURAL_NET_FEATURE_NAMES } from "@/lib/models";
 import { isAnimating, isSettled, type ModelViewProps } from "../contract";
 import { usePrefersReducedMotion } from "../useReducedMotion";
 import { trainingSummary } from "./series";
@@ -44,13 +44,14 @@ function spread(count: number): number[] {
 }
 
 /**
- * 4 in, 3 out are real: `FEATURE_NAMES` and `CLASS_LABELS` in
- * `models/neural_net/model.py` are fixed-length tuples. The 6 and 5 are a
- * sketch — the default `hidden` is [32, 16], which cannot be drawn, and the
- * actual widths are config the payload never carries.
+ * The outer two layers are real: `FEATURE_NAMES` and `CLASS_LABELS` in
+ * `models/neural_net/model.py` are fixed-length tuples, mirrored in
+ * `@/lib/models` so the counts here are derived rather than retyped. The 6
+ * and 5 are a sketch — the default `hidden` is [32, 16], which cannot be
+ * drawn, and the actual widths are config the payload never carries.
  */
 const LAYERS: readonly { x: number; ys: number[]; real: boolean }[] = [
-  { x: 30, ys: spread(4), real: true },
+  { x: 30, ys: spread(NEURAL_NET_FEATURE_NAMES.length), real: true },
   { x: 126, ys: spread(6), real: false },
   { x: 222, ys: spread(5), real: false },
   { x: 316, ys: spread(NEURAL_NET_CLASS_LABELS.length), real: true },
