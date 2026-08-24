@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,6 +11,7 @@ from app.jobs_api import JobsApi
 from app.reconcile import reconcile_once
 from app.repository import RunRepository
 from app.sql import SqlClient
+from shared.envelope import RunStatus
 from shared.tables import TableSet
 
 from .conftest import FakeHttp, statement_response
@@ -106,6 +109,67 @@ async def test_a_cancelled_databricks_run_maps_to_cancelled_not_failed():
     )
     report = await reconcile_once(repo, JobsApi("https://x", "t", client=http), store_for(repo))
     assert report.corrected == [("r1", "CANCELLED")]
+
+
+class MemoryStore:
+    """A run store with no warehouse behind it — i.e. Lakebase.
+
+    Reconciliation used to require a `RunRepository`, which requires the SQL
+    warehouse. `run_status` now lives in Postgres, so this is the shape of a
+    real deploy, not a test convenience.
+    """
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+        self.set: list[tuple[str, RunStatus, str | None]] = []
+
+    async def non_terminal(self):
+        return [SimpleNamespace(as_dict=lambda r=r: r) for r in self.rows]
+
+    async def set_status(self, run_id, status, detail=None):
+        self.set.append((run_id, status, detail))
+
+
+async def test_reconciliation_works_with_no_warehouse_at_all():
+    """The configuration this platform actually recommends.
+
+    Gating startup reconciliation on the warehouse repository — which it needs
+    only to *sharpen* an answer, never to reach one — meant a Postgres-backed
+    deploy with no warehouse silently never reconciled. Every job that died
+    before emitting a status then held one of five account-wide task slots
+    permanently, so five bad configs finished the platform with no recovery
+    short of editing the table by hand.
+    """
+    store = MemoryStore([{"run_id": "r-dead", "job_run_id": "77", "status": "RUNNING"}])
+    http = FakeHttp(
+        {"status": {"state": "TERMINATED", "termination_details": {"code": "USER_CANCELED"}}}
+    )
+    jobs = JobsApi("https://ws.example.com", "tok", client=http)
+
+    report = await reconcile_once(repo=None, jobs=jobs, store=store)
+
+    assert report.checked == 1
+    # USER_CANCELED, not CANCELED: this is the code `databricks jobs
+    # cancel-run` produces, i.e. the escape hatch the app itself tells users
+    # to use when there is no live channel. It was unmapped, so the documented
+    # recovery path reconciled a deliberate cancellation as a failure.
+    assert report.corrected == [("r-dead", "CANCELLED")]
+    assert store.set == [("r-dead", RunStatus.CANCELLED, store.set[0][2])]
+
+
+async def test_without_a_warehouse_an_unplaceable_run_is_still_left_alone():
+    """No warehouse and no answer is not licence to guess.
+
+    The job is autonomous and does not need this app to be up, so a run the
+    Jobs API reports as running is running.
+    """
+    store = MemoryStore([{"run_id": "r-live", "job_run_id": "88", "status": "RUNNING"}])
+    jobs = JobsApi("https://x", "t", client=FakeHttp({"status": {"state": "RUNNING"}}))
+
+    report = await reconcile_once(repo=None, jobs=jobs, store=store)
+
+    assert report.still_running == ["r-live"]
+    assert store.set == []
 
 
 async def test_reconciliation_never_blocks_startup_when_the_read_path_is_broken():

@@ -33,6 +33,14 @@ _RESULT_STATE = {
     "TIMEDOUT": "FAILED",
     "CANCELED": "CANCELLED",
     "CANCELLED": "CANCELLED",
+    # `termination_details.code` uses these where `result_state` says
+    # CANCELED, and this is not a hypothetical spelling: it is what
+    # `databricks jobs cancel-run` produces — the escape hatch
+    # `app/routes/runs.py::CANCEL_ESCAPE_HATCH` tells users to reach for when
+    # there is no live channel. Unmapped, it fell through the `.get` default
+    # and reconciliation recorded a deliberate cancellation as a FAILED run.
+    "USER_CANCELED": "CANCELLED",
+    "USER_CANCELLED": "CANCELLED",
     "MAXIMUM_CONCURRENT_RUNS_REACHED": "FAILED",
     "EXCLUDED": "FAILED",
     "UPSTREAM_FAILED": "FAILED",

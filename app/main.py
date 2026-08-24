@@ -36,10 +36,19 @@ async def lifespan(app: FastAPI):
 
     await hub.startup()
 
-    if hub.config.reconcile_on_startup and hub.repo is not None and hub.store is not None:
+    if hub.config.reconcile_on_startup and hub.store is not None:
         # Once, on the way up. A job that started or finished while the app
         # was down is the normal case here — apps run ~8h/day, jobs do not.
         # There is deliberately no periodic version of this.
+        #
+        # Gated on `store`, NOT on `repo`. It was gated on `repo` when
+        # `run_status` lived in the warehouse; after the move to Lakebase that
+        # left a deploy with Postgres and no warehouse — the recommended
+        # shape — silently never reconciling. Every job that died before
+        # emitting a status then held one of five account-wide slots forever,
+        # so five bad configs took the platform down with no way back short
+        # of editing the table by hand. `repo` is now optional and only
+        # sharpens the answer.
         jobs = JobsApi(hub.config.workspace_host, hub.config.token)
         try:
             report = await reconcile_once(hub.repo, jobs, hub.store)
