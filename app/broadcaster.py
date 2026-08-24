@@ -52,7 +52,17 @@ class RunSnapshot:
             self.progress = msg
 
     def messages(self) -> list[Message]:
-        return [m for m in (self.status, self.progress) if m is not None]
+        """In seq order, which is not the same as (status, progress) order.
+
+        The last ``id:`` a browser reads is the one it sends back as
+        ``Last-Event-ID``, and the spec says last, not highest. At the end of
+        a run the terminal status has the *higher* seq than the final progress
+        point, so emitting status first left the client's cursor one message
+        behind where it actually was — and every reconnect and backfill
+        ``after_seq`` is computed from that cursor.
+        """
+        latest = (m for m in (self.status, self.progress) if m is not None)
+        return sorted(latest, key=lambda m: m.seq)
 
     @property
     def terminal(self) -> bool:
