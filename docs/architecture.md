@@ -122,6 +122,20 @@ connection failures*, resetting to zero on every successful reconnect — a
 naive "stop after 3 tries" would kill a perfectly healthy stream a few
 minutes in, if the ingress does in fact cut connections periodically.
 
+This is built, and it landed with one correction to the reasoning above. A
+gap is not only "records that have not arrived yet": the live path never
+sends `client_visible=false` logs and the backfill endpoint filters them out
+too, so some holes are **permanent by design**, and a client that loops
+"backfill until contiguous" spins forever. So gaps are reported and never
+acted on automatically. `frontend/src/transport/hub.ts` owns the
+consecutive-failure counter (capped at 10, reset on every successful open)
+and the gap detection; `frontend/src/hooks/useApi.ts` has the two fetch
+shapes the argument above asks for — `useTerminalHistory`, the one automatic
+fetch a finished run gets, cached for the session because a finished run is
+immutable, and `useFetchGap`, the user-triggered one. Neither is on a timer,
+and React Query is configured `refetchInterval: false` for the same
+warehouse-uptime reason the write path avoids the warehouse.
+
 ## Why Gurobi uses the bundled licence, not WLS
 
 This project only needs Gurobi to prove the platform's transport and message
@@ -134,16 +148,65 @@ scheduling model with genuine branch-and-bound behaviour to stream. See
 `docs/free-edition-constraints.md` for the licence-expiry gotcha that comes
 with this choice.
 
-## What's still unverified
+## Why Spark writes Delta, and delta-rs does not
 
-The two things this design can't get right by reasoning alone — they need to
-actually be run against the platform:
+This one changed shape after it was designed, and the change is worth
+recording because the original reasoning was sound and the conclusion was
+still wrong.
+
+The intent was delta-rs (`deltalake`) as the writer, with Spark as the
+fallback — a small pure-Python dependency in preference to standing up a
+Spark session in every job. What was missed is that `write_deltalake()` takes
+a *path or storage URI*, not a Unity Catalog table name, and handed a
+three-part name like `"main.dbx_leaning.run_logs"` it does not raise. It
+creates a local directory with that literal name and writes there. Verified
+2026-08-23. A job doing that would report `SUCCEEDED` with an accurate
+`row_count` while its telemetry sat in a container filesystem about to
+disappear. That is the exact failure this platform's durability rules exist
+to prevent, delivered by the component whose job was to guarantee against
+it — and it would have been silent.
+
+So the positions swap. **Spark is the write path, not a fallback**: on
+Databricks serverless a session already exists, so its cost is paid once per
+run rather than per flush, and at ~1MB/30s flush granularity Delta commit
+overhead is per-flush anyway. `DeltaRsWriter` is kept as a named class so the
+interface it is meant to satisfy stays visible, and it raises
+`NotImplementedError` with the reason rather than doing the quiet thing;
+`select_writer("auto")` never picks it. Making it real needs the table
+resolved to a storage location and credentials obtained via Unity Catalog
+credential vending — see `job/delta.py`. A third implementation, `JsonlWriter`,
+exists so the whole harness can be exercised with no Databricks connection at
+all — which is what makes "the app is down and the job runs anyway" a
+testable property rather than an aspiration. `auto` will only fall back to it
+when `DBX_ALLOW_LOCAL_WRITER=1` is set, and otherwise raises: silently
+writing a real run's telemetry to a file the container throws away is worse
+than failing.
+
+## What was unverified, and what still is
+
+Two things this design couldn't get right by reasoning alone needed to be run
+against the platform, and they gated everything else:
 
 1. **Does the Databricks Apps ingress pass a WebSocket `Upgrade` and hold it
    idle?** (`/spike-ws`)
 2. **Does the ingress buffer or cut an SSE stream, and at what duration?**
    (`/spike-sse`)
 
+**Both are answered: yes and yes**, confirmed against a real workspace on
+2026-08-23 — see `docs/spike-results.md`. That is the question that stayed
+open across all three builds of this platform, and it is now closed. The
+transport above is the one being built, not a hopeful guess.
+
+What is still *not* measured is the numbers, and they matter to specific code:
+whether the ingress cuts a long-lived stream and at what elapsed time, whether
+an idle connection goes sooner than an active one, and whether SSE events
+arrive promptly or in held-and-released batches. `DBX_WS_PING_S` (20s) and
+`DBX_SSE_KEEPALIVE_S` (10s) are conservative guesses from community reports
+until those land. `docs/spike-results.md` has the table to fill in.
+
 Everything else in this design has a documented fallback if it doesn't pan
-out (delta-rs → Spark, VARIANT → JSON string, Granian/HTTP2 → uvicorn/HTTP1).
-These two don't — they're why the probes come before any other building.
+out (VARIANT → a JSON string column, and the whole live path → Delta alone).
+The one fallback that inverted itself is the Delta writer: delta-rs was the
+intended implementation with Spark as the fallback, and it turned out
+delta-rs cannot address a Unity Catalog table by name at all — see the next
+section.

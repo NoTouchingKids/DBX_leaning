@@ -76,7 +76,11 @@ self.emit("result", rows=[{"t": 0, "value": 1.2}, ...])
 - `emit` is safe to call from whatever thread your blocking call runs on.
 - Emitting `status` is the harness's job, not yours. Return a status string
   from your `run()` if you need to say something it could not infer
-  (`"INFEASIBLE"`).
+  (`"INFEASIBLE"`). It has to be a real `RunStatus` member — anything else
+  you return is treated as a *detail* string on a `SUCCEEDED` run, not as a
+  status, so a typo degrades quietly rather than failing
+  (`job/drivers/self_driving.py`). A cancelled run overrides whatever you
+  returned: cancellation is decided by the harness, not by you.
 
 ### Results
 
@@ -101,17 +105,32 @@ Free Edition ships Databricks' `samples` catalog, and `models/_data` reads it
 — falling back to a deterministic generator when there is no workspace, so
 your model and its tests run anywhere.
 
-```python
-from models._data import nyc_taxi_hourly
+There are two loaders, both over `samples.nyctaxi.trips`, and both return a
+`Dataset`:
 
-data = nyc_taxi_hourly(days=60)      # Dataset
-data.rows                             # list[dict]: hour_ts (epoch ms), trips, avg_fare, avg_distance
+```python
+from models._data import epoch_ms, nyc_taxi_hourly, nyc_taxi_trips
+
+data = nyc_taxi_hourly(days=60)      # hour_ts (epoch ms), trips, avg_fare, avg_distance
+data = nyc_taxi_trips(limit=2000)    # trip_distance, fare_amount, duration_min
+
+data.rows                             # list[dict]
+data.column("trips")                  # one column, as-is
 data.floats("trips")                  # raises on a NULL; pass default= to substitute
 data.dropna("trips")                  # or drop whole rows, keeping columns aligned
 data.synthetic                        # did it fall back?
 data.provenance                       # a line for a log message
 data.describe()                       # data_source / data_synthetic / data_rows / data_fallback_reason
+
+epoch_ms(value)                       # datetime | int | float | date | ISO string -> epoch ms
 ```
+
+`nyc_taxi_hourly` picks the demand-curve shape (forecasting, scheduling,
+scenario, streaming); `nyc_taxi_trips` picks the row-per-observation shape
+(mcmc, neural_net, annealing, routing). `bayesian_ab` uses both, one per
+comparison. Nothing stops a new model adding a third loader to
+`models/_data/datasets.py` — one function per *dataset*, not per model, so
+two models asking the same question get the same shape.
 
 Three rules that come out of this, learned the hard way:
 
@@ -123,6 +142,10 @@ Three rules that come out of this, learned the hard way:
   the durable record.
 - **Never assume a column is non-null.** A real `AVG()` over an empty hour
   returns NULL, and that only ever shows up on a workspace.
+- **Never assume a timestamp column's Python type.** Spark hands back a
+  `datetime` for a TimestampType; the synthetic fallback returns an `int`. A
+  model doing `int(row["hour_ts"])` works offline and raises on a workspace.
+  `epoch_ms()` exists so you do not have to care which you got.
 
 Run `scripts/probe_sample_data.py` on a workspace to see what is actually
 there. "Falls back cleanly" and "is reading real data" are different states,
@@ -149,6 +172,45 @@ epochs, between draws — not mid-computation.
 - No import from `job/`, `app/` or `shared/`. You conform to a documented
   contract; you do not call into the platform. A model must behave identically
   run standalone, which is also how its tests run.
+
+## Registering one, so it actually deploys
+
+Writing the package is most of the work but not all of it. A model is a
+microservice here — its own job, its own serverless environment, its own
+dependency list — and five things outside `models/<name>/` have to know it
+exists. `/new-model` scaffolds the package; it does not currently do this
+list, so work through it by hand.
+
+1. **`[tool.dbx-leaning.models]` in `pyproject.toml`** — one line mapping
+   `<name>` to the `[project.optional-dependencies]` extra carrying its
+   libraries. This is the single registry; `scripts/export_requirements.py`
+   and `scripts/build_model_wheel.py` both read it through
+   `scripts/_registry.py`, so there is nowhere else to also declare it.
+   Directory name and extra name do not have to match, and two models may
+   share one extra (`gurobi_scheduling` and `gurobi_routing` do). An extra
+   may be **empty** — `models/annealing` maps to one deliberately, to prove
+   the split can produce a minimal environment.
+2. **The extra itself**, if it is new. `uv add --optional <extra> <package>`,
+   which rewrites `pyproject.toml` *and* `uv.lock` — do that as its own
+   sequential commit if other tracks are running in parallel.
+3. **`deploy/requirements/<name>.txt`** — generated, never hand-written:
+   `uv run python scripts/export_requirements.py`.
+4. **`resources/model_<name>.job.yml`** — copy the closest existing one and
+   change it. The duplication is intentional; these files are meant to
+   diverge.
+5. **`resources/app.yml`** — the new job's id has to appear in `DBX_JOB_IDS`,
+   or the app has no way to trigger it.
+
+`tests/deploy/` enforces every one of those and names what is missing, so run
+`uv run pytest tests/deploy` before you believe you are finished.
+
+**One thing nothing enforces:** your `results_table` has to exist in
+`uc_ddl/002_model_results.sql`. No test cross-checks the two, so a model can
+pass the entire suite and then fail its first real write on a workspace with
+a table-not-found. Add the `CREATE TABLE IF NOT EXISTS` when you add the
+model, and include the four provenance columns (`data_source`,
+`data_synthetic`, `data_rows`, `data_fallback_reason`) if you put
+`data.describe()` on your rows — which you should.
 
 ## Testing
 

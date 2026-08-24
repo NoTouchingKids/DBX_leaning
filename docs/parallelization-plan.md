@@ -3,12 +3,26 @@
 How to actually run multiple Claude Code sessions against this repo without
 them colliding, and in what order.
 
+**Where this stands.** The sequencing below has been run: the probes cleared
+(`docs/spike-results.md`), `shared/` landed and is frozen, and `job/`, `app/`
+and nine models are built and tested. What is still live is the *method* —
+the file-disjointness rule, the shared-file warning about `pyproject.toml` and
+`uv.lock`, and the "freeze the contract before you fan out" discipline, which
+the frontend applied again for its own per-model views. Read the track table
+below as the record of how the backend got built, not as a queue of work
+waiting to start.
+
 ## The one thing that can't be parallel
 
 `shared/` — the message envelope implementation — has to exist, and be
 frozen, before the model tracks and the transport tracks start in parallel.
-Every other track depends on its shape. Building five things against a
+Every other track depends on its shape. Building several things against a
 contract that's still moving means rework, not speed.
+
+The same rule has since been applied a second time, on the frontend:
+`frontend/src/components/models/contract.ts` was frozen before the nine
+per-model views were fanned out, for exactly this reason. When a fan-out is
+coming, find the contract it shares and freeze that first.
 
 Practical sequencing:
 
@@ -32,11 +46,27 @@ branch = one Claude Code session.
 | `models/forecasting/` | `.claude/agents/model-forecasting.md` | `shared/` |
 | `models/mcmc/` | `.claude/agents/model-mcmc.md` | `shared/` |
 | `models/streaming_results/` | `.claude/agents/model-streaming-results.md` | `shared/` |
+| `models/annealing/`, `models/bayesian_ab/`, `models/gurobi_routing/`, `models/neural_net/` | none — built after the pattern was established, from `models/README.md` and `/new-model` | `shared/` |
 | `frontend/` | `.claude/agents/frontend.md` | Explicitly low priority — start after `app/` + `job/` + one model work end to end |
 
-The five `models/*` tracks are the cleanest parallel case: same contract,
-zero file overlap, no dependency on each other or on `job`/`app` internals
-(a model only ever touches the `emit()` callback it's handed). They can run
+There are **nine** models on disk, not the five that got their own brief.
+`models/` on disk, `[tool.dbx-leaning.models]` in `pyproject.toml`, and
+`resources/model_*.job.yml` all have to agree; they are cross-checked in
+`tests/deploy/`. A brief per model turned out to be worth writing only while
+the contract was still being discovered — once `models/README.md` and
+`/new-model` existed, the later four needed no brief at all, and that is the
+signal to stop writing them rather than a gap to fill in.
+
+One brief describes a model that was never built:
+`.claude/agents/model-nyctaxi-demand.md`, the Spark-native aggregation
+proposed in `docs/model-expansion-and-packaging.md`. Its original
+justification is gone — all nine models now read `samples.nyctaxi.trips`
+through `models/_data` — so if it is ever built it is on the strength of its
+telemetry shape, not on closing a gap. See that document.
+
+The `models/*` tracks are the cleanest parallel case: same contract, zero
+file overlap, no dependency on each other or on `job`/`app` internals (a
+model only ever touches the `emit()` callback it's handed). They can run
 concurrently with `job/` and `app/` from the moment `shared/` lands.
 
 ## Running it — two ways
@@ -98,10 +128,13 @@ subagent tool's own scheduling.
 3. One model — `models/gurobi_scheduling/` is the natural first pick, since
    it was the original driving use case — merges next and becomes the first
    end-to-end vertical slice.
-4. The remaining four model tracks merge in any order once the first slice
+4. The remaining model tracks merge in any order once the first slice
    works; each is now just "does this model, plugged into the existing
-   harness, produce valid envelope messages and results."
-5. `frontend/` starts once step 3 is done, not before.
+   harness, produce valid envelope messages and results." That held: four
+   more models (`annealing`, `bayesian_ab`, `gurobi_routing`, `neural_net`)
+   were added after the first five with no change to the harness.
+5. `frontend/` starts once step 3 is done, not before. That gate is met and
+   the track has started — see `frontend/README.md` for where it is.
 
 ## What "done" means per track, before merging
 
@@ -122,3 +155,17 @@ Don't fan out on `frontend/` pages-per-model until there's at least one
 model's real envelope traffic to build the page against — a UI built
 against an imagined message shape is exactly the kind of rework this plan is
 trying to avoid by freezing `shared/` first.
+
+Worth being straight about how this was actually resolved, since the
+per-model views are being fanned out now. The message *shape* is no longer
+imagined: `shared/envelope.py` is real, the JSON Schema is generated from it,
+and `frontend/src/lib/envelope.contract.test.ts` fails if the TypeScript
+drifts from it. Each model's `payload` — the free-form part the envelope
+deliberately does not constrain — is hand-derived from that model's own
+`emit("progress", ...)` calls, which is why `payloadOf` in
+`frontend/src/components/models/contract.ts` returns a `Partial`: a
+hand-derived interface can go stale, and some fields are genuinely absent
+until a run reaches a given stage. What is still missing is envelope traffic
+from a **deployed** run — `databricks bundle deploy` has never been run
+against a workspace — so the views are built against locally-run models and
+tests, not against production behaviour.

@@ -1,8 +1,10 @@
-# Message envelope — spec only, no code yet
+# Message envelope — the wire contract
 
-This is a contract, not an implementation. The first session to touch
-`shared/` implements this as real (Pydantic) code; every other track —
-models, job, app, frontend — builds against this document until then.
+This is the contract in prose. It is implemented, in Pydantic, in
+`shared/envelope.py`, and published as JSON Schema under `schema/` — so if
+this file and `shared/envelope.py` ever disagree, the code is right and this
+file is stale; say so and fix it here. Every track — models, job, app,
+frontend — builds against this shape.
 
 **Do not let a model-building track invent its own message shape.** If this
 spec is ambiguous or missing something a model needs, that is a reason to
@@ -77,9 +79,13 @@ render a minimally useful progress view with zero model-specific frontend
 code. `payload` is where a model earns a richer, model-specific view later
 without changing the envelope.
 
-Known sentinel to handle explicitly per model: Gurobi reports `±1e100` for
-the incumbent before the first solution is found — store that as `null`,
-never raw, or it poisons a chart's axis.
+Known sentinel: Gurobi reports `±1e100` for the incumbent and bound before
+the first solution is found, and that must reach the envelope as `null`,
+never raw, or it poisons a chart's axis. A Gurobi model does not have to
+remember this — `job/drivers/gurobi.py` holds it as `GUROBI_SENTINEL` and
+nulls it on the way out. It is called out here because the value is *finite*,
+so `shared.envelope.sanitize_metric` (which only catches inf/NaN) cannot see
+it: anything else emitting a magic large number has to null it itself.
 
 ## `status`
 
@@ -143,13 +149,24 @@ uv run python scripts/export_schema.py --check  # verify
 
 It is a JSON Schema 2020-12 discriminated union keyed on `type`, with the
 enums (`LogLevel`, `RunStatus`) published as string enums — so a frontend gets
-a TypeScript union it can narrow on, and string-literal types for the enums,
-rather than retyping either by hand and going stale the first time one gains
-a member:
+a union it can narrow on and string-literal types for the enums, rather than
+retyping either by hand and going stale the first time one gains a member.
 
-```bash
-npx json-schema-to-typescript schema/envelope.schema.json -o src/protocol.ts
-```
+**The frontend does not generate from it, and that was a deliberate call.**
+`json-schema-to-typescript` produced output nobody could read — `RunId1`,
+`Seq1`, `Type1`, one alias per property occurrence — and carrying none of the
+reasoning that makes the contract usable. So `frontend/src/lib/envelope.ts`
+is hand-written, and the cost of that (it can silently fall behind
+`shared/envelope.py`) is paid by a drift test rather than by discipline:
+`frontend/src/lib/envelope.contract.test.ts` checks both directions against
+this generated schema — every property and enum member the server can emit is
+declared in TypeScript, and nothing declared in TypeScript is absent from the
+server or fails to validate against the schema's own
+`additionalProperties: false`. Generating instead is still a legitimate
+choice; if you take it, pick a filename other than `protocol.ts`. The
+frontend already has a `src/transport/protocol.ts` and it is a different
+thing entirely — the page↔worker protocol, describing what the transport is
+doing rather than what a run emitted.
 
 The app also serves it at `GET /api/schema` (`?kind=envelope|control|protocol`),
 and reports `protocol_schema_version` on `/healthz`, so a cached client bundle
