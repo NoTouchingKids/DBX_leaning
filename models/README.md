@@ -105,8 +105,27 @@ Free Edition ships Databricks' `samples` catalog, and `models/_data` reads it
 — falling back to a deterministic generator when there is no workspace, so
 your model and its tests run anywhere.
 
-There are two loaders, both over `samples.nyctaxi.trips`, and both return a
-`Dataset`:
+**`samples` is no longer the only permitted source.** External data is
+allowed where it genuinely fits the model. Two things to know before reaching
+for it:
+
+- `models/_data.load()` was never samples-specific. It takes arbitrary SQL
+  and a `source` label, so any Unity Catalog table works today with no change
+  to this module. Only the two loaders in `datasets.py` hardcode
+  `samples.nyctaxi.trips`; a new loader beside them is the whole job.
+- **A model cannot fetch data over the internet at run time.** Free Edition
+  restricts outbound traffic to trusted domains, and that restriction has not
+  lifted — it is the same one that rules out Gurobi's WLS licence. "External
+  data" therefore means *get it into Unity Catalog first*: upload to a
+  volume, add a Databricks Marketplace data product, or land it once through
+  a notebook. A model that calls out to an API at run time will work on your
+  laptop and hang or fail on the job. See `docs/free-edition-constraints.md`.
+
+Whatever the source, the three rules below still apply, and the fallback is
+still what keeps a model runnable offline.
+
+There are two loaders today, both over `samples.nyctaxi.trips`, and both
+return a `Dataset`:
 
 ```python
 from models._data import epoch_ms, nyc_taxi_hourly, nyc_taxi_trips

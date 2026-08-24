@@ -57,6 +57,37 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   unless the trusted-domain list is confirmed to include it. **This build
   uses the bundled restricted licence only — no WLS.**
 
+## Getting data in from outside
+
+The project's own restriction to the `samples` catalog was **lifted on
+2026-08-24**: external data is allowed where it genuinely suits a model. The
+*platform* restriction that shapes how it can arrive has not lifted, and the
+two are easy to confuse.
+
+**Outbound traffic is restricted to trusted domains, including from job
+compute.** So a model cannot fetch a dataset at run time. This is the same
+constraint that rules out Gurobi's WLS licence (`token.gurobi.com`), and it
+fails in the least helpful way: the code works on a laptop and hangs or
+errors on the job, after the run has already started and claimed one of five
+account-wide task slots.
+
+External data therefore means **land it in Unity Catalog first**, once, out
+of band. Routes, roughly in order of how little they can go wrong:
+
+| Route | What it is | Notes |
+|---|---|---|
+| Upload to a UC **volume** | Drop a file in, read it with Spark | No egress at run time. The obvious route for a one-off CSV/Parquet |
+| **Databricks Marketplace** | Free data products attach as a catalog | Governed, no egress, no file to keep in sync. Best fit when a product matches |
+| **Delta Sharing** | A shared catalog from a provider | Same shape as `samples` itself |
+| A **notebook** run once | Fetch and write a table by hand | Only if the source is on the trusted-domain list; a notebook is not exempt from egress rules |
+| **Data bundled in a PyPI package** | Installed with the environment | Genuinely egress-free at run time, because pip already ran. Small datasets only, and it inflates every model environment that lists the extra |
+
+Whatever the route, the model still reads a table, and
+`models/_data.load()` still takes arbitrary SQL — it was never
+samples-specific. The synthetic fallback stays mandatory either way: it is
+what keeps a model runnable in tests and on a laptop, and it is the reason a
+missing table degrades instead of failing a run.
+
 ## Delta / Unity Catalog external writes
 
 - Officially supported external Delta clients: **Spark** (GA). **Flink,

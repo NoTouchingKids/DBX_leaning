@@ -39,7 +39,11 @@ sources. Design against them; do not build past them speculatively.
   default 10). This is why writes go through Delta, not the warehouse.
 - **Outbound internet restricted to trusted domains.** This is why Gurobi
   uses the bundled restricted licence, not WLS (WLS needs to reach
-  `token.gurobi.com`).
+  `token.gurobi.com`). It is also why a model **cannot fetch data over the
+  internet at run time**: the `samples`-only restriction was lifted on
+  2026-08-24 and external data is welcome, but it has to be landed in Unity
+  Catalog first — a volume, Marketplace, or Delta Sharing. See
+  `docs/free-edition-constraints.md`, "Getting data in from outside".
 - Lakebase (managed Postgres) **is** available, and is used: it holds
   `run_status` (see Conventions), and it is also the fallback fan-out
   mechanism if this ever needs more than one app worker.

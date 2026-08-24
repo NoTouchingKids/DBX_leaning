@@ -13,7 +13,9 @@ A time-series forecasting model — a classical method (e.g. gradient-boosted
 trees over lag features, or a simple recurrent/temporal model) trained on
 historical data and evaluated on a held-out window. Free Edition ships
 sample data (the `samples` catalog — e.g. NYC taxi) that's a reasonable fit
-for this without needing to source anything.
+for this without needing to source anything. External data is permitted too
+as of 2026-08-24, but it must already be in Unity Catalog: outbound traffic
+is restricted to trusted domains, so nothing can be fetched at run time.
 
 Its job in this platform isn't forecasting accuracy — it's proving the
 message envelope's `progress` shape works for **training-loop telemetry**

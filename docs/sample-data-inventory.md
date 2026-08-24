@@ -217,6 +217,26 @@ One trap in it: `unitPrice`, `totalPrice` and `quantity` are all `LONG`, not
 decimal. Money as an integer is fine to sum but is almost certainly minor
 units or a rounded value; check the magnitudes before dividing by anything.
 
+## `samples` is no longer the only option
+
+Lifted 2026-08-24: a model may read external data where that genuinely suits
+it, not only this catalog. What that does and does not change:
+
+- **Does not change the code.** `models/_data.load()` takes arbitrary SQL and
+  a `source` label; it was never samples-specific. A new loader in
+  `datasets.py` is the entire job.
+- **Does not change the egress rule.** Nothing may be fetched over the
+  internet at run time. External data has to reach Unity Catalog first — a
+  volume, a Marketplace product, Delta Sharing. `docs/free-edition-constraints.md`
+  has the routes.
+- **Does not change the fallback rule.** A synthetic fallback stays mandatory
+  whatever the source, because it is what keeps a model runnable in tests and
+  on a laptop.
+
+So the table below is now a list of *candidates within `samples`*, not a list
+of the only choices. Several of its "worth considering" entries were written
+under the old restriction and may have better answers outside the catalog.
+
 ## Where the models point today, and where they arguably should
 
 All nine models read `samples.nyctaxi.trips` — through one of the two loaders
