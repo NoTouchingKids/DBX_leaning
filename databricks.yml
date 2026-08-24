@@ -40,6 +40,38 @@ variables:
       has a URL.
     default: ""
 
+  # --- Lakebase (managed Postgres): where run_status lives ---------------
+  #
+  # `run_status` is the one OLTP-shaped thing in this platform — one row per
+  # run, point-looked-up, updated on every transition, and counted against
+  # the 5-concurrent-task ceiling. Postgres gives it what Delta structurally
+  # cannot: a primary key on run_id, and a transaction around the
+  # count-and-claim so that ceiling is enforced rather than merely observed
+  # (app/store.py, `pg_advisory_xact_lock`).
+  #
+  # Leaving `lakebase_host` empty is a SUPPORTED but DEGRADED deploy: the app
+  # falls back to WarehouseRunStore, whose `release_slot` is a no-op that
+  # relies on reconciliation to correct it. Everything still works; the
+  # ceiling becomes advisory and each check costs warehouse uptime. Prefer
+  # Lakebase. /healthz says which one is live.
+  lakebase_host:
+    description: >-
+      Lakebase instance hostname, e.g.
+      instance-name.database.cloud.databricks.com. Empty falls back to the
+      warehouse-backed run store — see the note above.
+    default: ""
+  lakebase_database:
+    description: Database within the Lakebase instance.
+    default: databricks_postgres
+  lakebase_port:
+    description: Lakebase port. TLS is required and assumed.
+    default: "5432"
+  lakebase_user:
+    description: >-
+      Postgres role the app connects as. Usually the app's service principal
+      id, which is what Databricks provisions the Lakebase role for.
+    default: ""
+
 # The workspace sync is the deployment mechanism, so what it excludes matters.
 #
 # The frontend is the awkward one. Its SOURCE has no business in the

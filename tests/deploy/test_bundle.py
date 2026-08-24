@@ -316,3 +316,80 @@ def test_the_ddl_creates_no_results_table_no_model_claims():
     claimed = set(_declared_results_tables().values())
     orphans = sorted(created - claimed)
     assert not orphans, f"results tables no model declares: {orphans}"
+
+
+#: The parts `app/config.py::_lakebase_dsn` assembles a connection string from.
+#: `DBX_LAKEBASE_DSN` is the alternative whole-string form and is not used here.
+LAKEBASE_ENV = (
+    "DBX_LAKEBASE_HOST",
+    "DBX_LAKEBASE_DATABASE",
+    "DBX_LAKEBASE_PORT",
+    "DBX_LAKEBASE_USER",
+)
+
+
+def bundle_app_spec() -> dict:
+    """The app resource, read from its own file rather than the fixture, so
+    these tests do not depend on how the jobs fixture merges resources."""
+    return load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+
+
+def _app_env(bundle_app: dict) -> dict[str, str]:
+    return {e["name"]: e.get("value", "") for e in bundle_app["config"]["env"]}
+
+
+def test_the_app_is_wired_for_lakebase(bundle):
+    """`run_status` lives in Postgres, and the bundle has to say where.
+
+    The code for this shipped long before the deploy configuration did: the
+    app read `DBX_LAKEBASE_*`, `resources/app.yml` set none of them, so a
+    deployed app resolved no DSN and silently fell back to the
+    warehouse-backed store. Nothing failed — it just quietly stopped being
+    the design `CLAUDE.md` describes.
+
+    That fallback matters because `WarehouseRunStore.release_slot` is a
+    documented no-op relying on reconciliation, so the account-wide
+    5-concurrent-task ceiling degrades from transactional to advisory.
+    """
+    app = bundle_app_spec()
+    env = _app_env(app)
+    missing = [name for name in LAKEBASE_ENV if name not in env]
+    assert not missing, f"app.yml sets no {missing} — the app cannot find Lakebase"
+
+
+def test_every_lakebase_setting_comes_from_a_declared_variable(bundle):
+    """Wired to variables, not literals: the instance differs per target, and
+    a hostname baked into a committed file is the wrong kind of default."""
+    env = _app_env(bundle_app_spec())
+    declared = set(bundle["variables"])
+    for name in LAKEBASE_ENV:
+        value = env[name]
+        assert value.startswith("${var."), f"{name} is a literal: {value!r}"
+        var = value.removeprefix("${var.").removesuffix("}")
+        assert var in declared, f"{name} references undeclared variable {var!r}"
+
+
+def test_an_unconfigured_lakebase_host_is_a_supported_deploy(bundle):
+    """Empty must stay the default.
+
+    A required host would make the bundle undeployable until someone
+    provisions Lakebase, and the app genuinely does work without it — the
+    fallback is degraded, not broken. `services.py` records the choice and
+    `/healthz` reports it, which is what keeps "degraded" from being silent.
+    """
+    assert bundle["variables"]["lakebase_host"]["default"] == ""
+
+
+def test_no_lakebase_credential_is_carried_as_a_bundle_variable(bundle):
+    """A password in a variable lands in the deployment state.
+
+    Lakebase authenticates with a short-lived OAuth token, which is why
+    `app/store.py` connects per operation rather than pooling. If an explicit
+    credential is ever needed it belongs in a secret, the way `app-token`
+    already is — never here.
+    """
+    for name, spec in bundle["variables"].items():
+        if "lakebase" not in name:
+            continue
+        assert "password" not in name, f"variable {name!r} looks like a credential"
+        assert "secret" not in str(spec.get("default", "")).lower()
