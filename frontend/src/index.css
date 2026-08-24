@@ -1,1 +1,159 @@
 @import "tailwindcss";
+
+/*
+ * Design tokens.
+ *
+ * `@theme inline` rather than `@theme`: inline keeps the generated utilities
+ * pointing at `var(--c-*)` instead of copying the literal value in, which is
+ * what lets the dark palette below re-point them at runtime from one place.
+ *
+ * No webfont. The wireframe specifies Archivo + IBM Plex Mono from Google
+ * Fonts, and Databricks Apps restricts outbound traffic to trusted domains —
+ * a `fonts.googleapis.com` link is a request that may simply never resolve,
+ * and the page would block on it. System stacks instead.
+ */
+@theme inline {
+  --color-paper: var(--c-paper);
+  --color-raised: var(--c-raised);
+  --color-sidebar: var(--c-sidebar);
+  --color-ink: var(--c-ink);
+  --color-dim: var(--c-dim);
+  --color-faint: var(--c-faint);
+  --color-line: var(--c-line);
+  --color-edge: var(--c-edge);
+
+  --color-accent: var(--c-accent);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-accent-ink: var(--c-accent-ink);
+  --color-good: var(--c-good);
+  --color-good-soft: var(--c-good-soft);
+  --color-bad: var(--c-bad);
+  --color-bad-soft: var(--c-bad-soft);
+  --color-warn: var(--c-warn);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-info: var(--c-info);
+  --color-info-soft: var(--c-info-soft);
+  --color-idle: var(--c-idle);
+  --color-idle-soft: var(--c-idle-soft);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace;
+}
+
+:root {
+  --c-paper: #faf9f6;
+  --c-raised: #ffffff;
+  --c-sidebar: #f1efe6;
+  --c-ink: #221f1a;
+  --c-dim: #6c6558;
+  --c-faint: #948d7c;
+  --c-line: #dad3c3;
+  --c-edge: #b9b09a;
+
+  --c-accent: #c1560e;
+  --c-accent-soft: #f5e2ce;
+  --c-accent-ink: #7a3707;
+  --c-good: #2e7a4c;
+  --c-good-soft: #e2f0e6;
+  --c-bad: #b3271e;
+  --c-bad-soft: #fbe4e1;
+  --c-warn: #93650a;
+  --c-warn-soft: #f5ecd3;
+  --c-info: #2f5fbf;
+  --c-info-soft: #e1e9fa;
+  --c-idle: #6c6976;
+  --c-idle-soft: #e7e5ec;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-paper: #15161b;
+    --c-raised: #1c1e25;
+    --c-sidebar: #191a20;
+    --c-ink: #ece7db;
+    --c-dim: #a49c8b;
+    --c-faint: #7c7666;
+    --c-line: #33353e;
+    --c-edge: #484b56;
+
+    --c-accent: #ff9a5c;
+    --c-accent-soft: #3a2814;
+    --c-accent-ink: #ffcda4;
+    --c-good: #7ed3a0;
+    --c-good-soft: #173224;
+    --c-bad: #ff8f83;
+    --c-bad-soft: #3a1c18;
+    --c-warn: #e8c467;
+    --c-warn-soft: #332a10;
+    --c-info: #8bb2ff;
+    --c-info-soft: #1c2740;
+    --c-idle: #aeaabd;
+    --c-idle-soft: #2a2a33;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--c-paper);
+  color: var(--c-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * The indeterminate progress bar.
+ *
+ * `percent_complete: null` is a real value — always, for gurobi_scheduling —
+ * so this is a steady state a run can sit in for minutes, not a spinner. It
+ * has to read as "running, no percentage available" rather than "loading".
+ */
+.bar-indeterminate::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  width: 38%;
+  border-radius: 9999px;
+  background: var(--c-accent);
+  animation: bar-slide 1.6s ease-in-out infinite;
+}
+
+@keyframes bar-slide {
+  0%,
+  100% {
+    transform: translateX(-60%);
+  }
+  50% {
+    transform: translateX(160%);
+  }
+}
+
+.live-dot {
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-indeterminate::after,
+  .live-dot {
+    animation: none;
+  }
+  /* The bar still has to say "indeterminate" without motion. */
+  .bar-indeterminate::after {
+    width: 100%;
+    opacity: 0.35;
+  }
+}
