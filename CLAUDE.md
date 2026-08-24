@@ -225,6 +225,8 @@ Full procedure: `deploy/README.md`.
 - `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order
 - `docs/spike-results.md` — the ingress probes: what they settled, what they didn't
 - `docs/sample-data-inventory.md` — what is really in the `samples` catalog
+- `docs/ml-datasets.md` — what is worth training on, and the three egress-free
+  routes data can arrive by
 - `docs/model-expansion-and-packaging.md` — per-model wheels, and what a next
   model would be for. Carries a status note: several of its premises are
   superseded, and it is the one doc to read the header of before the body
