@@ -58,7 +58,9 @@ deploy/                Generated per-model requirements + the deployment guide
 entrypoints/           What a Databricks job actually runs
 frontend/              React SPA. Transport spine done; shell in progress
 tests/                 ~585 tests, none needing a Databricks connection
-scripts/               check_gurobi_licence.py — the bundled-licence expiry
+scripts/               dev_stack.py — the whole platform locally, no workspace
+                       dev_launcher.py — its stand-in for the Jobs API
+                       check_gurobi_licence.py — the bundled-licence expiry
 ```
 
 ## Running it locally
@@ -103,6 +105,53 @@ splat dicts into dataclasses and inject duck-typed stubs, which a static
 checker objects to and which are not defects. Source sits at zero errors; the
 one standing warning is `pyspark`, deliberately absent from the dependency set
 because the Databricks runtime provides it.
+
+### The whole loop, with no workspace
+
+The commands above run one piece at a time. This runs all of them together —
+trigger a model from the browser and watch its telemetry arrive:
+
+```bash
+uv run python scripts/dev_stack.py      # app + job launcher + registry
+cd frontend && pnpm dev                 # in a second terminal
+```
+
+Then click Run on any of the nine models. That goes through `POST /api/runs`,
+which launches the real `job/` harness in its own OS process, which attaches
+over the real WebSocket ingress and streams real envelope messages back over
+the real SSE endpoint. It is the shipped code, not a mock server and not
+recorded fixtures.
+
+Useful flags: `--models scenario,mcmc` to narrow what is triggerable,
+`--max-concurrent-runs 1` to see the 429 without starting five runs,
+`--reload` for uvicorn autoreload on `app/`, `--reset` to wipe the local
+registry and telemetry. Kill the app process while a run is going and the
+stack restarts it — the job keeps running and reattaches, which is the
+autonomy property the transport design rests on, watchable in one terminal.
+
+**What is real, and what is not.** A dev loop that quietly diverges from
+production is how "works on my machine" gets built, so:
+
+| | Local | Deployed |
+|---|---|---|
+| `app/`, `job/`, `shared/`, `models/` | the same code | the same code |
+| Live path | real WS ingress, real HTTP-push fallback, real SSE | same |
+| Run registry | embedded Postgres (`pgserver`) via `PostgresRunStore` | Lakebase, same class |
+| Concurrency ceiling | the app's check is real; nothing enforces it behind that | the account's own 5-task limit too |
+| **Trigger** | `scripts/dev_launcher.py` answers `run-now`/`runs/get` and spawns a subprocess; `DATABRICKS_HOST` points at it | the Jobs API |
+| **Durable writes** | local JSONL under the state dir (`DBX_WRITER=jsonl`) | Delta in Unity Catalog via Spark |
+| **Model environments** | one venv with everything | one serverless environment per model |
+| **Warehouse reads** | none — backfill and `/results` answer 503, startup reconciliation is skipped | the SQL warehouse |
+| Startup latency | milliseconds | tens of seconds for a serverless task |
+
+`GET /healthz` reports `degraded` locally and names the reason; that is
+expected, not a fault. Nothing is written inside the repository — state lives
+under `~/.cache/dbx-leaning/dev-stack` (`--state-dir` to move it), including
+job logs, so a failed run's traceback is a file away.
+
+Each substitution is spelled out again in the docstrings of
+`scripts/dev_stack.py` and `scripts/dev_launcher.py`, next to the code that
+does it.
 
 ## API surface
 
