@@ -74,6 +74,12 @@ class AppConfig:
 
     reconcile_on_startup: bool = True
 
+    #: Where the built React bundle lives. Databricks Apps has no Node
+    #: runtime, so this app serves the SPA itself (see app/spa.py). Relative
+    #: paths are resolved against the repo root, not the process cwd. Absent
+    #: on a source checkout and during tests — that degrades, it is not fatal.
+    frontend_dist: str = "frontend/dist"
+
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> AppConfig:
         e = os.environ if env is None else env
@@ -111,6 +117,7 @@ class AppConfig:
             max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
             job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
+            frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "frontend/dist",
         )
 
     def job_id_for(self, model: str) -> int | None:

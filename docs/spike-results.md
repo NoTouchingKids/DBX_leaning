@@ -31,7 +31,7 @@ change specific code, and none of them is recorded yet:
 
 | Measurement | What it decides |
 |---|---|
-| Whether the ingress cuts a long-lived stream, and at what elapsed time | The frontend's reconnect-counter design. A "stop after 3 consecutive failures" counter that does not reset on success would kill a healthy stream in ~6 minutes if cuts happen every ~120s. `frontend/README.md` flags this; a real number turns it from a hypothetical into a test case |
+| Whether the ingress cuts a long-lived stream, and at what elapsed time | The frontend's reconnect-counter design. A counter that does not reset on success would kill a healthy stream within minutes if cuts happen every ~120s. That counter is now built and tested — `frontend/src/transport/hub.ts` counts *consecutive* failures, resets on every successful open, and gives up at 10 — so a real number no longer decides the design; it decides whether 10 is the right cap and whether the retry interval (`retry: 2000`, set in `app/routes/stream.py`) is sensible |
 | Whether an *idle* connection is dropped sooner than an active one | `DBX_WS_PING_S` (default 20s) and the SSE keepalive (`DBX_SSE_KEEPALIVE_S`, default 10s). Both are currently set from community reports, not measurement |
 | Whether SSE events are buffered or delivered promptly | Whether `X-Accel-Buffering: no` is doing anything here. If events arrive in held-and-released batches, live progress is not actually live |
 

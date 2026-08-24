@@ -9,6 +9,8 @@ rather than at 3am on a real workspace.
 from __future__ import annotations
 
 import pathlib
+import re
+from fnmatch import fnmatch
 
 import pytest
 import yaml
@@ -17,7 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 RESOURCES = ROOT / "resources"
 REQUIREMENTS = ROOT / "deploy" / "requirements"
 
-#: The five model packages, discovered rather than listed.
+#: The model packages, discovered rather than listed.
 MODELS = sorted(
     p.name
     for p in (ROOT / "models").iterdir()
@@ -173,6 +175,37 @@ def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
         assert pattern in excluded, f"{pattern} would be synced to the workspace"
 
 
+def test_the_built_frontend_reaches_the_workspace(bundle):
+    """The app serves ``frontend/dist``; nothing in the workspace can build it.
+
+    Excluding ``frontend/**`` wholesale is the obvious tidy-up and it deploys
+    an app that answers 503 on every page while the API works — a failure that
+    looks like a routing bug and is really a packaging one. ``sync.include``
+    is also what gets past .gitignore, which correctly ignores build output.
+    """
+    assert "frontend/dist/**" in set(bundle["sync"].get("include", []))
+
+
+def test_no_exclude_contradicts_the_frontend_include(bundle):
+    """Whether ``include`` or ``exclude`` wins on a contradiction is not
+    something this repo can verify without a live workspace. So there must not
+    be a contradiction: no exclude pattern may cover ``frontend/dist``.
+    """
+    for pattern in bundle["sync"]["exclude"]:
+        assert not fnmatch("frontend/dist/index.html", pattern), (
+            f"exclude {pattern!r} may cancel the frontend/dist include, and "
+            "which one wins is unverified"
+        )
+
+
+def test_the_frontend_source_does_not_reach_the_workspace(bundle):
+    """node_modules alone would dwarf the rest of the sync, and there is no
+    Node runtime in the workspace to make any of it useful."""
+    excluded = set(bundle["sync"]["exclude"])
+    for pattern in ("frontend/node_modules/**", "frontend/src/**"):
+        assert pattern in excluded, f"{pattern} would be synced to the workspace"
+
+
 def test_the_bundle_declares_the_variables_the_resources_use(bundle):
     declared = set(bundle["variables"])
     used = set()
@@ -219,3 +252,67 @@ def test_more_models_than_concurrent_slots_is_expected(jobs):
     ceiling = 5
     for model in MODELS:
         assert jobs[f"model_{model}"]["max_concurrent_runs"] <= ceiling
+
+
+def _declared_results_tables() -> dict[str, str]:
+    """Each model's `results_table`, read without importing the model.
+
+    Importing would pull gurobipy, torch and emcee into the test process for a
+    string constant. The attribute is a plain class-level literal in every
+    model, so the source is a faithful and much cheaper source of truth.
+    """
+    found: dict[str, str] = {}
+    for name in MODELS:
+        source = (ROOT / "models" / name / "model.py").read_text()
+        match = re.search(r'^\s*results_table\s*=\s*"([^"]+)"', source, re.MULTILINE)
+        if match:
+            found[name] = match.group(1)
+    return found
+
+
+def test_every_model_declares_a_results_table():
+    declared = _declared_results_tables()
+    missing = sorted(set(MODELS) - set(declared))
+    assert not missing, f"no results_table declared in models/<name>/model.py: {missing}"
+
+
+def test_every_model_results_table_exists_in_the_ddl():
+    """The one link in the chain that nothing else checks.
+
+    `tests/deploy` binds models to the registry, to extras, to requirements,
+    to job files and to DBX_JOB_IDS — six links, thoroughly. The DDL was not
+    one of them and no test anywhere referenced `002_model_results.sql`. So a
+    new model could pass every test in this suite and then fail its first real
+    write with TABLE_OR_VIEW_NOT_FOUND: on a workspace, inside a job, at the
+    end of a long run, having already consumed one of five account-wide task
+    slots.
+
+    The failure is also silent in the worst way — `emit("result", rows=...)`
+    is the one message type that is explicitly NOT best-effort, so a run whose
+    result write fails must not report SUCCEEDED. Catching it here costs
+    nothing.
+    """
+    ddl = (ROOT / "uc_ddl" / "002_model_results.sql").read_text()
+    created = set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+\S+\.(\w+)\s*\(", ddl))
+
+    missing = {
+        model: table
+        for model, table in _declared_results_tables().items()
+        if table not in created
+    }
+    assert not missing, (
+        f"declared results_table with no CREATE TABLE in uc_ddl/002_model_results.sql: "
+        f"{missing}. The run would fail on its first result write, on a workspace."
+    )
+
+
+def test_the_ddl_creates_no_results_table_no_model_claims():
+    """The other direction: a table left behind by a renamed or deleted model.
+
+    Harmless at run time, which is exactly why it accumulates.
+    """
+    ddl = (ROOT / "uc_ddl" / "002_model_results.sql").read_text()
+    created = set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+\S+\.(results_\w+)\s*\(", ddl))
+    claimed = set(_declared_results_tables().values())
+    orphans = sorted(created - claimed)
+    assert not orphans, f"results tables no model declares: {orphans}"

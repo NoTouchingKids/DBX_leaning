@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .envelope import MessageAdapter
+from .envelope import TERMINAL_STATUSES, MessageAdapter
 from .protocol import ControlFrame
 
 __all__ = ["SCHEMA_VERSION", "envelope_schema", "control_schema", "protocol_schema"]
@@ -52,6 +52,10 @@ def envelope_schema() -> dict[str, Any]:
             "Generated from shared/envelope.py — do not edit by hand."
         ),
         "x-schema-version": SCHEMA_VERSION,
+        # Not derivable from the shape: which statuses mean "nothing further
+        # arrives". A client uses it to close streams and stop polling, so it
+        # travels with the schema rather than being retyped on the far side.
+        "x-terminal-statuses": sorted(s.value for s in TERMINAL_STATUSES),
         **schema,
     }
 

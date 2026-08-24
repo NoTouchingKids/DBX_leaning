@@ -7,10 +7,13 @@ map, not the territory. If something here conflicts with a file in `docs/`,
 ## What this is
 
 A reusable internal platform on **Databricks Free Edition**: a React SPA +
-async FastAPI app triggers and observes long-running analytical models
-(Gurobi optimisation, scenario modelling, ML forecasting, MCMC, one more)
-that run as independent Databricks Jobs. Live progress/logs/results stream
-back to the browser. Durable state lands in Unity Catalog via Delta.
+async FastAPI app triggers and observes long-running analytical models —
+nine of them today: two Gurobi MILPs (scheduling, routing), scenario
+modelling, ML forecasting, MCMC, a conjugate Bayesian A/B comparison, a small
+torch classifier, a chunked rolling backtest and a simulated-annealing
+knapsack — that run as independent Databricks Jobs. Live progress, logs and
+results stream back to the browser. Durable state lands in Unity Catalog via
+Delta.
 
 This is a **rewrite**, not the first attempt. Two earlier builds exist in
 this project's history (a Flask+Streamlit polling POC, then a FastAPI+
@@ -36,8 +39,13 @@ sources. Design against them; do not build past them speculatively.
   default 10). This is why writes go through Delta, not the warehouse.
 - **Outbound internet restricted to trusted domains.** This is why Gurobi
   uses the bundled restricted licence, not WLS (WLS needs to reach
-  `token.gurobi.com`).
-- Lakebase (managed Postgres) **is** available — the fallback fan-out
+  `token.gurobi.com`). It is also why a model **cannot fetch data over the
+  internet at run time**: the `samples`-only restriction was lifted on
+  2026-08-24 and external data is welcome, but it has to be landed in Unity
+  Catalog first — a volume, Marketplace, or Delta Sharing. See
+  `docs/free-edition-constraints.md`, "Getting data in from outside".
+- Lakebase (managed Postgres) **is** available, and is used: it holds
+  `run_status` (see Conventions), and it is also the fallback fan-out
   mechanism if this ever needs more than one app worker.
 
 ## Transport architecture (settled — do not redesign without reading `docs/architecture.md` first)
@@ -75,8 +83,8 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **Results are not best-effort.** Write results whenever the code reaches
   that point in execution, regardless of terminal status — a cancelled run
   keeps its incumbent. But a run must not report `SUCCEEDED` if its result
-  write itself failed; track `result_row_count` so "zero results" is
-  distinguishable from "didn't get that far."
+  write itself failed; the `result` message's `row_count` is what makes "zero
+  results" distinguishable from "didn't get that far."
 - **Packing:** msgpack job→app and in the Delta buffer; JSON on the SSE
   stream to the browser (native, readable in devtools, already compressed by
   the transport). Validation is Pydantic, kept **outside** the wire format —
@@ -93,9 +101,12 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **ruff for lint, ty for types — ty advisory, not a gate.** ty is pre-1.0;
   run it, fix what it finds, do not fail a build on a young checker's opinion.
   It is scoped to source, not tests (see the note in `pyproject.toml`).
-- **Async-first FastAPI.** SQL via the Databricks SDK / REST API, not
-  `databricks-sql-connector`, not Spark from the app. `httpx` for non-blocking
-  HTTP.
+- **Async-first FastAPI.** SQL via the Statement Execution REST API over
+  `httpx` — not `databricks-sql-connector`, not Spark from the app, and not
+  the `databricks-sdk` either: it is deliberately absent from every
+  dependency set, because the two APIs this needs (Statement Execution and
+  Jobs) are a few plain REST calls and the SDK's weight would be paid by
+  every model environment.
 - **Run state lives in Lakebase (Postgres); telemetry lives in Delta.**
   `run_status` is the one OLTP-shaped thing here — one row per run, updated on
   every transition, point-looked-up, counted against the concurrency ceiling.
@@ -140,16 +151,23 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 ```
 app/            FastAPI application (async, SSE, ServiceHub, whoami)
 job/            Job harness (WS client, HTTP push, Delta writer, model loader)
-models/         One package per model — gurobi_scheduling/, scenario/,
-                forecasting/, mcmc/, streaming_results/
+models/         One package per model — nine of them: gurobi_scheduling/,
+                gurobi_routing/, scenario/, forecasting/, mcmc/,
+                bayesian_ab/, neural_net/, streaming_results/, annealing/
+                (plus _data/, the shared samples-catalog loaders).
+                Registered in [tool.dbx-leaning.models] in pyproject.toml
 shared/         The message envelope + protocol helpers, imported by both
                 app/ and job/ (and indirectly by models/ via the callback
                 they're handed — models never import shared/ directly)
-frontend/       React SPA (back burner until app/job/one model works)
-uc_ddl/         Unity Catalog DDL
+frontend/       React SPA. Transport spine built and tested; shell in progress
+uc_ddl/         Unity Catalog DDL (telemetry + per-model results tables)
+lakebase_ddl/   Postgres DDL (run_status), applied at app startup
+schema/         Generated JSON Schema for the wire protocol
+scripts/        Registry, requirements/schema export, licence + sample probes
 entrypoints/    What a Databricks job runs (workspace-file sync, not a wheel)
-resources/      One job definition per model — see below
+resources/      One job definition per model, plus the app — see below
 deploy/         Generated per-model requirements, and the deployment guide
+tests/          Offline; nothing here needs a Databricks connection
 docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
@@ -178,16 +196,26 @@ Full procedure: `deploy/README.md`.
 1. Run `/orient` at the start of any session before writing code. It reads
    this file and the docs, and states back what it understood before
    touching anything.
-2. **Nothing below is buildable until the two ingress probes pass.**
-   Run `/spike-ws` and `/spike-sse` first. Both are small and answer real
-   platform questions — everything else has a documented fallback, these two
-   don't.
-3. After the probes: build `shared/` (the envelope) first, sequentially — it
-   is the one contract every other track depends on. Then everything else
+2. **The two ingress probes gated everything, and both have passed** —
+   WebSocket and SSE each survive the Databricks Apps ingress, confirmed
+   against a real workspace on 2026-08-23 (`docs/spike-results.md`). Their
+   *timings* are still unmeasured; `/spike-ws` and `/spike-sse` are how to
+   fill those in. Nothing is blocked on them.
+3. `shared/` (the envelope) was built first and sequentially — it is the one
+   contract every other track depends on — and is frozen. Everything else
    parallelises. See `docs/parallelization-plan.md` for the worktree-per-track
-   plan and which agent (`.claude/agents/*.md`) owns which track.
-4. Frontend is explicitly low-priority until `app/`, `job/`, and one model
-   work end to end.
+   plan and which agent (`.claude/agents/*.md`) owns which track. When a new
+   fan-out comes up, freeze its shared contract before starting it; the
+   frontend did this again for its per-model views.
+4. Frontend was explicitly low-priority until `app/`, `job/` and one model
+   worked end to end. That gate is met and the track has started — see
+   `frontend/README.md`.
+5. **Not done:** `databricks bundle deploy` has never been run against a
+   workspace, `scripts/probe_sample_data.py` has never been run end to end on
+   one, and there is no CI. Do not read "built and tested" as "deployed".
+   What *is* confirmed against a real workspace: WebSocket and SSE both
+   survive the Apps ingress, the `samples` catalog's table list, and column
+   listings for seven of its tables (`docs/sample-data-inventory.md`).
 
 ## Docs index
 
@@ -195,3 +223,10 @@ Full procedure: `deploy/README.md`.
 - `docs/free-edition-constraints.md` — verified platform facts + sources
 - `docs/message-envelope-spec.md` — the wire contract, in full
 - `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order
+- `docs/spike-results.md` — the ingress probes: what they settled, what they didn't
+- `docs/sample-data-inventory.md` — what is really in the `samples` catalog
+- `docs/ml-datasets.md` — what is worth training on, and the three egress-free
+  routes data can arrive by
+- `docs/model-expansion-and-packaging.md` — per-model wheels, and what a next
+  model would be for. Carries a status note: several of its premises are
+  superseded, and it is the one doc to read the header of before the body

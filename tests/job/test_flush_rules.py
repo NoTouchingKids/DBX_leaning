@@ -174,3 +174,40 @@ def test_an_unknown_writer_is_rejected_by_name():
 
     with pytest.raises(ValueError, match="expected auto|delta-rs|spark|jsonl"):
         select_writer("parquet")
+
+
+def test_the_writer_kinds_are_an_enum_and_the_error_lists_them_all():
+    """The valid set exists once.
+
+    `select_writer` used to compare against four string literals and then
+    report the valid set from a hand-written message — two lists kept in step
+    by hand. Deriving the message from the enum is what stops them drifting,
+    the same way `make_message` derives its error from `MessageType`.
+
+    It matters more here than the size suggests: this selector chooses the
+    DURABLE write path, and choosing wrong is the failure that already
+    happened once — delta-rs given a three-part UC name wrote to a local
+    directory without erroring, so a run reported SUCCEEDED with its telemetry
+    in a container about to be discarded.
+    """
+    import pytest
+
+    from job.delta import WriterKind, select_writer
+
+    with pytest.raises(ValueError) as excinfo:
+        select_writer("sprak")
+
+    message = str(excinfo.value)
+    for kind in WriterKind:
+        assert kind.value in message, f"{kind.value} missing from {message!r}"
+
+
+def test_the_writer_kind_survives_what_an_env_var_really_contains():
+    """`DBX_WRITER` is read straight from the environment, where a value
+    arrives with whatever case and whitespace a deploy gave it."""
+    from job.delta import WriterKind
+
+    assert WriterKind.parse(None) is WriterKind.AUTO
+    assert WriterKind.parse("") is WriterKind.AUTO
+    assert WriterKind.parse("  SPARK ") is WriterKind.SPARK
+    assert WriterKind.parse("Delta-RS") is WriterKind.DELTA_RS

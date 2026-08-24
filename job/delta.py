@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import threading
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -42,6 +43,7 @@ __all__ = [
     "SparkWriter",
     "JsonlWriter",
     "select_writer",
+    "WriterKind",
     "DELTA_RS_UNIMPLEMENTED",
 ]
 
@@ -158,7 +160,42 @@ class JsonlWriter:
         return None
 
 
-def select_writer(kind: str = "auto", *, local_root: str = ".delta-local") -> BatchWriter:
+class WriterKind(StrEnum):
+    """The four values ``DBX_WRITER`` accepts.
+
+    An enum rather than bare strings for the same reason the wire protocol
+    uses them: the valid set lives in exactly one place. This function
+    previously compared against four string literals and then reported the
+    valid set from a hand-written message — two lists that had to be kept in
+    step by hand, which is the drift this repo has paid for repeatedly.
+
+    It matters more here than the size suggests. This selector chooses the
+    DURABLE write path, and getting it wrong is the failure that already
+    happened once: delta-rs handed a three-part UC name wrote to a local
+    directory with no error, so a run reported SUCCEEDED with its telemetry
+    in a container about to be discarded.
+    """
+
+    AUTO = "auto"
+    SPARK = "spark"
+    JSONL = "jsonl"
+    DELTA_RS = "delta-rs"
+
+    @classmethod
+    def parse(cls, value: str | None) -> WriterKind:
+        """Accept what an env var actually contains: None, case, whitespace."""
+        try:
+            return cls((value or cls.AUTO.value).strip().lower())
+        except ValueError:
+            raise ValueError(
+                f"unknown writer {value!r}; expected one of "
+                f"{'|'.join(k.value for k in cls)}"
+            ) from None
+
+
+def select_writer(
+    kind: str | WriterKind = WriterKind.AUTO, *, local_root: str = ".delta-local"
+) -> BatchWriter:
     """Pick the implementation once, at process start.
 
     ``auto`` means Spark, then local JSONL — which is a development
@@ -167,16 +204,14 @@ def select_writer(kind: str = "auto", *, local_root: str = ".delta-local") -> Ba
     than failing. delta-rs is skipped: it is not implemented, and picking it
     automatically is exactly how the silent-local-write bug would return.
     """
-    kind = (kind or "auto").lower()
+    selected = WriterKind.parse(kind if isinstance(kind, str) else kind.value)
 
-    if kind == "delta-rs":
+    if selected is WriterKind.DELTA_RS:
         return DeltaRsWriter()  # raises NotImplementedError, with the reason
-    if kind == "spark":
+    if selected is WriterKind.SPARK:
         return SparkWriter()
-    if kind == "jsonl":
+    if selected is WriterKind.JSONL:
         return JsonlWriter(local_root)
-    if kind != "auto":
-        raise ValueError(f"unknown writer {kind!r}; expected auto|delta-rs|spark|jsonl")
 
     try:
         writer = SparkWriter()

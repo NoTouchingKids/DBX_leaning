@@ -41,7 +41,27 @@ variables:
     default: ""
 
 # The workspace sync is the deployment mechanism, so what it excludes matters.
+#
+# The frontend is the awkward one. Its SOURCE has no business in the
+# workspace — there is no Node runtime there, nothing would ever build it, and
+# node_modules alone would dwarf everything else. But its BUILD OUTPUT is what
+# `app/spa.py` serves, so the app answers 503 on every page without it. Hence
+# the split below: the source subdirectories are excluded, and `frontend/dist`
+# is named in `include`, which is what overrides .gitignore — dist is a build
+# artifact and is correctly ignored by git.
+#
+# The excludes below name frontend subdirectories one by one rather than
+# excluding `frontend/**` and re-including `frontend/dist/**`. That would be
+# shorter, but it depends on whether include or exclude wins when the two
+# contradict, which is not something this repo can verify without a live
+# workspace. No rule here contradicts another, so precedence does not matter.
+#
+# `pnpm build` is therefore a REQUIRED step before `databricks bundle deploy`,
+# not an optional one — see deploy/README.md. A deploy that skips it produces
+# a working API and a site that answers 503 on every page.
 sync:
+  include:
+    - frontend/dist/**
   exclude:
     - .venv/**
     - .git/**
@@ -49,7 +69,10 @@ sync:
     - "**/.pytest_cache/**"
     - .ruff_cache/**
     - .delta-local/**
-    - frontend/**
+    - frontend/node_modules/**
+    - frontend/src/**
+    - frontend/public/**
+    - frontend/coverage/**
     - tests/**
 
 targets:

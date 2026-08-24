@@ -13,8 +13,10 @@ resources:
     model_bayesian_ab:
       name: "[${bundle.target}] dbx-leaning · bayesian_ab"
       description: >-
-        Runs models.bayesian_ab through the job harness. Simulated bayesian_ab
-        over a knapsack — standard library only, no third-party solver.
+        Runs models.bayesian_ab through the job harness. Closed-form Bayesian
+        A/B comparison over Beta-Binomial posteriors, from the samples
+        catalog — standard library only, and fast enough that a run is
+        usually over before an observer attaches.
 
       # The account ceiling is 5 concurrent job TASKS across ALL models
       # combined, which Databricks has no way to express per-job — so the app

@@ -33,6 +33,7 @@ payload reports that instead of a fabricated zero.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -43,6 +44,20 @@ __all__ = ["McmcModel", "build_model", "gaussian_problem", "split_rhat"]
 
 #: What ``data`` is called when the caller supplied it instead of the loader.
 CALLER_SUPPLIED = "caller-supplied"
+
+#: How many chains the two trace fields describe. Both are bounded by this
+#: rather than by the chain count, so a run with 200 walkers cannot turn a
+#: progress message into something the live path has to drop. The default is
+#: 8 chains, so nothing is truncated in the normal case; when it is, the
+#: payload says so (``chain_positions_truncated``).
+MAX_TRACE_CHAINS = 32
+
+#: Post-burn-in draws kept per chain in the results sample, and the ceiling
+#: on the whole sample for one parameter. 8 x 100 = 800 floats per parameter
+#: at the defaults; at three parameters that is roughly 20 KB of JSON on the
+#: one result message a run sends, not a copy of the posterior.
+TRACE_DRAWS_PER_CHAIN = 100
+TRACE_SAMPLE_CAP = 800
 
 #: Column the location/scale model reads once a bare sequence has been wrapped
 #: in a :class:`Dataset`, so provenance works the same way for both problems.
@@ -293,6 +308,16 @@ class McmcModel:
         rhat = split_rhat(np.transpose(usable, (1, 0, 2))) if usable.shape[0] >= 4 else None
 
         acceptance = np.asarray(self._sampler.acceptance_fraction, dtype=float)
+        # Where each walker currently is, in the order of `parameters`. This
+        # is the live trace: one point per chain per progress sample, not a
+        # history — the client accumulates the history itself, and a client
+        # that reconnects picks the trace up from wherever the run is now.
+        #
+        # Size at the defaults: 8 chains x 3 parameters = 24 floats, about
+        # 300 bytes of JSON, on every progress emission (~15 per default run).
+        # Capped at MAX_TRACE_CHAINS chains so a high-walker configuration
+        # cannot make this the reason a message gets dropped.
+        positions, truncated = self._chain_positions(chain)
         self.emit(
             "progress",
             elapsed_seconds=elapsed,
@@ -312,7 +337,31 @@ class McmcModel:
                 # nothing is not exploring. See this module's docstring.
                 "stuck_chains": int((acceptance == 0).sum()),
                 "per_chain_acceptance": [round(float(a), 4) for a in acceptance],
+                #: Current position of each chain, one list per chain in the
+                #: order of `parameters`. Bounded — see above.
+                "chain_positions": positions,
+                "chain_positions_truncated": truncated,
             },
+        )
+
+    def _chain_positions(self, chain) -> tuple[list[list[float]], bool]:
+        """The walkers' current coordinates, capped at MAX_TRACE_CHAINS.
+
+        Read off the stored chain rather than from ``get_last_sample()`` so
+        this stays correct for a sampler that has been resumed, and so the
+        progress emission needs nothing from emcee it has not already asked
+        for.
+        """
+        if chain.shape[0] == 0:
+            return [], False
+        latest = chain[-1]  # (chains, params)
+        truncated = bool(latest.shape[0] > MAX_TRACE_CHAINS)
+        return (
+            [
+                [round(float(v), 6) for v in walker]
+                for walker in latest[:MAX_TRACE_CHAINS]
+            ],
+            truncated,
         )
 
     # --- results ----------------------------------------------------------
@@ -322,7 +371,11 @@ class McmcModel:
 
         Raw draws are deliberately not written: at 8 chains x 800 draws they
         are 6,400 rows per parameter of mostly-redundant detail, and the
-        preview a client actually renders comes from the summary.
+        preview a client actually renders comes from the summary. What each
+        row *does* carry is ``draws_sample``: a systematically thinned,
+        hard-capped slice of the post-burn-in draws per chain, as JSON. That
+        is enough to draw a trace or a density after the fact, and small
+        enough to sit inside a result message's preview.
 
         Every row carries the data's provenance, so a posterior fitted to real
         trips and one fitted to the synthetic fallback stay distinguishable
@@ -346,6 +399,8 @@ class McmcModel:
         if self.dataset is not None:
             provenance.update(self.dataset.describe())
 
+        thinned = self._thinned_draws(usable)
+
         rows = []
         for i, name in enumerate(self.param_names):
             samples = flat[:, i]
@@ -361,12 +416,60 @@ class McmcModel:
                         float(rhat_by_param[i]), 6
                     ),
                     "draws_used": int(flat.shape[0]),
+                    # A JSON string, not a nested array: VARIANT is
+                    # nice-to-have here, a STRING column is everywhere.
+                    "draws_sample": thinned[i],
                     "complete": self.draws_done >= self.n_draws,
                     "model": self._description(),
                     **provenance,
                 }
             )
         return rows
+
+    def _thinned_draws(self, usable) -> list[str]:
+        """One JSON string per parameter: the post-burn-in draws, thinned.
+
+        Systematic thinning (every ``thin``-th draw) rather than a random
+        sample, because the point of keeping these is the *trace* — a random
+        subsample destroys the ordering that makes a trace readable, and with
+        it any visible sign of a chain that got stuck for a stretch.
+
+        Bounded twice over: ``TRACE_DRAWS_PER_CHAIN`` per chain, and
+        ``TRACE_SAMPLE_CAP`` across all chains for one parameter, so a run
+        with more chains keeps fewer draws from each rather than growing. At
+        the defaults that is 8 chains x 100 draws = 800 floats per parameter.
+        """
+        n_draws, n_chains, n_params = usable.shape
+        if n_draws == 0 or n_chains == 0:
+            return ["" for _ in range(n_params)]
+
+        kept_chains = min(n_chains, MAX_TRACE_CHAINS)
+        per_chain = max(1, min(TRACE_DRAWS_PER_CHAIN, TRACE_SAMPLE_CAP // kept_chains))
+        thin = max(1, -(-n_draws // per_chain))  # ceil, so the cap always holds
+        index = range(0, n_draws, thin)
+
+        out = []
+        for i in range(n_params):
+            out.append(
+                json.dumps(
+                    {
+                        "thin": thin,
+                        "draws_per_chain": len(index),
+                        "chains_included": kept_chains,
+                        "chains_total": int(n_chains),
+                        # How many draws the sample was taken from, which is
+                        # the post-burn-in count except on a run cancelled
+                        # before burn-in finished — there the summary keeps
+                        # the whole chain rather than nothing, and this says so.
+                        "draws_available": int(n_draws),
+                        "chains": [
+                            [round(float(usable[d, c, i]), 6) for d in index]
+                            for c in range(kept_chains)
+                        ],
+                    }
+                )
+            )
+        return out
 
     def _log(self, message: str, *, phase: str = "run", level: str = "INFO") -> None:
         if self.emit is not None:

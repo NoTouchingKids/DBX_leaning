@@ -39,8 +39,18 @@ class ReconcileReport:
 
 
 async def reconcile_once(
-    repo: RunRepository, jobs: JobsApi | None = None, store: RunStore | None = None
+    repo: RunRepository | None = None,
+    jobs: JobsApi | None = None,
+    store: RunStore | None = None,
 ) -> ReconcileReport:
+    """``store`` is what this needs; ``repo`` and ``jobs`` are both optional
+    sources of truth about a given run.
+
+    ``repo`` became optional when ``run_status`` moved to Lakebase. The list
+    of stale runs comes from the store, and the warehouse is only consulted
+    for ``run_events`` — so a deploy with Postgres and no SQL warehouse can
+    still reconcile, via the Jobs API, instead of never reconciling at all.
+    """
     report = ReconcileReport()
     if store is None:
         report.errors.append("no run store; cannot reconcile")
@@ -74,15 +84,18 @@ async def reconcile_once(
 
 
 async def _resolve(
-    repo: RunRepository, jobs: JobsApi | None, run_id: str, job_run_id: str | None
+    repo: RunRepository | None, jobs: JobsApi | None, run_id: str, job_run_id: str | None
 ) -> tuple[RunStatus, str] | None:
     """The job's own record first, the Jobs API second.
 
     ``run_events`` is what the job wrote durably as it went, so it is closer to
     the truth than anything the app inferred. The Jobs API only gets asked
     about runs the job never got to finish recording — the crash case.
+
+    With no ``repo`` — no SQL warehouse configured — the Jobs API is the only
+    source, which is weaker but is the difference between reconciling and not.
     """
-    event = await repo.latest_event(run_id)
+    event = await repo.latest_event(run_id) if repo is not None else None
     if event:
         try:
             status = RunStatus(event["status"])

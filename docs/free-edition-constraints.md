@@ -37,7 +37,12 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
 - **The bundled licence has a fixed expiry date per gurobipy release** — e.g.
   v11's expired 2025-11-24, v10's 2024-10-28, v9's 2023-10-25. Whichever
   version is pinned, record its expiry; it fails hard, not gracefully, once
-  past it.
+  past it. This build pins `gurobipy >=13,<14`, whose bundled licence expires
+  **2027-11-29** (verified 2026-08-22 against 13.0.2). The pin and the date
+  live together in `pyproject.toml`, the table of them is in
+  `models/gurobi_scheduling/LICENCE_EXPIRY.md`, and
+  `scripts/check_gurobi_licence.py` re-reads the date from the installed
+  package so the next person does not have to do archaeology.
 - **Lazy constraints do not count against the 2000-constraint cap.** Measured
   2026-08-23 against gurobipy 13.0.2: a capacitated routing model separating
   ~412 rounded-capacity cuts kept `NumConstrs` at 25 — Gurobi holds separated
@@ -52,6 +57,39 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   unless the trusted-domain list is confirmed to include it. **This build
   uses the bundled restricted licence only — no WLS.**
 
+## Getting data in from outside
+
+The project's own restriction to the `samples` catalog was **lifted on
+2026-08-24**: external data is allowed where it genuinely suits a model. The
+*platform* restriction that shapes how it can arrive has not lifted, and the
+two are easy to confuse.
+
+**Outbound traffic is restricted to trusted domains, including from job
+compute.** So a model cannot fetch a dataset at run time. This is the same
+constraint that rules out Gurobi's WLS licence (`token.gurobi.com`), and it
+fails in the least helpful way: the code works on a laptop and hangs or
+errors on the job, after the run has already started and claimed one of five
+account-wide task slots.
+
+External data therefore means **land it in Unity Catalog first**, once, out
+of band. Routes, roughly in order of how little they can go wrong:
+
+| Route | What it is | Notes |
+|---|---|---|
+| Upload to a UC **volume** | Drop a file in, read it with Spark | No egress at run time. The obvious route for a one-off CSV/Parquet |
+| **Databricks Marketplace** | Free data products attach as a catalog | Governed, no egress, no file to keep in sync. Best fit when a product matches |
+| **Delta Sharing** | A shared catalog from a provider | Same shape as `samples` itself |
+| A **notebook** run once | Fetch and write a table by hand | Only if the source is on the trusted-domain list; a notebook is not exempt from egress rules |
+| **`/Volumes/samples/databricks/datasets/`** | A Unity Catalog volume of file-based sample data | Governed, egress-free, and the file source to build on. Invisible to `information_schema.tables` because a volume is not a table |
+| ~~`/databricks-datasets`~~ | The legacy DBFS mount | **Do not build on it.** Databricks "recommends against using DBFS ... in Unity Catalog-enabled workspaces", and says its contents "are subject to change without notice". `scripts/probe_sample_data.py` still reports whether it is reachable |
+| **Data bundled in a PyPI package** | Installed with the environment | Genuinely egress-free at run time, because pip already ran. Small datasets only, and it inflates every model environment that lists the extra |
+
+Whatever the route, the model still reads a table, and
+`models/_data.load()` still takes arbitrary SQL — it was never
+samples-specific. The synthetic fallback stays mandatory either way: it is
+what keeps a model runnable in tests and on a laptop, and it is the reason a
+missing table degrades instead of failing a run.
+
 ## Delta / Unity Catalog external writes
 
 - Officially supported external Delta clients: **Spark** (GA). **Flink,
@@ -59,9 +97,10 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   Databricks account-team approval — likely unreachable from Free Edition
   given no account-level API access.
 - **Python `delta-rs` / `deltalake` is not on the documented supported-client
-  list.** It may still work for external (non-managed) tables; this is
-  unverified and worth a quick spike, but is not a blocker since Spark is a
-  legitimate fallback (see below).
+  list.** It may still work for external (non-managed) tables; that is
+  unverified, and it is not a blocker, because Spark turned out to be the
+  write path outright rather than the fallback it was designed as (see
+  below).
 - **Managed-table writes from external clients are Public Preview**, gated
   behind `catalogManaged` ("catalog commits") and external data access being
   enabled at the metastore level.
@@ -102,21 +141,31 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
 - Use the API's own `wait_timeout` (5–50s) so a fast statement is one round
   trip, rather than polling for completion.
 
-## Databricks Apps ingress — unresolved, treat as a real risk
+## Databricks Apps ingress — WebSocket and SSE both work; the numbers are not measured
 
-No official documentation confirms or denies WebSocket support, SSE
-streaming duration limits, or idle-connection handling on the Databricks
-Apps ingress. Community reports (unofficial, none resolved) consistently
-point at:
+No official documentation confirms or denies WebSocket support, SSE streaming
+duration limits, or idle-connection handling on the Databricks Apps ingress.
+That is still true of the documentation. It is no longer true of this
+project: **both `/spike-ws` and `/spike-sse` were run against a real
+workspace on 2026-08-23 and both passed** — see `docs/spike-results.md`.
+WebSocket `Upgrade` survives the ingress, and SSE streams through it. The
+question that stayed open across all three builds of this platform is closed,
+and the transport in `docs/architecture.md` is the one being built rather
+than a hedge.
+
+What remains unmeasured is the timing, and the community reports (unofficial,
+none resolved) are still the only figures anyone has:
 
 - Idle connections dropped around **~30s**
 - Long-lived streams cut around **~120s**
 - A separate report of a **~60s** upstream timeout on long requests
 
 Three independent, consistent reports across two different apps in this
-project's own history is enough to design around, not enough to trust
-blindly. This is why `/spike-ws` and `/spike-sse` exist and gate everything
-else — they turn "probably" into "confirmed, with these exact numbers."
+project's own history is enough to design against, which is what
+`DBX_WS_PING_S` (20s, `job/config.py`) and `DBX_SSE_KEEPALIVE_S` (10s,
+`app/config.py`) are set from. They are conservative guesses that work, not
+tuned values. `docs/spike-results.md` lists the three measurements that would
+change specific code, and none of them is recorded yet.
 
 ---
 

@@ -34,9 +34,17 @@ the write path bypasses it entirely.
 ## Deploy
 
 ```bash
-databricks bundle validate                     # schema and references
+cd frontend && pnpm install && pnpm build && cd ..   # see below — required
+databricks bundle validate                           # schema and references
 databricks bundle deploy -t dev
 ```
+
+**Building the frontend is a required step, not an optional one.** There is no
+Node runtime in the workspace, so nothing there will ever build it; the bundle
+syncs `frontend/dist` and excludes the source. Skip the build and the deploy
+succeeds, the API works, and every page answers 503 with the message in
+`app/spa.py::NO_BUNDLE`. `pnpm build` runs `tsc -b` first, so a type error
+fails the build rather than shipping a stale `dist/`.
 
 Then tell the app where it lives, which is only knowable after it has a URL:
 
@@ -69,6 +77,14 @@ What deploys is therefore exactly what the tests ran against.
 `tests/deploy/test_requirements.py` fails if a generated file drifts from the
 lock, if a model's library leaks into another model's environment, or if two
 environments end up pinning different versions of a shared dependency.
+
+**The frontend is the exception to "the sync mirrors the repo".** `databricks.yml`
+excludes `frontend/src`, `frontend/node_modules` and `frontend/public`, and
+names `frontend/dist` under `sync.include` — which is also what gets it past
+.gitignore, since a build artifact is correctly ignored by git. The app finds
+it at `frontend/dist` relative to the repo root by default
+(`app/config.py::frontend_dist`); `DBX_FRONTEND_DIST` overrides that if the
+layout ever changes.
 
 ## Parameters
 

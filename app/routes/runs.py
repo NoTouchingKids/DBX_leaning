@@ -168,11 +168,19 @@ async def list_runs(
     hub: Hub,
     limit: int = Query(50, ge=1, le=500),
     status_filter: str | None = Query(None, alias="status"),
+    model: str | None = Query(None, description="narrow to one model, e.g. mcmc"),
 ) -> dict:
-    runs = await store.list_runs(limit=limit, status=status_filter)
+    """Recent runs, newest first, optionally filtered.
+
+    Filtering server-side rather than letting the client sieve the top-N
+    window: that only works while the window happens to be big enough to hold
+    everything relevant, and stops working silently when it is not.
+    """
+    runs = await store.list_runs(limit=limit, status=status_filter, model=model)
     live = set(hub.job_sockets.run_ids)
     return {
         "count": len(runs),
+        "filters": {"status": status_filter, "model": model},
         "runs": [{**r.as_dict(), "live": r.run_id in live} for r in runs],
     }
 

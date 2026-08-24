@@ -50,14 +50,32 @@ def _event(msg: Message) -> str:
     )
 
 
+#: No seq will ever reach this. Anything past it did not come from an ``id:``
+#: this app wrote, so it is not a resume point.
+_MAX_RESUMABLE_SEQ = 2**63 - 1
+
+
 def _parse_last_event_id(raw: str | None) -> int | None:
+    """A resume point, or None meaning "treat this as a fresh connection".
+
+    Out-of-range is rejected rather than honoured. An id above every seq the
+    run will ever reach filters *every* message forever: the stream stays open
+    and completely silent, which no client can tell apart from a run that is
+    simply slow, and which a stale cached id or a rewriting proxy is enough to
+    cause. Degrading to the fresh-connection path costs one duplicated
+    snapshot; honouring it costs the whole run.
+    """
     if raw is None or not raw.strip():
         return None
     try:
-        return int(raw)
+        seq = int(raw)
     except ValueError:
         log.info("ignoring unparseable Last-Event-ID %r", raw[:40])
         return None
+    if not 0 <= seq <= _MAX_RESUMABLE_SEQ:
+        log.info("ignoring out-of-range Last-Event-ID %r", raw[:40])
+        return None
+    return seq
 
 
 @router.get("/api/runs/{run_id}/stream")
