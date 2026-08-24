@@ -207,8 +207,11 @@ Full procedure: `deploy/README.md`.
    worked end to end. That gate is met and the track has started — see
    `frontend/README.md`.
 5. **Not done:** `databricks bundle deploy` has never been run against a
-   workspace, `scripts/probe_sample_data.py` has never been run against one
-   either, and there is no CI. Do not read "built and tested" as "deployed".
+   workspace, `scripts/probe_sample_data.py` has never been run end to end on
+   one, and there is no CI. Do not read "built and tested" as "deployed".
+   What *is* confirmed against a real workspace: WebSocket and SSE both
+   survive the Apps ingress, the `samples` catalog's table list, and column
+   listings for seven of its tables (`docs/sample-data-inventory.md`).
 
 ## Docs index
 

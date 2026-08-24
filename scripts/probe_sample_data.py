@@ -13,6 +13,11 @@ was invisible in every test and would only have failed on a real run
 
 Paste the output back into the repo issue/PR so the loaders can be written
 against fact rather than inference.
+
+One thing learned the hard way, and encoded below: in this catalog
+`information_schema.tables` and `information_schema.columns` do not cover the
+same set of tables. Existence is decided by `tables`; columns fall back to
+`DESCRIBE`. See the comment in `main()`.
 """
 
 from __future__ import annotations
@@ -63,8 +68,35 @@ def main() -> int:
 
     print(f"samples catalog available: {samples_available(spark)}\n")
 
-    # One query for every column of every table beats guessing, and beats a
-    # DESCRIBE per table.
+    # Existence and columns come from two different views, because in this
+    # catalog they DISAGREE.
+    #
+    # `information_schema.tables` lists 123 tables across nine schemas.
+    # `information_schema.columns` returns rows for only some of them — as
+    # observed on 2026-08-24, bakehouse in full, one of accuweather's twelve
+    # tables, and nothing at all for nyctaxi, tpch, tpcds_sf1, tpcds_sf1000,
+    # wanderbricks or healthverity. The pattern is not alphabetical, not a row
+    # cap, and not a permissions boundary anyone here can see.
+    #
+    # This matters more than it sounds. An earlier version of this script
+    # treated absence from `columns` as absence from the catalog, and would
+    # have reported `samples.nyctaxi.trips` — the table every model in this
+    # repo reads today, and which `tables` lists — as NOT PRESENT. Confidently
+    # wrong output is worse than no output: it sends someone rewriting nine
+    # loaders against a problem that does not exist.
+    try:
+        tables = spark.sql(
+            """
+            SELECT table_schema, table_name
+            FROM samples.information_schema.tables
+            ORDER BY table_schema, table_name
+            """
+        ).collect()
+    except Exception as exc:  # noqa: BLE001
+        print(f"could not read samples.information_schema.tables: {exc}")
+        return 1
+    present = {f"samples.{r['table_schema']}.{r['table_name']}" for r in tables}
+
     try:
         columns = spark.sql(
             """
@@ -75,17 +107,47 @@ def main() -> int:
         ).collect()
     except Exception as exc:  # noqa: BLE001
         print(f"could not read samples.information_schema.columns: {exc}")
-        return 1
+        columns = []
 
     by_table: dict[str, list[tuple[str, str]]] = {}
     for row in columns:
         key = f"samples.{row['table_schema']}.{row['table_name']}"
         by_table.setdefault(key, []).append((row["column_name"], row["full_data_type"]))
 
-    wanted = sorted(by_table) if args.all else [t for t in CANDIDATES if t in by_table]
-    missing = [t for t in CANDIDATES if t not in by_table]
+    wanted = sorted(present) if args.all else [t for t in CANDIDATES if t in present]
+    missing = [t for t in CANDIDATES if t not in present]
 
-    print(f"{len(by_table)} tables in samples; reporting {len(wanted)}\n")
+    # DESCRIBE works regardless of what information_schema chooses to expose,
+    # so it is the fallback for every table the bulk query skipped.
+    described: list[str] = []
+    for table in wanted:
+        if table in by_table:
+            continue
+        try:
+            rows = spark.sql(f"DESCRIBE TABLE {table}").collect()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! DESCRIBE {table} failed: {type(exc).__name__}: {exc}")
+            continue
+        cols = [
+            (r["col_name"], r["data_type"])
+            for r in rows
+            # DESCRIBE appends a partition-info block after a blank row.
+            if r["col_name"] and not r["col_name"].startswith("#")
+        ]
+        if cols:
+            by_table[table] = cols
+            described.append(table)
+
+    print(
+        f"{len(present)} tables in samples; {len(by_table)} with columns; "
+        f"reporting {len(wanted)}"
+    )
+    if described:
+        print(
+            f"{len(described)} needed DESCRIBE because information_schema.columns "
+            f"returned nothing for them: {', '.join(described)}"
+        )
+    print()
     for table in wanted:
         print(table)
         if args.counts:
@@ -99,7 +161,9 @@ def main() -> int:
         print()
 
     if missing:
-        print("candidates NOT present:")
+        # Absent from information_schema.TABLES, which is the authoritative
+        # view. Unlike absence from `columns`, this really does mean gone.
+        print("candidates NOT present (absent from information_schema.tables):")
         for table in missing:
             print(f"  {table}")
         print()
