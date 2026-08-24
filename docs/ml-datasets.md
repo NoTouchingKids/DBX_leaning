@@ -17,13 +17,14 @@ worst available way: the code works on a laptop and then hangs or errors on
 the job, after the run has started and taken one of five account-wide task
 slots.
 
-So there are exactly three egress-free routes, and they have very different
-costs:
+So there are four candidate egress-free routes, and they have very different
+costs — and one of the four is not yet known to work here:
 
 | Route | Cost | Good for |
 |---|---|---|
 | **A Unity Catalog table** | None. The loader already does this | Anything already in `samples`, or landed there once |
 | **Data bundled in a PyPI wheel** | Inflates every model environment that lists the extra | Small, well-understood benchmark sets |
+| **`/databricks-datasets`** | None *if reachable* — it is a mount, not a fetch. **Unverified on Free Edition serverless** | Potentially the richest source here; see Route 3 |
 | **Landed in UC out of band** — volume upload, Marketplace, Delta Sharing | One-off human step, then free forever | Anything else |
 
 `pip install` runs before the model does, which is why route two works at all:
@@ -179,7 +180,42 @@ Adding statsmodels costs a new extra on whichever models use it. Weigh that
 against `accuweather`, which needs no dependency at all — the honest reason to
 prefer `co2` is length and cleanliness, not availability.
 
-## Route 3: bringing something in
+## Route 3: `/databricks-datasets` — the biggest maybe
+
+Separate from the `samples` Unity Catalog catalog, and much larger:
+Databricks ships a read-only mount at `/databricks-datasets` containing a
+long-standing library of sample data, including the third-party CSV datasets
+documented at
+`https://docs.databricks.com/aws/en/discover/databricks-datasets`.
+
+**Why it would matter:** it is a *mount*, not a download. If it is readable,
+it costs no egress and is a fully legitimate source under the trusted-domains
+restriction — no volume upload, no Marketplace, no dependency. That would make
+it the single richest option on this page.
+
+**Why it is not listed as available:** nothing in this repo has ever touched
+it, and DBFS access is restricted on Unity Catalog-only workspaces and on
+serverless compute — which is what Free Edition is. Whether the mount is
+reachable there is genuinely unknown.
+
+This page deliberately does not reproduce the dataset list from that URL.
+Free Edition's own egress restriction blocks `docs.databricks.com` from the
+environment this repo is developed in, so the list could only have been
+written from memory, and a remembered path that turns out not to exist is
+exactly the class of defect this file exists to prevent. Get it from the
+mount itself, which is authoritative.
+
+**How to settle it:** `scripts/probe_sample_data.py` now probes the mount as
+part of its normal run. It tries three access methods in order — `dbutils.fs.ls`,
+the `/dbfs` FUSE path, and Spark's `binaryFile` reader — because which one
+works depends on compute type and none can be assumed. It prints which method
+succeeded, since that answer is worth as much as the listing: it tells the
+next person what to write against.
+
+If none works, that is a real answer rather than a bug, and it means external
+data has to arrive through a UC volume. Record the outcome here either way.
+
+## Route 4: bringing something in
 
 Covered in `free-edition-constraints.md`, "Getting data in from outside".
 Short version: a UC volume upload is the route that cannot go wrong;

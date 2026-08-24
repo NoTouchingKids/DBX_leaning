@@ -80,6 +80,7 @@ of band. Routes, roughly in order of how little they can go wrong:
 | **Databricks Marketplace** | Free data products attach as a catalog | Governed, no egress, no file to keep in sync. Best fit when a product matches |
 | **Delta Sharing** | A shared catalog from a provider | Same shape as `samples` itself |
 | A **notebook** run once | Fetch and write a table by hand | Only if the source is on the trusted-domain list; a notebook is not exempt from egress rules |
+| **`/databricks-datasets`** | Databricks' read-only sample-data mount | A mount, not a fetch, so egress-free **if reachable**. Unverified here: DBFS access is restricted on UC-only and serverless compute, which is what Free Edition is. `scripts/probe_sample_data.py` tests it three ways and reports which works |
 | **Data bundled in a PyPI package** | Installed with the environment | Genuinely egress-free at run time, because pip already ran. Small datasets only, and it inflates every model environment that lists the extra |
 
 Whatever the route, the model still reads a table, and

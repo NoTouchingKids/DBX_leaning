@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -50,6 +51,102 @@ CANDIDATES = [
     "samples.tpch.orders",
     "samples.tpch.lineitem",
 ]
+
+
+
+#: The read-only mount Databricks ships in workspaces, separate from the
+#: `samples` Unity Catalog catalog and much larger — it is where the
+#: third-party CSV sample datasets live.
+#:
+#: Whether it is reachable from **Free Edition serverless** is the open
+#: question this probe exists to answer. It is a mount rather than a fetch, so
+#: if it can be listed at all it costs no egress and is a legitimate source
+#: under the trusted-domains restriction. But DBFS access is restricted on
+#: UC-only workspaces and on serverless compute, and nothing in this repo has
+#: ever touched it, so treat an empty result as "not available here" rather
+#: than "does not exist".
+DATABRICKS_DATASETS = "/databricks-datasets"
+
+
+def probe_databricks_datasets(spark: Any, depth: int = 1) -> None:
+    """List `/databricks-datasets`, by whichever access method works.
+
+    Three methods, tried in order, because which one is available depends on
+    the compute type and none of them can be assumed:
+
+    1. ``dbutils.fs.ls`` — the documented way, and the one most likely to
+       survive on serverless.
+    2. the ``/dbfs`` FUSE mount — classic clusters only; absent on serverless.
+    3. Spark's ``binaryFile`` reader — works wherever Spark can read the path
+       at all, and is the last resort because it is the slowest.
+
+    Prints which method worked, because that answer is worth as much as the
+    listing: it tells the next person what to write against.
+    """
+    print(f"--- {DATABRICKS_DATASETS} ---")
+
+    def via_dbutils() -> list[str] | None:
+        try:
+            dbutils = globals().get("dbutils")
+            if dbutils is None:
+                from pyspark.dbutils import DBUtils  # type: ignore[import-not-found]
+
+                dbutils = DBUtils(spark)
+            return [f.path for f in dbutils.fs.ls(DATABRICKS_DATASETS)]
+        except Exception as exc:  # noqa: BLE001
+            print(f"  dbutils.fs.ls: unavailable ({type(exc).__name__}: {str(exc)[:120]})")
+            return None
+
+    def via_fuse() -> list[str] | None:
+        import os
+
+        path = f"/dbfs{DATABRICKS_DATASETS}"
+        try:
+            return sorted(os.listdir(path))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  /dbfs FUSE mount: unavailable ({type(exc).__name__}: {str(exc)[:120]})")
+            return None
+
+    def via_spark() -> list[str] | None:
+        try:
+            frame = (
+                spark.read.format("binaryFile")
+                .option("recursiveFileLookup", "false")
+                .load(f"{DATABRICKS_DATASETS}/*")
+            )
+            return sorted({r["path"] for r in frame.select("path").limit(500).collect()})
+        except Exception as exc:  # noqa: BLE001
+            print(f"  spark binaryFile: unavailable ({type(exc).__name__}: {str(exc)[:120]})")
+            return None
+
+    for name, method in (
+        ("dbutils.fs.ls", via_dbutils),
+        ("/dbfs FUSE", via_fuse),
+        ("spark binaryFile", via_spark),
+    ):
+        entries = method()
+        if not entries:
+            continue
+        print(f"  READABLE via {name} — {len(entries)} entries at the top level:")
+        for entry in sorted(entries)[:80]:
+            print(f"    {entry}")
+        if len(entries) > 80:
+            print(f"    ... and {len(entries) - 80} more")
+        print(
+            "\n  This is a legitimate egress-free source: it is a mount, not a "
+            "download.\n  Read a CSV from it with "
+            'spark.read.csv(path, header=True, inferSchema=True).'
+        )
+        return
+
+    print(
+        "  NOT READABLE by any method. That is a real answer, not a bug:\n"
+        "  DBFS access is restricted on Unity Catalog-only workspaces and on\n"
+        "  serverless compute. If this is what Free Edition does, then\n"
+        "  /databricks-datasets is not a source this platform can use, and\n"
+        "  external data has to arrive through a UC volume instead.\n"
+        "  Record the outcome either way in docs/ml-datasets.md."
+    )
 
 
 def main() -> int:
@@ -167,6 +264,9 @@ def main() -> int:
         for table in missing:
             print(f"  {table}")
         print()
+
+    probe_databricks_datasets(spark)
+    print()
 
     print("--- what the model loaders actually get ---")
     for name, loader in (("nyc_taxi_hourly", nyc_taxi_hourly), ("nyc_taxi_trips", nyc_taxi_trips)):
