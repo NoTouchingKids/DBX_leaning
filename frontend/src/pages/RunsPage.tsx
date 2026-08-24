@@ -161,7 +161,9 @@ export function RunsPage() {
             disabled={!canLoadMore(filters.limit) || list.isFetching}
             title="Refetches a wider top-N window — this endpoint has no offset or cursor"
           >
-            Widen to top {nextLimit(filters.limit)}
+            {canLoadMore(filters.limit)
+              ? `Widen to top ${nextLimit(filters.limit)}`
+              : "Window at its 500-row maximum"}
           </Button>
         </span>
       </div>
