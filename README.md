@@ -48,16 +48,16 @@ job/                   The harness: model loader, thread->loop crossing, WS clie
                        with HTTP-push fallback, Delta writer, cancellation
 app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
                        backfill, startup reconciliation, ServiceHub/DI
-models/                Five model packages. See models/README.md for the
+models/                Nine model packages. See models/README.md for the
                        duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
 lakebase_ddl/          Postgres DDL (run state) — applied at startup too
-databricks.yml         Asset bundle: five jobs (one per model) and the app
+databricks.yml         Asset bundle: nine jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
 entrypoints/           What a Databricks job actually runs
-frontend/              Not started, on purpose — see frontend/README.md
-tests/                 ~220 tests, none needing a Databricks connection
+frontend/              React SPA. Transport spine done; shell in progress
+tests/                 ~585 tests, none needing a Databricks connection
 scripts/               check_gurobi_licence.py — the bundled-licence expiry
 ```
 
@@ -127,13 +127,13 @@ id), `DATABRICKS_HOST`, and — to be observed rather than merely run —
 
 ## State of play
 
-`shared/`, `job/`, `app/` and all five models are built and tested, and
+`shared/`, `job/`, `app/` and all nine models are built and tested, and
 **WebSocket and SSE are both confirmed working through the Databricks Apps
 ingress** — the question that stayed open across all three builds of this
 platform (`docs/spike-results.md`). The transport in `docs/architecture.md` is
 the one being built, not a hopeful guess.
 
-Deployment exists as an Asset Bundle — five jobs, one per model, each with
+Deployment exists as an Asset Bundle — nine jobs, one per model, each with
 its own serverless environment and dependency list exported from `uv.lock`.
 See `deploy/README.md`.
 
