@@ -274,3 +274,49 @@ def test_health_advertises_the_protocol_version(app_and_hub):
     app, _ = app_and_hub()
     with TestClient(app) as client:
         assert client.get("/healthz").json()["protocol_schema_version"] == SCHEMA_VERSION
+
+
+def test_backfilled_messages_carry_run_id(app_and_hub):
+    """A backfilled message must be a `Message`, not merely resemble one.
+
+    `messages_since` selects `seq, ts, type, body` — `run_id` is the bound
+    parameter and is not in any of the four UNION branches. It was therefore
+    missing from every message the endpoint returned, while
+    `BackfillResponse.messages` is typed `Message[]` and every message in the
+    envelope carries `run_id`.
+
+    That is not cosmetic. The frontend's single normaliser rejects a message
+    with no `run_id` — correctly, since without it a message cannot be stored
+    or attributed — so it silently discarded 100% of any backfill routed
+    through it. The one existing caller avoided that only by skipping
+    normalisation altogether, which left objects typed `Message` whose
+    `run_id` was `undefined` at runtime.
+    """
+    app, hub = app_and_hub()
+    http = FakeHttp(
+        statement_response(
+            ["seq", "ts", "type", "body"],
+            [
+                [1, 1001, "log", '{"message": "x", "level": "INFO"}'],
+                [2, 1002, "progress", '{"elapsed_seconds": 1.5}'],
+                [3, 1003, "status", '{"status": "RUNNING"}'],
+                [4, 1004, "result", '{"row_count": 7, "chunk_index": 0, "final": true}'],
+            ],
+        )
+    )
+    hub.sql = SqlClient("https://x", "wh", "tok", client=http)
+    hub.repo = RunRepository(hub.sql, hub.tables)
+
+    with TestClient(app) as client:
+        body = client.get("/api/runs/r-backfill/messages").json()
+
+    assert body["messages"], "fixture should return at least one message"
+    for message in body["messages"]:
+        assert message["run_id"] == "r-backfill", (
+            "every backfilled message must carry the run it belongs to"
+        )
+        # The other three fields every message type shares, so this test
+        # fails if the flattening ever drops one of those too.
+        assert isinstance(message["seq"], int)
+        assert isinstance(message["ts"], int)
+        assert message["type"] in {"log", "progress", "status", "result"}

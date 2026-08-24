@@ -108,7 +108,17 @@ class RunRepository:
             sql,
             [P.str("run_id", run_id), P.int("after_seq", after_seq), P.int("row_limit", limit)],
         )
-        return [_rehydrate(r) for r in rows]
+        # `run_id` is stamped here rather than SELECTed: it is the bound
+        # parameter, identical on every row of all four UNION branches, so
+        # carrying it through the query would be four extra columns to say
+        # something already known.
+        #
+        # It is NOT optional. Every message in the envelope carries `run_id`,
+        # `BackfillResponse.messages` is typed `Message[]`, and a client's
+        # normaliser is entitled to reject a message without one — which is
+        # exactly what the frontend's does, so omitting it here silently
+        # discarded 100% of every backfill that went through normalisation.
+        return [_rehydrate(r, run_id) for r in rows]
 
     async def create_run(
         self,
@@ -311,8 +321,14 @@ def _now_ms() -> int:
     return now_ms()
 
 
-def _rehydrate(row: dict[str, Any]) -> dict[str, Any]:
-    """Flatten the ``body`` JSON back into an envelope-shaped dict."""
+def _rehydrate(row: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Flatten the ``body`` JSON back into an envelope-shaped dict.
+
+    "Envelope-shaped" is the whole contract here: a backfilled message and a
+    live one must arrive in the same shape so a client needs one normalisation
+    function rather than two. That includes ``run_id``, which the row does not
+    carry because the query already bound it.
+    """
     body = row.get("body")
     fields = json.loads(body) if isinstance(body, str) else dict(body or {})
 
@@ -328,7 +344,13 @@ def _rehydrate(row: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 fields[unpacked] = {} if unpacked != "preview" else []
 
-    out = {"type": row["type"], "seq": int(row["seq"]), "ts": int(row["ts"]), **fields}
+    out = {
+        "run_id": run_id,
+        "type": row["type"],
+        "seq": int(row["seq"]),
+        "ts": int(row["ts"]),
+        **fields,
+    }
     for numeric in ("elapsed_seconds", "percent_complete", "primary_metric"):
         if numeric in out and out[numeric] is not None:
             out[numeric] = float(out[numeric])
