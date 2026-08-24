@@ -6,6 +6,21 @@
  * and filtering the flat array on each render is O(n) work per component per
  * frame. Splitting once, in the store, is the same work done once.
  *
+ * Deduplicated by `seq`, which is what makes re-subscribing safe. A store
+ * outlives its subscription — the client keeps up to twenty idle ones so
+ * navigating away and back does not re-read IndexedDB — while the worker
+ * tears its connection down on the last unsubscribe and rebuilds it, hydrate
+ * and all, on the next one. So a store WILL be handed history it already
+ * holds. Without dedupe, navigating to a run, away, and back appends a second
+ * copy of every log line, progress point and result: the log pane repeats
+ * itself and, worse, every chart plots each point twice. `seq` is a single
+ * monotonic counter per run shared across all four message types, so it is a
+ * sufficient key on its own.
+ *
+ * Dedupe must be by key rather than "drop anything at or below the highest
+ * seq seen": backfill legitimately delivers messages BELOW the high-water
+ * mark when it fills an observed gap.
+ *
  * Bounded on purpose. The app is open for a whole working day across many
  * runs, so "keep everything" is a slow leak. Logs and progress are capped
  * with oldest-dropped and the drop is *counted*, so the UI can say what it
@@ -92,6 +107,17 @@ function appendCapped<T>(
 export class RunStore {
   private snapshot: RunSnapshot;
   private readonly listeners = new Set<() => void>();
+  /**
+   * Every seq this store has accepted, including ones since dropped by the
+   * caps above — a message trimmed out of the log pane must not reappear at
+   * the bottom of it, out of order, on the next hydrate.
+   *
+   * This grows with the run rather than with what is retained. At roughly 60
+   * bytes an entry that is a few MB for the longest MCMC run, against the
+   * messages themselves which are far larger; not worth a pruning scheme that
+   * could reintroduce the bug it exists to prevent.
+   */
+  private readonly seen = new Set<number>();
 
   readonly runId: string;
 
@@ -125,8 +151,12 @@ export class RunStore {
     const progress: ProgressMessage[] = [];
     const statuses: StatusMessage[] = [];
     const results: ResultMessage[] = [];
+    let accepted = 0;
 
     for (const msg of messages) {
+      if (this.seen.has(msg.seq)) continue;
+      this.seen.add(msg.seq);
+      accepted += 1;
       switch (msg.type) {
         case "log":
           logs.push(msg);
@@ -144,6 +174,16 @@ export class RunStore {
     }
 
     const prev = this.snapshot;
+    if (accepted === 0) {
+      // Everything in this batch was already held. Re-emitting an identical
+      // snapshot under a new identity would re-render every subscriber for
+      // nothing, which on a re-subscribe is the whole run's history.
+      if (options.hydrate === true && !prev.hydrated) {
+        this.snapshot = { ...prev, hydrated: true };
+        this.emit();
+      }
+      return;
+    }
     const [nextLogs, droppedLogs] = appendCapped(prev.logs, logs, MAX_LOGS);
     const [nextProgress, droppedProgress] = appendCapped(
       prev.progress,

@@ -2,7 +2,15 @@
  * HTTP contract.
  *
  * Hand-derived from `app/routes/runs.py`, `app/routes/stream.py`,
- * `app/routes/meta.py`, `app/repository.py` at commit 114f4bb.
+ * `app/routes/meta.py`, `app/repository.py` and `app/store.py`. First written
+ * against commit 114f4bb; RE-VERIFIED against the source on 2026-08-24, which
+ * corrected four things the server had changed underneath it — the timestamp
+ * types, the `model` query param, the `/healthz` shape, and the two shapes of
+ * the 202. Each correction is annotated at its type.
+ *
+ * That is the cost of a hand-derived contract, and the reason to re-read the
+ * routes rather than trust this file when something does not line up: it is
+ * the map, and the map goes stale silently.
  *
  * Every shape here was read out of the source. Where a capability does NOT
  * exist, it is called out as such rather than left for you to discover.
@@ -27,43 +35,56 @@ export interface TriggerRequest {
   run_id?: string;
 }
 
-/** 202. The `registered: true` shape. */
+/**
+ * 202.
+ *
+ * CORRECTED. This was documented as a union of a `registered: true` shape and
+ * a `registered: false` one. `trigger_run` has since been restructured and
+ * now always returns `registered: true`: the slot is claimed BEFORE the job
+ * is launched, so a registry failure means nothing was launched and the
+ * response is a 503, not a degraded 202.
+ *
+ * The partial failure that remains is narrower and is signalled differently —
+ * see `job_run_id_stored`. `registered` is kept in the type because a client
+ * that handles `false` defensively costs nothing and the field is still on
+ * the wire.
+ */
 export interface TriggerAccepted {
   run_id: string;
   job_run_id: string;
   model: string;
   status: "QUEUED";
-  registered: true;
+  registered: boolean;
+  /**
+   * False when the job launched but its `job_run_id` could not be written to
+   * the registry row. The run IS RUNNING and every id here is valid — do not
+   * treat it as a failure. But nothing can later match that job run back to
+   * this row, so startup reconciliation will not see it and the run can
+   * strand in a non-terminal state forever.
+   *
+   * The server logs this but sends no message for it, so the wording is the
+   * client's to supply.
+   */
+  job_run_id_stored: boolean;
   /** `/api/runs/{run_id}/stream` — the server hands you the path. Use it. */
   stream: string;
 }
 
-/**
- * 202, degraded. The job IS RUNNING but the run_status row could not be
- * written. Note there is no `status` and no `stream` field here.
- *
- * Do NOT treat this as a failure — the run is live and the ids are valid, so
- * the user can still watch it. Do surface the warning: startup reconciliation
- * will never see this run, so it can strand in a non-terminal state forever.
- */
-export interface TriggerUnregistered {
-  run_id: string;
-  job_run_id: string;
-  model: string;
-  registered: false;
-  warning: string;
-}
-
-export type TriggerResponse = TriggerAccepted | TriggerUnregistered;
+export type TriggerResponse = TriggerAccepted;
 
 /**
  * Failure modes worth handling distinctly, all from source:
- *   400 — no job configured for that model (body names the triggerable ones)
+ *   404 — no job configured for that model (body names the triggerable ones).
+ *         CORRECTED: documented as 400; the route raises 404.
  *   429 — `active_run_count() >= max_concurrent_runs` (default 5, Free
  *         Edition's account-wide ceiling). The body names the current count
  *         and the ceiling. This is the single most likely user-facing error
  *         on this platform; render the body text, not a generic message.
- *   502 — the Databricks Jobs API itself failed.
+ *   502 — the Databricks Jobs API itself failed. The slot is released first,
+ *         so a failed launch does not hold a place against the ceiling.
+ *   503 — the run could not be registered, so nothing was launched. A clean
+ *         refusal, not a partial success.
+ *   409 — a run with that caller-supplied `run_id` already exists.
  */
 
 /* ------------------------------------------------------------------ *
@@ -78,8 +99,14 @@ export interface RunRow {
   status: RunStatus;
   /** Free-form text the job last wrote. NOT a parsed metric. */
   detail: string | null;
-  started_ts: string;
-  updated_ts: string;
+  /**
+   * CORRECTED: epoch MILLISECONDS, not an ISO string. `app/store.py` writes
+   * both with `now_ms()` into BIGINT columns. Typed as `string` here
+   * originally, which turns every row's date into `Invalid Date` the moment
+   * it reaches `new Date(...)`.
+   */
+  started_ts: number;
+  updated_ts: number;
   /** From the `x-forwarded-email` header at trigger time. Nullable. */
   requested_by: string | null;
   /**
@@ -95,6 +122,9 @@ export interface RunRow {
 
 export interface RunListResponse {
   count: number;
+  /** Echoes the filters the server actually applied — worth rendering, so a
+   *  filter that did not take effect is visible rather than assumed. */
+  filters: { status: RunStatus | null; model: string | null };
   runs: RunRow[];
 }
 
@@ -105,11 +135,13 @@ export interface RunListQuery {
   /** Server-side, but ONE exact value only (`WHERE status = :status`).
    *  No `IN`, no multi-select. */
   status?: RunStatus;
-  /** DOES NOT EXIST. There is no `model` query param on this endpoint.
-   *  Filtering to one model is a client-side pass over the fetched window.
-   *  Adding it server-side is a one-line WHERE extension and is the
-   *  recommended change — see notes/gaps-and-corrections.md. */
-  model?: never;
+  /**
+   * CORRECTED: this DOES exist. It was added in commit f5b8fc3, after the
+   * note that recommended it. Use it — sieving a top-N window client-side
+   * works only while the window happens to be large enough, and then stops
+   * working silently.
+   */
+  model?: string;
 }
 
 /** Ordering is `updated_ts DESC` — last-update, not start time. A
@@ -225,7 +257,18 @@ export interface WhoamiResponse {
 
 export interface HealthzResponse {
   status: "ok" | "degraded";
-  degraded: boolean;
+  /**
+   * CORRECTED: a MAP of service name to the reason it is degraded
+   * (`sql`, `jobs_api`, `job_ids`, `lakebase`), not a boolean. Empty means
+   * healthy. `ServiceHub` fills it during lifespan so a missing dependency
+   * produces a clean 503 on the routes that need it rather than an
+   * AttributeError — which means the reasons here are the actual diagnosis,
+   * and worth rendering rather than reducing to a red dot.
+   */
+  degraded: Record<string, string>;
   live_jobs: number;
   messages_ingested: number;
+  /** Which wire-protocol version this app is serving. A cached bundle talking
+   *  to a redeployed app is otherwise invisible until a parse silently fails. */
+  protocol_schema_version: string;
 }

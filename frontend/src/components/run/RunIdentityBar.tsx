@@ -13,7 +13,7 @@ import type { UiRunState } from "@/lib/envelope";
 import { EMPTY, formatDuration, truncateId } from "@/lib/format";
 import type { ConnectionState } from "@/transport/protocol";
 import { CopyButton } from "@/components/ui/CopyButton";
-import { DOT_COLOR } from "@/components/ui/StatusPill";
+import { DOT_COLOR } from "@/components/ui/runStateStyles";
 
 function Chip({ label, children }: { label: string; children: ReactNode }) {
   return (

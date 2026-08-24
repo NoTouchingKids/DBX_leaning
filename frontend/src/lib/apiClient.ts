@@ -29,6 +29,7 @@ import type {
   CancelResponse,
   HealthzResponse,
   ModelsResponse,
+  RunDetailResponse,
   RunListResponse,
   RunRow,
   TriggerRequest,
@@ -38,34 +39,21 @@ import type {
 import type { RunStatus } from "./envelope";
 
 /* ------------------------------------------------------------------ *
- * Corrected response shapes
+ * Local names for the wire shapes
  * ------------------------------------------------------------------ */
 
-/** `RunRow` with the timestamp columns typed as what the server sends. */
-export type Run = Omit<RunRow, "started_ts" | "updated_ts"> & {
-  started_ts: number;
-  updated_ts: number;
-};
-
-export interface RunList extends Omit<RunListResponse, "runs"> {
-  runs: Run[];
-  /** Echoed back by the endpoint so a client can tell which filters the
-   *  server actually applied, versus which it applied itself. */
-  filters?: { status: string | null; model: string | null };
-}
-
-export interface RunDetail {
-  run: Omit<Run, "live">;
-  /** A live WebSocket check against the job, not a stored column. This — not
-   *  the status — is what the cancel button's enabled state depends on. */
-  live: boolean;
-  last_seq_seen: number | null;
-}
-
-export interface Healthz extends Omit<HealthzResponse, "degraded"> {
-  degraded: Record<string, string>;
-  protocol_schema_version: number;
-}
+/**
+ * These were once corrected copies of the types in `api.ts`, written while
+ * that file still described an older server: ISO-string timestamps, a boolean
+ * `degraded`, no `model` query param, a two-shape 202. `api.ts` has since been
+ * re-verified against the routes and carries the corrections itself, so these
+ * are plain aliases now. Two parallel descriptions of one wire format is
+ * exactly the drift this repo has already paid for; there is one again.
+ */
+export type Run = RunRow;
+export type RunList = RunListResponse;
+export type RunDetail = RunDetailResponse;
+export type Healthz = HealthzResponse;
 
 export interface ListRunsParams {
   /** 1..500, default 50. No offset, no cursor: this is a top-N window, so
@@ -168,19 +156,25 @@ export function getRun(runId: string, signal?: AbortSignal): Promise<RunDetail> 
 }
 
 export async function triggerRun(body: TriggerRequest): Promise<TriggerOutcome> {
-  const raw = await request<TriggerResponse & { job_run_id_stored?: boolean }>("/api/runs", {
+  // `warning` is not in the current response shape — it belonged to the older
+  // degraded-202 that `api.ts` used to describe. Accepted defensively rather
+  // than dropped: a server that reintroduces it should have it rendered, and
+  // an absent field costs nothing.
+  const raw = await request<TriggerResponse & { warning?: string }>("/api/runs", {
     method: "POST",
     body: JSON.stringify(body),
   });
 
-  // Two distinct partial failures, and the server signals them differently.
-  // `registered: false` is the documented degraded 202. `job_run_id_stored:
-  // false` is what the current handler actually emits when the launch worked
-  // but the id could not be written back; there is no server-side message for
-  // it, so this is the one place a warning string is written client-side.
+  // Two distinct partial failures, signalled differently. `registered: false`
+  // is the older degraded 202 and comes with server text. `job_run_id_stored:
+  // false` is what the current handler emits when the launch worked but the
+  // id could not be written back, and the server sends no message for it — so
+  // this is the one warning string authored on the client.
   const warning =
     raw.registered === false
-      ? raw.warning
+      ? (raw.warning ??
+        "the run was launched but could not be registered — it will not appear " +
+          "in run history and reconciliation will never see it")
       : raw.job_run_id_stored === false
         ? "the job launched, but its Databricks job-run id could not be stored — " +
           "cancel and reconciliation may not be able to find it"
