@@ -334,7 +334,9 @@ def _synthetic_batches(n: int, *, seed: int) -> list[dict[str, Any]]:
                 "orders": max(1, units // 3),
             }
         )
-    rows.sort(key=lambda r: (-r["units"], r["production_day"], r["franchise_id"], r["product"]))
+    rows.sort(
+        key=lambda r: (-int(r["units"]), str(r["production_day"]), int(r["franchise_id"]))
+    )
     return rows
 
 
@@ -510,6 +512,7 @@ def build_instance(
     jobs: list[Job] = []
     clamped = 0
     skipped = 0
+    transactions = 0
     for index, row in enumerate(rows):
         if len(jobs) >= max_jobs:
             break
@@ -520,10 +523,15 @@ def build_instance(
         job, was_clamped = made
         jobs.append(job)
         clamped += int(was_clamped)
+        # How many real sales rows are behind the batches being scheduled. The
+        # `orders` column exists for exactly this: it is the difference between
+        # "24 jobs" and "24 jobs standing for 1,203 transactions".
+        transactions += _positive_int(row.get("orders")) or 0
 
     instance_meta: dict[str, Any] = {
         "batches_offered": candidates,
         "jobs_built": len(jobs),
+        "transactions_behind_jobs": transactions,
         # What the cap actually threw away, so a run can say so out loud rather
         # than quietly scheduling a tenth of the day.
         "batches_capped": max(0, candidates - len(jobs) - skipped),

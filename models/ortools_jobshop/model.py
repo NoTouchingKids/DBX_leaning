@@ -51,12 +51,16 @@ knows how much search is left. The final sample reports 100 only when the
 search actually terminated on its own (proved optimal, proved infeasible, hit
 its limit) — a cancelled run reports the fraction it really reached, because it
 did not finish. With no time limit configured there is no honest denominator
-and the field is null, which the frontend renders as indeterminate.
+while the search runs and the field is null, which the frontend renders as
+indeterminate; the final sample still reports 100, because "this search
+terminated" is knowable without a budget to measure it against.
 
 **Cancellation** is `should_cancel()` polled inside the solution callback,
-then `stop_search()`. A second poll rides on CP-SAT's best-bound callback, so a
-run that is grinding without finding any solution still stops promptly instead
-of waiting out its time limit.
+then `stop_search()`. Two more polls ride on CP-SAT's best-bound callback and
+on its log callback, because the solution callback only fires on an *improving*
+solution: a search that grinds without finding one would otherwise ignore a
+cancel until its time limit. The log callback fires roughly twice a second and
+is what actually makes a cancel prompt on a stalled search.
 
 **Workers.** `num_workers = 0` is CP-SAT's default and means *decide from the
 available cores* — not "disabled", which is what the name suggests. It is left
@@ -125,6 +129,11 @@ class JobShopModel:
         #: 0 means "use the available cores" — see the module docstring.
         self.workers = int(cfg.get("workers", 0))
         self.progress_every_s = float(cfg.get("progress_every_s", PROGRESS_EVERY_S))
+        #: Capture CP-SAT's own search log. Durable-only (`client_visible` is
+        #: false): it is dense worker-by-worker chatter, worth having offline
+        #: and not worth streaming to a browser. It is also the model's most
+        #: frequent cancellation poll — see `run()`.
+        self.solver_log = bool(cfg.get("solver_log", True))
 
         #: Set by the harness before build/run. Never imported from the platform.
         self.emit: Callable[..., Any] | None = None
@@ -143,9 +152,13 @@ class JobShopModel:
         self.wall_time: float = 0.0
         self.solver_status: str = "NOT_SOLVED"
         self.cancelled = False
+        self.solver_log_lines = 0
         self._schedule: list[dict[str, Any]] = []
         self._last_progress_at = 0.0
         self._search_completed = False
+        #: The live solver's stop handle while a solve is running, so the log
+        #: callback can cancel without closing over the solver at every site.
+        self._stop_search: Callable[[], None] | None = None
 
     # --- build ------------------------------------------------------------
 
@@ -161,7 +174,8 @@ class JobShopModel:
             f"{inst.job_count} jobs / {inst.operation_count} operations over "
             f"{inst.machine_count} machines ({', '.join(inst.machines)}); "
             f"{inst.total_minutes} machine-minutes of work, lower bound on makespan "
-            f"{inst.makespan_lower_bound} min",
+            f"{inst.makespan_lower_bound} min; the jobs stand for "
+            f"{meta.get('transactions_behind_jobs', 0)} sales transactions",
             phase="input",
         )
         if meta.get("batches_capped"):
@@ -282,10 +296,25 @@ class JobShopModel:
         # portfolio search is non-deterministic whatever the seed says.
         parameters.random_seed = inst.seed % (2**31 - 1)
 
-        # The bound callback is the second cancellation poll: a solution
-        # callback only fires on an *improving* solution, so a search that
-        # finds nothing would otherwise ignore a cancel until its time limit.
-        solver.best_bound_callback = lambda _bound: self._poll_cancel(solver.stop_search)
+        # Never spray the solver's log over a caller's stdout — the same
+        # reasoning as `LogToConsole 0` in the Gurobi models. When it is
+        # captured, it goes to the callback below instead.
+        parameters.log_to_stdout = False
+        parameters.log_search_progress = bool(self.solver_log)
+        if self.solver_log:
+            solver.log_callback = self._on_solver_log
+
+        # Two more cancellation polls behind the solution callback, because
+        # that one only fires on an *improving* solution and a search can
+        # grind for a long time without one. The bound callback fires on bound
+        # improvements; the log callback fires roughly twice a second, which is
+        # what actually keeps a cancel responsive on a stalled search — and is
+        # why turning `solver_log` off costs more than log volume.
+        def cancel_on_bound(_bound: float) -> None:
+            self._poll_cancel(solver.stop_search)
+
+        solver.best_bound_callback = cancel_on_bound
+        self._stop_search = solver.stop_search
 
         recorder = _solution_recorder(cp_model, self._on_solution)
         self._log(
@@ -296,6 +325,7 @@ class JobShopModel:
         )
 
         status = solver.solve(self._sat_model, recorder)
+        self._stop_search = None  # the solver is done; the handle is stale
 
         self.solver_status = solver.status_name(status)
         self.wall_time = float(solver.wall_time)
@@ -343,6 +373,30 @@ class JobShopModel:
                 branches=int(callback.num_branches),
             )
 
+    def _on_solver_log(self, text: str) -> None:
+        """CP-SAT's own search log, kept durably and used as a cancel poll.
+
+        The callback is handed whole blocks, not lines — the final response
+        summary arrives as one multi-line string — so it is split here for the
+        same reason `job/drivers/gurobi.py` buffers Gurobi's MESSAGE chunks: a
+        half-line in the log table is worse than no line at all.
+        """
+        for line in (text or "").splitlines():
+            if not line.strip():
+                continue
+            self.solver_log_lines += 1
+            if self.emit is not None:
+                self.emit(
+                    "log",
+                    message=line.rstrip(),
+                    level="DEBUG",
+                    source="cp-sat",
+                    phase="solve",
+                    client_visible=False,
+                )
+        if self._stop_search is not None:
+            self._poll_cancel(self._stop_search)
+
     def _poll_cancel(self, stop: Callable[[], None]) -> bool:
         """True if a cancel was seen. Idempotent: `stop_search` is cheap but
         the log line is not, and both callbacks can fire after the first stop.
@@ -376,7 +430,9 @@ class JobShopModel:
             self.best_bound = _finite(solver.best_objective_bound)
             return
 
-        self.makespan = int(round(solver.objective_value))
+        # Read from the variable rather than rounding the float objective:
+        # they are the same number, and one of the two is an integer already.
+        self.makespan = int(solver.value(self._makespan_var))
         self.best_bound = _finite(solver.best_objective_bound)
         for job_index, job in enumerate(self.instance.jobs):
             for op_index, operation in enumerate(job.operations):
