@@ -50,7 +50,7 @@ RESERVED_PREFIXES = frozenset(
 
 NO_BUNDLE = (
     "the frontend bundle has not been built, so there is nothing to serve at "
-    "this path. Build it (`npm run build` in frontend/) or point "
+    "this path. Build it (`pnpm build` in frontend/) or point "
     "DBX_FRONTEND_DIST at the dist directory. The API is unaffected."
 )
 

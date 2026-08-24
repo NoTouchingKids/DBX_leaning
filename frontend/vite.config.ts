@@ -1,5 +1,7 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import babel from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
@@ -11,11 +13,13 @@ import path from "node:path";
 export default defineConfig({
   base: "/",
   plugins: [
-    react({
-      // Pinned exactly, per ADR-001. The compiler is the one dependency here
-      // whose output changes semantics rather than just bytes.
-      babel: { plugins: [["babel-plugin-react-compiler", { target: "19" }]] },
-    }),
+    react(),
+    // React Compiler, via Babel. plugin-react v6 also has a native Rust path
+    // (`compiler: true` + oxc-transform-react) which is faster and marked
+    // EXPERIMENTAL; this is the compiler that changes the semantics of every
+    // component in the app, so it runs on the stable path until the Rust one
+    // is not labelled experimental.
+    babel({ presets: [reactCompilerPreset()] }),
     tailwindcss(),
   ],
   resolve: {
