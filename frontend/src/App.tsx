@@ -9,7 +9,20 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Suspense, lazy } from "react";
 import { BrowserRouter, Route, Routes } from "react-router";
+
+import { MODEL_VIEWS } from "@/components/models/registry";
+
+/**
+ * Lazy, unlike every other route here. The gallery pulls in `src/dev/fixtures`
+ * — nine models' worth of synthetic run data, which exists to be looked at
+ * during development and has no business in the bundle a user downloads.
+ * Static-importing it put it in the main chunk.
+ */
+const ModelGallery = lazy(() =>
+  import("@/dev/ModelGallery").then((m) => ({ default: m.ModelGallery })),
+);
 
 import { AppShell } from "@/components/layout/AppShell";
 import StreamProbe from "@/dev/StreamProbe";
@@ -51,6 +64,19 @@ export default function App() {
             />
             <Route path="models/:model" element={<ModelPage />} />
             <Route path="dev/probe" element={<StreamProbe />} />
+            {/* The review surface for the nine signature animations. There is
+                no workspace to see them in, so this is where they get looked
+                at — every view, every lifecycle state, against fixtures that
+                include the states a real run rarely sits in long enough to
+                catch. */}
+            <Route
+              path="dev/gallery"
+              element={
+                <Suspense fallback={<p className="p-8 text-sm text-dim">Loading gallery…</p>}>
+                  <ModelGallery views={MODEL_VIEWS} />
+                </Suspense>
+              }
+            />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>

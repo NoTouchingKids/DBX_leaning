@@ -1,14 +1,16 @@
 /**
  * `/models/:model`.
  *
- * Resolves the route param against `MODEL_SPECS` and hands the whole page to
- * the generic workspace. When a per-model view lands (M4) it replaces the
- * `slots` argument here and nothing else — which is the point of building the
- * generic one first.
+ * Resolves the route param against `MODEL_SPECS`, looks up the model's view
+ * in the registry, and hands both to the generic workspace. A model with no
+ * view registered still gets a correct page — that is what building the
+ * generic one first bought, and it is why `viewFor` returns undefined rather
+ * than throwing.
  */
 
 import { useParams } from "react-router";
 
+import { viewFor } from "@/components/models/registry";
 import { RunWorkspace } from "@/components/run/RunWorkspace";
 import { MODEL_SPECS } from "@/lib/models";
 import { NotFound } from "./NotFound";
@@ -26,20 +28,22 @@ export function ModelPage() {
     );
   }
 
-  // The per-model plug is looked up here and nowhere else. When
-  // `@/components/models/<name>` lands, it is registered in that directory's
-  // index and resolved by name — the page below does not change, which is the
-  // point of building the generic view first.
+  // The per-model plug is looked up here and nowhere else.
+  const view = viewFor(spec.name);
+
   return (
     <RunWorkspace
       key={spec.name}
       spec={spec}
+      view={view}
       description={
-        <>
-          Generic run view — it renders only the fields every model populates,
-          so it is correct for this model whether or not anyone has written a
-          bespoke page for it yet.
-        </>
+        view ? undefined : (
+          <>
+            Generic run view — it renders only the fields every model
+            populates, so it is correct for this model whether or not anyone
+            has written a bespoke page for it yet.
+          </>
+        )
       }
     />
   );
