@@ -357,7 +357,13 @@
         }
       ],
       "title": "DBX_leaning run message envelope",
-      "x-schema-version": "1.0.0"
+      "x-schema-version": "1.0.0",
+      "x-terminal-statuses": [
+        "CANCELLED",
+        "FAILED",
+        "INFEASIBLE",
+        "SUCCEEDED"
+      ]
     }
   },
   "$id": "https://github.com/NoTouchingKids/DBX_leaning/schema/protocol.schema.json",
