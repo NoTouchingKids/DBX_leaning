@@ -17,14 +17,13 @@ worst available way: the code works on a laptop and then hangs or errors on
 the job, after the run has started and taken one of five account-wide task
 slots.
 
-So there are four candidate egress-free routes, and they have very different
-costs — and one of the four is not yet known to work here:
+So there are four egress-free routes, with very different costs:
 
 | Route | Cost | Good for |
 |---|---|---|
 | **A Unity Catalog table** | None. The loader already does this | Anything already in `samples`, or landed there once |
 | **Data bundled in a PyPI wheel** | Inflates every model environment that lists the extra | Small, well-understood benchmark sets |
-| **`/databricks-datasets`** | None *if reachable* — it is a mount, not a fetch. **Unverified on Free Edition serverless** | Potentially the richest source here; see Route 3 |
+| **A Unity Catalog volume** — `/Volumes/samples/databricks/datasets/` | None. Governed, and read like any volume path | File-based sample data. Invisible to `information_schema.tables`, which is why earlier listings missed it |
 | **Landed in UC out of band** — volume upload, Marketplace, Delta Sharing | One-off human step, then free forever | Anything else |
 
 `pip install` runs before the model does, which is why route two works at all:
@@ -36,7 +35,15 @@ route two's clothes, and will fail on the job.
 
 ## Route 1: what is already in `samples`
 
-Table names verified 2026-08-23 from `information_schema.tables`. **Column
+Table names verified 2026-08-23 from `information_schema.tables`. That
+listing showed nine schemas — `nyctaxi`, `bakehouse`, `accuweather`,
+`wanderbricks`, `tpcds_sf1`, `tpcds_sf1000`, `tpch`, `healthverity`,
+`information_schema`. The Databricks docs page for this catalog names only
+five (`databricks`, `nyctaxi`, `tpcds_sf1`, `tpch`, `wanderbricks`), so **the
+workspace has more than the docs describe, and less overlap than expected in
+both directions** — the docs list a `databricks` schema the table query
+missed, because it holds a volume rather than tables. Trust the workspace,
+and check both views. **Column
 names are confirmed only for the seven tables listed in
 `sample-data-inventory.md`** — `information_schema.columns` returns nothing
 for most of this catalog, so treat any column named below as unchecked unless
@@ -180,42 +187,78 @@ Adding statsmodels costs a new extra on whichever models use it. Weigh that
 against `accuweather`, which needs no dependency at all — the honest reason to
 prefer `co2` is length and cleanliness, not availability.
 
-## Route 3: `/databricks-datasets` — the biggest maybe
+## Route 3: `/Volumes/samples/databricks/datasets/` — the UC-native file source
 
-Separate from the `samples` Unity Catalog catalog, and much larger:
-Databricks ships a read-only mount at `/databricks-datasets` containing a
-long-standing library of sample data, including the third-party CSV datasets
-documented at
-`https://docs.databricks.com/aws/en/discover/databricks-datasets`.
+`samples` contains a `databricks` schema holding a **volume** called
+`datasets`: "file-based sample datasets for building data pipelines"
+(Databricks docs, *Sample datasets*, retrieved 2026-08-24).
 
-**Why it would matter:** it is a *mount*, not a download. If it is readable,
-it costs no egress and is a fully legitimate source under the trusted-domains
-restriction — no volume upload, no Marketplace, no dependency. That would make
-it the single richest option on this page.
+This is the file-based source to build on. It is inside Unity Catalog, so it
+is governed, egress-free and read exactly like any other volume path:
 
-**Why it is not listed as available:** nothing in this repo has ever touched
-it, and DBFS access is restricted on Unity Catalog-only workspaces and on
-serverless compute — which is what Free Edition is. Whether the mount is
-reachable there is genuinely unknown.
+```python
+dbutils.fs.ls("/Volumes/samples/databricks/datasets/")     # what's there
+spark.read.csv(path, header=True, inferSchema=True)        # read one
+```
 
-This page deliberately does not reproduce the dataset list from that URL.
-Free Edition's own egress restriction blocks `docs.databricks.com` from the
-environment this repo is developed in, so the list could only have been
-written from memory, and a remembered path that turns out not to exist is
-exactly the class of defect this file exists to prevent. Get it from the
-mount itself, which is authoritative.
+```sql
+LIST '/Volumes/samples/databricks/datasets/'
+```
 
-**How to settle it:** `scripts/probe_sample_data.py` now probes the mount as
-part of its normal run. It tries three access methods in order — `dbutils.fs.ls`,
-the `/dbfs` FUSE path, and Spark's `binaryFile` reader — because which one
-works depends on compute type and none can be assumed. It prints which method
-succeeded, since that answer is worth as much as the listing: it tells the
-next person what to write against.
+**It does not appear in `information_schema.tables`, because a volume is not
+a table.** That is why the 2026-08-23 listing showed no `databricks` schema in
+`samples` at all — it was there the whole time, invisible to a table query.
+Anything that inventories this catalog by tables alone will keep missing it,
+which is worth remembering the next time a listing looks complete.
 
-If none works, that is a real answer rather than a bug, and it means external
-data has to arrive through a UC volume. Record the outcome here either way.
+Its contents are unlisted here for the same reason the third-party table below
+is: nobody has run the probe yet. `scripts/probe_sample_data.py` lists it.
 
-## Route 4: bringing something in
+### The legacy DBFS mount, and why not to use it
+
+`/databricks-datasets` is the older mount. The same docs page is unambiguous
+about it:
+
+> Databricks recommends against using DBFS and mounted cloud object storage
+> for most use cases in Unity Catalog-enabled Databricks workspaces.
+
+and
+
+> The availability and location of Databricks datasets are subject to change
+> without notice.
+
+That second sentence is the disqualifying one. A model pinned to a path with
+no stability guarantee breaks on someone else's schedule, in a job, after
+claiming one of five account-wide slots. The probe still lists the mount —
+knowing whether it is reachable is worth something — but a loader should read
+the volume.
+
+*(An earlier version of this file called this mount "the biggest maybe" and
+the richest option available. That was written before the docs page was read
+and was wrong twice over: the mount is deprecated in UC workspaces, and the
+third-party CSV datasets it was assumed to contain are not in it at all — see
+below.)*
+
+## Route 4: the third-party CSV datasets are an upload, not a mount
+
+The "third-party sample datasets in CSV format" the Databricks docs name are
+**not** shipped anywhere in the workspace. The documented workflow is:
+download the CSV to your own machine, upload it into the workspace, then
+query it. They are Route 5 material — external data landed by hand — and the
+page's value is as a curated list of sources known to work in CSV form:
+
+| Source | Notes |
+|---|---|
+| [OWID Dataset Collection](https://github.com/owid/owid-datasets) | Our World in Data, on GitHub. Wide, clean, long time series across many domains — the strongest ML candidate on the list |
+| [Data.gov CSV datasets](https://catalog.data.gov/dataset/?res_format=CSV) | Very large catalogue, quality varies a lot by publisher |
+| [The Squirrel Census](https://www.thesquirrelcensus.com/data) | Small and charming; a classification toy, not a training set |
+| Kaggle: Diamonds | ~54k rows, classic tabular regression. Needs a Kaggle account |
+| Kaggle: NYC Taxi Trip Duration | Competition data. Needs a Kaggle account |
+
+Each still has to reach Unity Catalog before a model can read it, because a
+job cannot download any of them at run time.
+
+## Route 5: bringing something else in
 
 Covered in `free-edition-constraints.md`, "Getting data in from outside".
 Short version: a UC volume upload is the route that cannot go wrong;

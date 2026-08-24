@@ -54,36 +54,44 @@ CANDIDATES = [
 
 
 
-#: The read-only mount Databricks ships in workspaces, separate from the
-#: `samples` Unity Catalog catalog and much larger — it is where the
-#: third-party CSV sample datasets live.
+#: The Unity Catalog **volume** of file-based sample datasets, documented at
+#: https://docs.databricks.com/aws/en/discover/databricks-datasets (retrieved
+#: 2026-08-24). This is the UC-native, governed, egress-free source of files —
+#: and it is the one to build on.
 #:
-#: Whether it is reachable from **Free Edition serverless** is the open
-#: question this probe exists to answer. It is a mount rather than a fetch, so
-#: if it can be listed at all it costs no egress and is a legitimate source
-#: under the trusted-domains restriction. But DBFS access is restricted on
-#: UC-only workspaces and on serverless compute, and nothing in this repo has
-#: ever touched it, so treat an empty result as "not available here" rather
-#: than "does not exist".
+#: It does not appear in `information_schema.tables`, because a volume is not
+#: a table. That is why the 2026-08-23 listing showed no `databricks` schema
+#: in `samples` at all: it was there the whole time, invisible to a table
+#: query. Anything looking only at tables will keep missing it.
+SAMPLES_VOLUME = "/Volumes/samples/databricks/datasets/"
+
+#: The legacy DBFS mount. Probed for completeness, NOT recommended: the
+#: Databricks docs say plainly that "Databricks recommends against using DBFS
+#: and mounted cloud object storage for most use cases in Unity
+#: Catalog-enabled Databricks workspaces", and that "the availability and
+#: location of Databricks datasets are subject to change without notice".
+#:
+#: A model pinned to a path with no stability guarantee is a model that breaks
+#: on someone else's schedule. Use the volume above.
 DATABRICKS_DATASETS = "/databricks-datasets"
 
 
-def probe_databricks_datasets(spark: Any, depth: int = 1) -> None:
-    """List `/databricks-datasets`, by whichever access method works.
+def _list_path(spark: Any, path: str) -> tuple[str, list[str]] | None:
+    """List `path` by whichever access method works. Returns (method, entries).
 
     Three methods, tried in order, because which one is available depends on
     the compute type and none of them can be assumed:
 
-    1. ``dbutils.fs.ls`` — the documented way, and the one most likely to
-       survive on serverless.
-    2. the ``/dbfs`` FUSE mount — classic clusters only; absent on serverless.
+    1. ``dbutils.fs.ls`` — what the Databricks docs use, and the one most
+       likely to survive on serverless.
+    2. the ``/dbfs`` FUSE mount — classic clusters only; absent on serverless,
+       and irrelevant for a ``/Volumes`` path.
     3. Spark's ``binaryFile`` reader — works wherever Spark can read the path
        at all, and is the last resort because it is the slowest.
 
-    Prints which method worked, because that answer is worth as much as the
-    listing: it tells the next person what to write against.
+    Which method worked is worth as much as the listing: it tells the next
+    person what to write against.
     """
-    print(f"--- {DATABRICKS_DATASETS} ---")
 
     def via_dbutils() -> list[str] | None:
         try:
@@ -92,19 +100,21 @@ def probe_databricks_datasets(spark: Any, depth: int = 1) -> None:
                 from pyspark.dbutils import DBUtils  # type: ignore[import-not-found]
 
                 dbutils = DBUtils(spark)
-            return [f.path for f in dbutils.fs.ls(DATABRICKS_DATASETS)]
+            return [f.path for f in dbutils.fs.ls(path)]
         except Exception as exc:  # noqa: BLE001
-            print(f"  dbutils.fs.ls: unavailable ({type(exc).__name__}: {str(exc)[:120]})")
+            print(f"    dbutils.fs.ls: unavailable ({type(exc).__name__}: {str(exc)[:110]})")
             return None
 
     def via_fuse() -> list[str] | None:
         import os
 
-        path = f"/dbfs{DATABRICKS_DATASETS}"
+        # Only meaningful for a dbfs: path; a /Volumes path is already a real
+        # filesystem path where it exists at all.
+        fuse = path if path.startswith("/Volumes") else f"/dbfs{path}"
         try:
-            return sorted(os.listdir(path))
+            return sorted(os.listdir(fuse))
         except Exception as exc:  # noqa: BLE001
-            print(f"  /dbfs FUSE mount: unavailable ({type(exc).__name__}: {str(exc)[:120]})")
+            print(f"    FUSE path: unavailable ({type(exc).__name__}: {str(exc)[:110]})")
             return None
 
     def via_spark() -> list[str] | None:
@@ -112,41 +122,52 @@ def probe_databricks_datasets(spark: Any, depth: int = 1) -> None:
             frame = (
                 spark.read.format("binaryFile")
                 .option("recursiveFileLookup", "false")
-                .load(f"{DATABRICKS_DATASETS}/*")
+                .load(f"{path.rstrip('/')}/*")
             )
             return sorted({r["path"] for r in frame.select("path").limit(500).collect()})
         except Exception as exc:  # noqa: BLE001
-            print(f"  spark binaryFile: unavailable ({type(exc).__name__}: {str(exc)[:120]})")
+            print(f"    spark binaryFile: unavailable ({type(exc).__name__}: {str(exc)[:110]})")
             return None
 
     for name, method in (
         ("dbutils.fs.ls", via_dbutils),
-        ("/dbfs FUSE", via_fuse),
+        ("FUSE path", via_fuse),
         ("spark binaryFile", via_spark),
     ):
         entries = method()
-        if not entries:
+        if entries:
+            return name, sorted(entries)
+    return None
+
+
+def probe_file_sources(spark: Any) -> None:
+    """Both file-based sample sources, in order of which to prefer."""
+    for path, verdict in (
+        (
+            SAMPLES_VOLUME,
+            "A Unity Catalog volume: governed, egress-free, and the source to "
+            "build on.\n  Read a CSV with spark.read.csv(path, header=True, "
+            "inferSchema=True).",
+        ),
+        (
+            DATABRICKS_DATASETS,
+            "Readable, but Databricks recommends against DBFS in "
+            "UC-enabled workspaces\n  and says its contents may move without "
+            "notice. Prefer the volume above.",
+        ),
+    ):
+        print(f"--- {path} ---")
+        found = _list_path(spark, path)
+        if found is None:
+            print("  NOT READABLE by any method.\n")
             continue
-        print(f"  READABLE via {name} — {len(entries)} entries at the top level:")
-        for entry in sorted(entries)[:80]:
+        method, entries = found
+        print(f"  READABLE via {method} — {len(entries)} entries:")
+        for entry in entries[:80]:
             print(f"    {entry}")
         if len(entries) > 80:
             print(f"    ... and {len(entries) - 80} more")
-        print(
-            "\n  This is a legitimate egress-free source: it is a mount, not a "
-            "download.\n  Read a CSV from it with "
-            'spark.read.csv(path, header=True, inferSchema=True).'
-        )
-        return
-
-    print(
-        "  NOT READABLE by any method. That is a real answer, not a bug:\n"
-        "  DBFS access is restricted on Unity Catalog-only workspaces and on\n"
-        "  serverless compute. If this is what Free Edition does, then\n"
-        "  /databricks-datasets is not a source this platform can use, and\n"
-        "  external data has to arrive through a UC volume instead.\n"
-        "  Record the outcome either way in docs/ml-datasets.md."
-    )
+        print(f"  {verdict}\n")
 
 
 def main() -> int:
@@ -265,8 +286,7 @@ def main() -> int:
             print(f"  {table}")
         print()
 
-    probe_databricks_datasets(spark)
-    print()
+    probe_file_sources(spark)
 
     print("--- what the model loaders actually get ---")
     for name, loader in (("nyc_taxi_hourly", nyc_taxi_hourly), ("nyc_taxi_trips", nyc_taxi_trips)):
