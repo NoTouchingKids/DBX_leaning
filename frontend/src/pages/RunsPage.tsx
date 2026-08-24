@@ -1,142 +1,172 @@
 /**
- * `/runs` — a minimal cross-model list.
+ * `/runs` — the run-history page.
  *
- * Deliberately thin: M3 owns the real run-history page (capacity meter,
- * server/client-labelled filters, the stale-`RUNNING` treatment). This exists
- * because the model pages link here and a link to nothing is worse than a
- * link to a plain table.
+ * The one genuinely cross-model page in the app, and where every model page's
+ * "View previous runs →" link lands. Built strictly from the eight fields
+ * `repo.list_runs` selects plus the injected `live`; everything else on screen
+ * is derived from those, and says so.
  *
- * What is already correct and should survive M3:
+ * What is load-bearing here, and survives from the thin version this replaced:
  *
- *  - the columns are exactly what `list_runs` SELECTs, plus the injected
- *    `live`. There is no metric column because the endpoint returns none;
- *    adding one means an N+1 fetch of `/api/runs/{id}`, which is a decision,
- *    not a freebie.
+ *  - the columns are exactly what `list_runs` SELECTs, plus `live`. There is
+ *    no metric column because the endpoint returns none; adding one means an
+ *    N+1 fetch of `/api/runs/{id}`, which is a decision, not a freebie.
  *  - `live` is not the status. `RUNNING` with no socket is a dead run nothing
- *    will ever finish, and it is styled as a warning.
+ *    will ever finish, and it is styled as a warning — with no action, because
+ *    this API has none to offer.
  *  - ordering is `updated_ts DESC` and there is no cursor, so there are no
  *    sort controls and "load more" is a refetch with a bigger limit.
+ *
+ * Filter state lives in the URL and nowhere else — five model pages link here
+ * with `?model=` preset, and that link has to survive a refresh, a paste and
+ * a back button. See `components/runs/historyFilters.ts` for which filters run
+ * server-side and which do not; each one is labelled on the control itself.
  */
 
-import { Link, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 
 import { PageHead } from "@/components/layout/PageHead";
+import { CapacityMeter } from "@/components/runs/CapacityMeter";
+import { EmptyState } from "@/components/runs/EmptyState";
+import { HistoryNotes } from "@/components/runs/HistoryNotes";
+import { HistoryToolbar } from "@/components/runs/HistoryToolbar";
+import { RunsTable } from "@/components/runs/RunsTable";
+import { StrandedBanner } from "@/components/runs/StrandedBanner";
+import { deriveCapacity } from "@/components/runs/capacity";
+import { describeEmptyState } from "@/components/runs/emptyState";
+import {
+  DEFAULT_LIMIT,
+  applyClientFilters,
+  canLoadMore,
+  historyFiltersToParams,
+  modelOptions,
+  nextLimit,
+  parseHistoryFilters,
+  serverFilterMismatches,
+  serverQuery,
+  type HistoryFilters,
+} from "@/components/runs/historyFilters";
+import { countStranded } from "@/components/runs/liveness";
 import { Button } from "@/components/ui/Button";
-import { CopyButton } from "@/components/ui/CopyButton";
-import { StatusPill } from "@/components/ui/StatusPill";
+import { Callout } from "@/components/ui/Callout";
 import { useRunList } from "@/hooks/useApi";
-import { EMPTY, formatDateTime, formatDuration, truncateId } from "@/lib/format";
-import { isTerminal } from "@/lib/envelope";
-import { useState } from "react";
+import { EMPTY, formatCount } from "@/lib/format";
+import { MODEL_SPECS } from "@/lib/models";
+
+const KNOWN_MODELS = MODEL_SPECS.map((spec) => spec.name);
 
 export function RunsPage() {
-  const [params] = useSearchParams();
-  const model = params.get("model") ?? undefined;
-  const [limit, setLimit] = useState(50);
-  const runs = useRunList({ model, limit });
+  const [params, setParams] = useSearchParams();
+  const filters = parseHistoryFilters(params);
 
-  const rows = runs.data?.runs ?? [];
-  const active = rows.filter((row) => !isTerminal(row.status)).length;
+  function update(patch: Partial<HistoryFilters>) {
+    // `replace`, not push. Every keystroke in the id search is a filter
+    // change, and a history stack full of them would bury the model page the
+    // user arrived from behind twenty back-presses.
+    setParams(historyFiltersToParams({ ...filters, ...patch }), { replace: true });
+  }
+
+  const list = useRunList(serverQuery(filters));
+
+  /**
+   * A second, deliberately unfiltered read, for the capacity meter only.
+   *
+   * The ceiling is account-wide, so counting the filtered table would answer
+   * "active runs of this model" and label it as the account's. When no filter
+   * is set and the window is the default, this resolves to the same query key
+   * as the list above and React Query serves both from one request; with a
+   * filter applied it is one extra statement, which on a warehouse billed by
+   * uptime rather than statement count is the cheap half of the trade.
+   */
+  const capacityWindow = useRunList({ limit: DEFAULT_LIMIT });
+
+  const serverRows = list.data?.runs ?? [];
+  const rows = applyClientFilters(serverRows, filters);
+  const capacity = deriveCapacity(capacityWindow.data?.runs ?? [], {
+    windowLimit: DEFAULT_LIMIT,
+    unfiltered: true,
+  });
+  const mismatches = serverFilterMismatches(filters, list.data?.filters);
+  const hidden = serverRows.length - rows.length;
 
   return (
     <>
       <PageHead eyebrow="All models · GET /api/runs" title="Run history">
-        A top-N window ordered by <code>updated_ts DESC</code> — not
-        pagination, so a long-running old run reappears at the top every time
-        it emits.
+        A top-N window ordered by <code>updated_ts DESC</code> — not pagination, so a long-running
+        old run reappears at the top every time it emits.
       </PageHead>
 
-      <div className="mb-3 flex flex-wrap items-center gap-3 text-[0.76rem] text-dim">
+      <CapacityMeter capacity={capacity} pending={capacityWindow.data === undefined} />
+
+      <HistoryToolbar
+        filters={filters}
+        models={modelOptions(KNOWN_MODELS, serverRows, filters.model)}
+        onChange={update}
+        onRefresh={() => {
+          void list.refetch();
+          void capacityWindow.refetch();
+        }}
+        isFetching={list.isFetching}
+        updatedAt={list.dataUpdatedAt > 0 ? list.dataUpdatedAt : null}
+      />
+
+      {list.isError && (
+        <div className="mb-3">
+          {/* The server's own text: the errors that matter on this platform
+              name real numbers and real commands, and a generic message
+              throws that away. */}
+          <Callout tone="bad" title="Could not read the run list">
+            {list.error instanceof Error ? list.error.message : String(list.error)}
+          </Callout>
+        </div>
+      )}
+
+      {mismatches.length > 0 && (
+        <div className="mb-3">
+          {/* The response echoes the filters it applied. A disagreement is the
+              one failure this page cannot otherwise see — a dropped filter
+              looks exactly like "there are no such runs". */}
+          <Callout tone="warn" title="The server applied different filters than were requested">
+            {`Mismatch on ${mismatches.join(" and ")}. The rows below are not what this page asked for; treat the filter controls as unreliable until this clears.`}
+          </Callout>
+        </div>
+      )}
+
+      <StrandedBanner count={countStranded(rows)} />
+
+      {rows.length > 0 ? (
+        <RunsTable rows={rows} />
+      ) : list.isPending ? (
+        <p className="px-4 py-10 text-center text-[0.8rem] text-faint">loading…</p>
+      ) : (
+        <EmptyState copy={describeEmptyState(filters, serverRows.length)} />
+      )}
+
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-2 text-[0.7rem] text-faint">
         <span>
-          {model === undefined ? "all models" : <code>{model}</code>} · {rows.length} rows
+          {formatCount(rows.length)} rows
+          {hidden > 0 && ` (${formatCount(hidden)} hidden by the client-side id search)`} · ordered
+          by <code>updated_ts DESC</code>, not by start time
         </span>
-        <span className="text-faint">
-          {active} not yet terminal in this window (counted client-side, with the
-          same predicate the server uses for the 5-task ceiling)
+        <span>
+          server applied: model <code>{list.data?.filters.model ?? EMPTY}</code> · status{" "}
+          <code>{list.data?.filters.status ?? EMPTY}</code> · limit <code>{filters.limit}</code>
         </span>
-        <span className="ml-auto flex gap-2">
-          <Button onClick={() => setLimit((n) => Math.min(500, n * 2))} disabled={limit >= 500}>
-            Load more ({limit})
+        <span className="ml-auto flex items-center gap-2">
+          {/* Not "next page". There is no offset and no cursor, so this
+              refetches a wider window and every row already on screen comes
+              back with it. */}
+          <Button
+            onClick={() => update({ limit: nextLimit(filters.limit) })}
+            disabled={!canLoadMore(filters.limit) || list.isFetching}
+            title="Refetches a wider top-N window — this endpoint has no offset or cursor"
+          >
+            Widen to top {nextLimit(filters.limit)}
           </Button>
-          <Button onClick={() => void runs.refetch()}>↻ Refresh</Button>
         </span>
       </div>
 
-      <div className="overflow-x-auto rounded-[10px] border border-line bg-raised">
-        <table className="w-full min-w-[760px] border-collapse text-[0.78rem]">
-          <thead>
-            <tr>
-              {["Run", "Model", "Status", "Job channel", "Started", "Duration", "Requested by"].map(
-                (heading) => (
-                  <th
-                    key={heading}
-                    className="border-b border-edge bg-paper px-3 py-2 text-left text-[0.6rem] font-bold tracking-wider text-faint uppercase"
-                  >
-                    {heading}
-                  </th>
-                ),
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const stranded = row.status === "RUNNING" && !row.live;
-              return (
-                <tr key={row.run_id} className="border-b border-line last:border-b-0">
-                  <td className="px-3 py-2 align-top">
-                    <Link
-                      to={`/models/${row.model}?run=${encodeURIComponent(row.run_id)}`}
-                      className="font-mono text-[0.74rem] text-accent no-underline hover:underline"
-                    >
-                      {truncateId(row.run_id, 12, 4)}
-                    </Link>
-                    <CopyButton value={row.run_id} label="copy run id" />
-                    {row.detail != null && row.detail !== "" && (
-                      <div className="mt-0.5 max-w-[38ch] text-[0.68rem] leading-snug text-dim">
-                        {row.detail}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 align-top">
-                    <code className="rounded border border-edge px-1 py-px text-[0.66rem] text-dim">
-                      {row.model}
-                    </code>
-                  </td>
-                  <td className="px-3 py-2 align-top">
-                    <StatusPill state={row.status} />
-                  </td>
-                  <td
-                    className={`px-3 py-2 align-top text-[0.7rem] ${stranded ? "font-semibold text-warn" : "text-dim"}`}
-                  >
-                    {row.live ? "connected" : stranded ? "no socket · stranded" : EMPTY}
-                  </td>
-                  <td className="px-3 py-2 align-top font-mono text-[0.72rem] whitespace-nowrap">
-                    {formatDateTime(row.started_ts)}
-                  </td>
-                  <td className="px-3 py-2 align-top font-mono text-[0.72rem] whitespace-nowrap">
-                    {formatDuration((row.updated_ts - row.started_ts) / 1000)}
-                    {!isTerminal(row.status) && <span className="text-faint">+</span>}
-                  </td>
-                  <td className="px-3 py-2 align-top font-mono text-[0.72rem]">
-                    {row.requested_by ?? EMPTY}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {rows.length === 0 && (
-          <p className="px-4 py-10 text-center text-[0.8rem] text-faint">
-            {runs.isPending ? "loading…" : "No runs in this window."}
-          </p>
-        )}
-      </div>
-
-      <p className="mt-3 text-[0.68rem] text-faint">
-        Duration is <code>updated_ts − started_ts</code>: exact once terminal,
-        and for a running row it measures to the last heartbeat rather than to
-        now — hence the <code>+</code>.
-      </p>
+      <HistoryNotes />
     </>
   );
 }
