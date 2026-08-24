@@ -17,6 +17,7 @@ from .jobs_api import JobsApi
 from .reconcile import reconcile_once
 from .routes import ingest, meta, runs, stream
 from .services import ServiceHub
+from .spa import mount_spa
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(ingest.router)
     app.include_router(stream.router)
     app.include_router(runs.router)
+
+    # Last, and it has to stay last: the SPA fallback is a catch-all, and
+    # Starlette returns the first route that matches. Registered before the
+    # routers it would answer /api/runs with index.html and a 200.
+    app.state.spa_built = mount_spa(app, cfg.frontend_dist)
     return app
 
 

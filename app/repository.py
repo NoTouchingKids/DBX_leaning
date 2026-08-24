@@ -145,12 +145,25 @@ class RunRepository:
         )
 
     async def list_runs(
-        self, *, limit: int = 50, status: str | None = None
+        self, *, limit: int = 50, status: str | None = None, model: str | None = None
     ) -> list[dict[str, Any]]:
-        where = "WHERE status = :status" if status else ""
+        """Recent runs, optionally narrowed to a status and/or a model.
+
+        The clause and its parameters are built together rather than by
+        branching on which filters are set: with two optional filters that
+        branching is already four statements, and the failure mode is a
+        named parameter declared but never referenced (or the reverse), which
+        the warehouse rejects at execution time.
+        """
+        clauses: list[str] = []
         params = [P.int("row_limit", limit)]
         if status:
+            clauses.append("status = :status")
             params.append(P.str("status", status))
+        if model:
+            clauses.append("model = :model")
+            params.append(P.str("model", model))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return await self.sql.query(
             f"""
             SELECT run_id, job_run_id, model, status, detail, started_ts, updated_ts, requested_by

@@ -161,7 +161,7 @@ class RunStore(Protocol):
     # inside the class body, so `-> list[RunRecord]` would resolve to the
     # method rather than the type.
     async def list_runs(
-        self, *, limit: int = 50, status: str | None = None
+        self, *, limit: int = 50, status: str | None = None, model: str | None = None
     ) -> list[RunRecord]: ...
 
     async def active_count(self) -> int: ...
@@ -325,21 +325,23 @@ class PostgresRunStore:
         finally:
             await conn.close()
 
-    async def list_runs(self, *, limit: int = 50, status: str | None = None) -> list[RunRecord]:
+    async def list_runs(
+        self, *, limit: int = 50, status: str | None = None, model: str | None = None
+    ) -> list[RunRecord]:
+        # Clause and parameter built together in one pass. Branching on which
+        # filters are set gives 2^n statements to keep in step, and the
+        # placeholders here are positional — one that drifts out of order
+        # against its value is a filter that silently matches the wrong thing.
+        where, params = _filters(status=status, model=model)
+        params.append(limit)
         conn = await self._conn()
         try:
             async with conn.cursor() as cur:
-                if status:
-                    await cur.execute(
-                        f"SELECT {_COLUMNS} FROM run_status WHERE status = %s "
-                        f"ORDER BY updated_ts DESC LIMIT %s",
-                        (status, limit),
-                    )
-                else:
-                    await cur.execute(
-                        f"SELECT {_COLUMNS} FROM run_status ORDER BY updated_ts DESC LIMIT %s",
-                        (limit,),
-                    )
+                await cur.execute(
+                    f"SELECT {_COLUMNS} FROM run_status {where} "
+                    f"ORDER BY updated_ts DESC LIMIT %s",
+                    tuple(params),
+                )
                 return [RunRecord.from_row(_zip(r)) for r in await cur.fetchall()]
         finally:
             await conn.close()
@@ -388,6 +390,23 @@ _COLUMNS = ", ".join(_COLUMN_NAMES)
 
 def _zip(row) -> dict[str, Any]:
     return dict(zip(_COLUMN_NAMES, row, strict=True))
+
+
+def _filters(*, status: str | None, model: str | None) -> tuple[str, list[Any]]:
+    """A WHERE clause and its parameters, built as one thing.
+
+    Every value is a placeholder; nothing here is interpolated. The column
+    names are literals in this function, not caller input.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status:
+        clauses.append("status = %s")
+        params.append(status)
+    if model:
+        clauses.append("model = %s")
+        params.append(model)
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
 
 
 # --------------------------------------------------------------------------
@@ -455,8 +474,10 @@ class WarehouseRunStore:
         row = await self.repo.run_status(run_id)
         return RunRecord.from_row(row) if row else None
 
-    async def list_runs(self, *, limit: int = 50, status: str | None = None) -> list[RunRecord]:
-        rows = await self.repo.list_runs(limit=limit, status=status)
+    async def list_runs(
+        self, *, limit: int = 50, status: str | None = None, model: str | None = None
+    ) -> list[RunRecord]:
+        rows = await self.repo.list_runs(limit=limit, status=status, model=model)
         return [RunRecord.from_row(r) for r in rows]
 
     async def active_count(self) -> int:

@@ -175,6 +175,38 @@ async def test_listing_is_newest_first_and_filterable(store):
     assert len(await store.list_runs(limit=2)) == 2
 
 
+async def test_listing_can_be_filtered_by_model(store):
+    await store.claim_slot("m1", model="mcmc", ceiling=5)
+    await store.claim_slot("s1", model="scenario", ceiling=5)
+    await store.claim_slot("m2", model="mcmc", ceiling=5)
+
+    assert {r.run_id for r in await store.list_runs(model="mcmc")} == {"m1", "m2"}
+    assert [r.run_id for r in await store.list_runs(model="scenario")] == ["s1"]
+    assert await store.list_runs(model="nothing-runs-this") == []
+
+
+async def test_status_and_model_filters_combine_rather_than_override(store):
+    """Two optional filters is where branch-per-filter starts producing the
+    wrong SQL: the second filter quietly replaces the first."""
+    await store.claim_slot("m1", model="mcmc", ceiling=5)
+    await store.claim_slot("m2", model="mcmc", ceiling=5)
+    await store.claim_slot("s1", model="scenario", ceiling=5)
+    await store.set_status("m2", RunStatus.SUCCEEDED)
+    await store.set_status("s1", RunStatus.SUCCEEDED)
+
+    both = await store.list_runs(status="SUCCEEDED", model="mcmc")
+    assert [r.run_id for r in both] == ["m2"]
+
+
+async def test_a_model_filter_is_a_bound_value_not_sql(store):
+    await store.claim_slot("m1", model="mcmc", ceiling=5)
+
+    hostile = "'; DROP TABLE run_status; --"
+    assert await store.list_runs(model=hostile) == []
+    # The table is still there, which it would not be under interpolation.
+    assert [r.run_id for r in await store.list_runs()] == ["m1"]
+
+
 async def test_non_terminal_is_what_reconciliation_reads(store):
     await store.claim_slot("done", model="scenario", ceiling=5)
     await store.claim_slot("live", model="scenario", ceiling=5)

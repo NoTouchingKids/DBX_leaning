@@ -9,6 +9,7 @@ landing somewhere *correct* rather than merely somewhere.
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -242,3 +243,157 @@ def test_the_problem_is_deterministic_for_a_seed():
     import numpy as np
 
     assert np.array_equal(gaussian_problem(seed=5), gaussian_problem(seed=5))
+
+
+# --- the live trace ---------------------------------------------------------
+
+
+def test_progress_carries_each_chains_current_position(recorder):
+    """The live trace chart needs where every walker *is*, not only how often
+    it accepted. One point per chain per progress sample."""
+    r, model = taxi(recorder, draws=400, burn_in=100, chains=6, progress_every=50)
+    payload = r.of("progress")[-1]["payload"]
+
+    positions = payload["chain_positions"]
+    assert len(positions) == 6
+    assert all(len(p) == len(payload["parameters"]) for p in positions)
+    assert all(isinstance(v, float) for p in positions for v in p)
+    assert payload["chain_positions_truncated"] is False
+    r.validate_all()
+
+
+def test_the_position_snapshot_is_the_latest_draw_not_the_start(recorder):
+    r, model = taxi(recorder, draws=300, burn_in=50, chains=6, progress_every=50)
+    payload = r.of("progress")[-1]["payload"]
+
+    latest = model._sampler.get_chain()[-1]
+    for reported, actual in zip(payload["chain_positions"], latest, strict=True):
+        assert reported == pytest.approx(list(actual), abs=1e-5)
+
+
+def test_the_position_snapshot_moves_between_samples(recorder):
+    """A trace of a constant is not a trace. The walkers must actually be
+    somewhere different at the next emission."""
+    r, _ = taxi(recorder, draws=400, burn_in=100, chains=6, progress_every=50)
+    traces = [p["payload"]["chain_positions"] for p in r.of("progress")]
+
+    assert len(traces) >= 2
+    assert traces[0] != traces[-1]
+
+
+def test_the_position_snapshot_is_bounded_by_the_chain_count(recorder):
+    """This fires on every progress sample, so it is capped rather than
+    proportional to a caller-chosen walker count."""
+    from models.mcmc.model import MAX_TRACE_CHAINS
+
+    chains = MAX_TRACE_CHAINS + 6
+    r, _ = taxi(recorder, draws=120, burn_in=20, chains=chains, progress_every=40)
+    payload = r.of("progress")[-1]["payload"]
+
+    assert len(payload["chain_positions"]) == MAX_TRACE_CHAINS
+    assert payload["chain_positions_truncated"] is True
+    # And the whole payload stays small: this is on the live path.
+    assert len(json.dumps(payload)) < 20_000
+
+
+def test_the_default_position_snapshot_is_a_few_hundred_bytes(recorder):
+    """8 chains x 3 parameters = 24 floats. Stated as a test so a change to
+    the shape has to be a deliberate one."""
+    r, _ = taxi(recorder, draws=120, burn_in=20, progress_every=40)
+    positions = r.of("progress")[-1]["payload"]["chain_positions"]
+
+    assert len(positions) == 8
+    assert sum(len(p) for p in positions) == 24
+    assert len(json.dumps(positions)) < 600
+
+
+# --- the thinned posterior sample ------------------------------------------
+
+
+def test_results_carry_a_thinned_sample_of_the_draws(recorder):
+    _, model = taxi(recorder, draws=600, burn_in=200, chains=6)
+
+    for row in model.results():
+        sample = json.loads(row["draws_sample"])
+        assert sample["chains_included"] == 6
+        assert sample["chains_total"] == 6
+        assert len(sample["chains"]) == 6
+        assert all(len(c) == sample["draws_per_chain"] for c in sample["chains"])
+        assert sample["thin"] >= 1
+
+
+def test_the_thinned_sample_is_capped_not_the_raw_draws(recorder):
+    """400 post-burn-in draws x 8 chains is 3,200 values per parameter. The
+    sample must not be that: it rides along on the result message."""
+    from models.mcmc.model import TRACE_DRAWS_PER_CHAIN, TRACE_SAMPLE_CAP
+
+    _, model = taxi(recorder, draws=500, burn_in=100)
+    rows = model.results()
+
+    for row in rows:
+        sample = json.loads(row["draws_sample"])
+        kept = sum(len(c) for c in sample["chains"])
+        assert sample["draws_per_chain"] <= TRACE_DRAWS_PER_CHAIN
+        assert kept <= TRACE_SAMPLE_CAP
+        assert kept < sample["draws_available"] * len(sample["chains"])
+    assert sum(len(row["draws_sample"]) for row in rows) < 40_000
+
+
+def test_more_chains_keep_fewer_draws_each_rather_than_growing(recorder):
+    from models.mcmc.model import MAX_TRACE_CHAINS, TRACE_SAMPLE_CAP
+
+    _, model = taxi(recorder, draws=300, burn_in=100, chains=MAX_TRACE_CHAINS + 4)
+    sample = json.loads(model.results()[0]["draws_sample"])
+
+    assert sample["chains_total"] == MAX_TRACE_CHAINS + 4
+    assert sample["chains_included"] == MAX_TRACE_CHAINS
+    assert sum(len(c) for c in sample["chains"]) <= TRACE_SAMPLE_CAP
+
+
+def test_the_thinning_is_systematic_so_the_trace_stays_ordered(recorder):
+    """Every thin-th draw, in order — a random subsample would destroy the
+    ordering that makes a trace readable, and with it any sign of a chain
+    that was stuck for a stretch."""
+    _, model = taxi(recorder, draws=400, burn_in=100, chains=6)
+    sample = json.loads(model.results()[0]["draws_sample"])
+
+    usable = model._sampler.get_chain()[model.burn_in :]
+    expected = [
+        round(float(usable[d, 0, 0]), 6)
+        for d in range(0, usable.shape[0], sample["thin"])
+    ]
+    assert sample["chains"][0] == expected
+
+
+def test_a_cancelled_run_still_carries_a_sample(recorder):
+    r = recorder(cancel_after=3)
+    model = r.attach(
+        build_model({"draws": 5000, "burn_in": 50, "progress_every": 20, "rows": 400})
+    )
+    model.build()
+    model.run()
+
+    for row in model.results():
+        sample = json.loads(row["draws_sample"])
+        assert sample["chains"] and all(c for c in sample["chains"])
+        assert sample["draws_available"] > 0
+
+
+def test_the_results_table_ddl_has_a_column_for_every_key(recorder):
+    """A column the model emits and the table does not have is a write that
+    fails at 3am, not a test failure."""
+    import pathlib
+
+    _, model = taxi(recorder, draws=120, burn_in=20)
+    sql = pathlib.Path("uc_ddl/002_model_results.sql").read_text()
+    block = sql.split("results_mcmc (")[1].split(")\nUSING DELTA")[0]
+    columns = {
+        line.strip().split()[0]
+        for line in block.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    }
+
+    assert {"run_id", "chunk_index"} <= columns  # stamped by the harness
+    assert model.results_table == "results_mcmc"
+    for row in model.results():
+        assert set(row) == columns - {"run_id", "chunk_index"}

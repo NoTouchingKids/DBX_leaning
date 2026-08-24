@@ -128,6 +128,14 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_mcmc (
     q95         DOUBLE,
     rhat        DOUBLE,
     draws_used  BIGINT,
+    -- A systematically thinned, hard-capped slice of this parameter's
+    -- post-burn-in draws, per chain, as JSON:
+    -- {thin, draws_per_chain, chains_included, chains_total, draws_available,
+    --  chains: [[...], ...]}. Enough to redraw a trace or a density after the
+    -- run; deliberately not the raw posterior, which is ~6,400 draws per
+    -- parameter at the defaults. A STRING rather than VARIANT or a nested
+    -- array, per CLAUDE.md: VARIANT is nice-to-have, JSON text works anywhere.
+    draws_sample STRING,
     -- False when the run was cancelled: a partial posterior is still usable,
     -- but a reader must be able to tell.
     complete    BOOLEAN,
