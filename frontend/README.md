@@ -64,6 +64,72 @@ optional one.** The bundle syncs `frontend/dist` and excludes the source;
 skip the build and the deploy succeeds, the API works, and every page answers
 503 with `app/spa.py`'s `NO_BUNDLE` message. See `deploy/README.md`.
 
+## Browser tests (`e2e/`)
+
+```bash
+pnpm e2e                      # playwright test, Chromium
+pnpm exec playwright test e2e/01-live-run.e2e.ts     # one file
+DBX_E2E_APP_PORT=9200 pnpm e2e                       # if 8811/8812 are taken
+```
+
+Six tests, and they are the only ones here that run against a **real browser
+talking to a real server**. The transport tests under `src/` run in jsdom
+against a fake `EventSource` — which by construction cannot reproduce SSE over
+a real socket, a `SharedWorker`, an IndexedDB that survives a navigation, or a
+reconnect. Every transport bug this project has actually shipped was of that
+shape: correct in every offline test, wrong on first contact with a real
+browser. This suite exists for that class and no other; it is not a place to
+re-run the unit tests slowly.
+
+`pnpm e2e` needs nothing running first. Global setup builds the SPA, starts
+`scripts/dev_stack.py` (real `app/` under uvicorn, real `job/` harness per
+run, real embedded Postgres behind the real `PostgresRunStore`, real models —
+only the Databricks Jobs API is substituted) and waits for `/healthz`. The app
+serves the built bundle itself, the way `app/spa.py` does in a deploy, so
+`/api`, `/ws` and the bundle share one origin and the dev proxy is not
+involved. **If the stack cannot start, setup throws with the stack's own
+output.** Nothing is mocked and nothing is skipped to keep a run green. It
+needs `uv` and the repo's Python extras (`uv sync --all-extras`), and a
+Chromium for Playwright — `pnpm exec playwright install chromium` if
+`PLAYWRIGHT_BROWSERS_PATH` does not already point at one.
+
+Nothing is written inside the repo — the build, Postgres, the stack log and
+Playwright's traces all live under `/tmp/dbx-leaning-e2e` (`DBX_E2E_WORK_DIR`).
+
+What is covered, and how each one is actually observed:
+
+| File | Asserts |
+| --- | --- |
+| `01-live-run` | A run triggered from the real form streams `percent_complete`, logs, a terminal status and a result count into the DOM — over SSE, since the local stack has no warehouse and the backfill endpoints answer 503. Cross-checked against the durable JSONL the writer produced in parallel. |
+| `02-shared-worker` | Two tabs in one profile cause **one** `GET .../stream`; a second profile causes a second. The control is the point: it shows the instrument detects an extra connection when there is one. |
+| `03-terminal-run` | A finished run opens no live channel — passing when the client has it cached, **failing when it does not**. See below. |
+| `04-reload-mid-run` | A reload mid-run keeps the history the tab already had, renders nothing twice, and keeps following the run to completion. |
+| `05-concurrency-429` | Filling the account-wide ceiling of five makes the next trigger render the server's own 429 text, counts and all. Real `PostgresRunStore` count-and-claim. |
+
+Two things to know before writing another one:
+
+- **Files are `*.e2e.ts`, not `*.spec.ts`.** Vitest's default `include` claims
+  `*.{test,spec}.ts` anywhere under this directory and `vite.config.ts` sets
+  no `include` of its own, so a Playwright file named `*.spec.ts` would be
+  collected by `pnpm test` and fail in jsdom.
+- **The SPA's `EventSource` lives in a `SharedWorker`, which Playwright cannot
+  see.** `page.on("request")` never fires for the stream path — a SharedWorker
+  is a separate browser target with no page association. Connection counts are
+  therefore read from the app's own access log; `e2e/stack.ts` explains the
+  method and its one caveat.
+
+**One test is expected to fail, and says so with `test.fail()`.** Opening a
+finished run in a browser that has never seen it opens one SSE connection to
+it, contradicting "a terminal run gets no live channel" — behaviour 3 of the
+transport spine, below. `RunWorkspace` subscribes before
+`GET /api/runs/{id}` has resolved, so `terminal` is still `false`, and
+`useRunStream` reads it once and deliberately keeps it out of the dependency
+list. The warm-cache path escapes it only because `hub.ts` finds
+`cached.terminal` in IndexedDB first. The channel closes as soon as the
+server's connect-time snapshot arrives, so the cost is one wasted connection
+per cold view — small, and exactly what the rule exists to prevent. Deleting
+the `test.fail()` is the acceptance check for a fix.
+
 ## The transport spine
 
 This is the part that is finished, and the part worth reading before writing

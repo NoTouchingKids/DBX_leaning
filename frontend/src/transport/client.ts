@@ -137,6 +137,18 @@ export class TransportClient {
     }
   }
 
+  /**
+   * Answer the worker's open question about a run: is it over?
+   *
+   * A subscription taken out before this is known hydrates from IndexedDB but
+   * opens no channel, so this is what releases it — `false` opens one, `true`
+   * keeps it shut. Safe to call repeatedly, and safe for a run nothing is
+   * watching.
+   */
+  setTerminality(runId: string, terminal: boolean): void {
+    this.channel?.post({ kind: "run-terminality", run_id: runId, terminal });
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.pingTimer !== null) clearInterval(this.pingTimer);

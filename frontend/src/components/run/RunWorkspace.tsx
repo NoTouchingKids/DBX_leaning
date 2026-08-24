@@ -126,7 +126,29 @@ export function RunWorkspace({
   const rowStatus = detail.data?.run.status ?? null;
   const rowTerminal = rowStatus !== null && isTerminal(rowStatus);
 
-  const { snapshot, reconnect } = useReconnectableRunStream(runId, { terminal: rowTerminal });
+  // Declared before the stream hook because `knownTerminal` depends on it: a
+  // run this page just triggered is provably not terminal, and should not
+  // wait on a fetch to say so.
+  const [startingFor, setStartingFor] = useState<string | null>(null);
+
+  /**
+   * Undefined until the run row lands, and that distinction is load-bearing.
+   *
+   * Collapsing "not loaded" into `false` tells the transport a run is live
+   * before anything has said so, and it opens a channel to runs that are
+   * already over. Passing undefined makes it hydrate from cache and wait —
+   * costing a live run one API round trip before its stream opens, which is
+   * nothing next to a run measured in minutes.
+   *
+   * The one case that must not wait is a run this page just triggered: its
+   * 202 is proof it is not terminal, so `startingFor` answers immediately.
+   */
+  const knownTerminal =
+    rowStatus !== null ? rowTerminal : startingFor === runId ? false : undefined;
+
+  const { snapshot, reconnect } = useReconnectableRunStream(runId, {
+    terminal: knownTerminal,
+  });
 
   // A finished run has no live tail, so a first view has to fetch or show
   // nothing at all. Only once: the result is cached with no expiry, because a
@@ -135,7 +157,6 @@ export function RunWorkspace({
 
   /* --- STARTING: client-only, between the 202 and the first message ----- */
 
-  const [startingFor, setStartingFor] = useState<string | null>(null);
   const state = deriveUiState({
     streamStatus: snapshot.status,
     rowStatus,

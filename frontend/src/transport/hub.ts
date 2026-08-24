@@ -95,6 +95,9 @@ interface RunConn {
   lastSeq: number | null;
   status: RunStatus | null;
   terminal: boolean;
+  /** Subscribed before the caller knew whether the run was over. Hydrated,
+   *  but holding off on a channel until `run-terminality` says which. */
+  pendingTerminality: boolean;
   buffer: Message[];
   flushTimer: ReturnType<typeof setTimeout> | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
@@ -159,6 +162,9 @@ export class StreamHub {
       case "unsubscribe":
         this.unsubscribe(port, request.run_id);
         return;
+      case "run-terminality":
+        this.setTerminality(request.run_id, request.terminal);
+        return;
       case "ping":
         return; // the timestamp above was the entire point
       case "bye":
@@ -201,6 +207,7 @@ export class StreamHub {
         lastSeq: null,
         status: null,
         terminal: false,
+        pendingTerminality: false,
         buffer: [],
         flushTimer: null,
         retryTimer: null,
@@ -210,11 +217,18 @@ export class StreamHub {
     return conn;
   }
 
-  private async subscribe(port: PortLike, runId: string, terminal: boolean): Promise<void> {
+  private async subscribe(
+    port: PortLike,
+    runId: string,
+    terminal: boolean | undefined,
+  ): Promise<void> {
     const conn = this.conn(runId);
     if (conn.ports.has(port)) return;
     conn.ports.set(port, { hydrating: true, pending: [] });
-    if (terminal) conn.terminal = true;
+    if (terminal === true) conn.terminal = true;
+    // Undefined is not "false". It means the caller does not know yet, and
+    // opening a channel on a guess is how a finished run got one.
+    if (terminal === undefined) conn.pendingTerminality = true;
 
     let history: Message[] = [];
     try {
@@ -257,7 +271,42 @@ export class StreamHub {
       return;
     }
 
+    // Hydrated, but the caller has not said whether this run is over.
+    // `run-terminality` releases it — see the note on that message.
+    if (conn.pendingTerminality) return;
+
     this.open(conn);
+  }
+
+  /**
+   * A subscriber has learned this run is over.
+   *
+   * Two moments this can land, and it has to be right in both. If the channel
+   * is already open, close it — nothing further will arrive on it. If
+   * `subscribe` is still awaiting its IndexedDB hydrate, setting the flag is
+   * enough: the check that decides whether to open runs *after* that await,
+   * so no connection is made at all. That second case is the common one on a
+   * cold page and is the point of the hint.
+   */
+  private setTerminality(runId: string, terminal: boolean): void {
+    const conn = this.runs.get(runId);
+    if (conn === undefined) return;
+
+    if (!terminal) {
+      // The subscription was taken out before the caller knew; this releases
+      // it. `open` is idempotent and returns immediately if a channel exists.
+      conn.pendingTerminality = false;
+      this.open(conn);
+      return;
+    }
+
+    if (conn.terminal) return;
+    conn.terminal = true;
+    conn.pendingTerminality = false;
+    if (conn.es !== null || conn.retryTimer !== null) {
+      this.teardown(conn);
+      this.setState(conn, "idle");
+    }
   }
 
   private unsubscribe(port: PortLike, runId: string): void {
@@ -283,6 +332,7 @@ export class StreamHub {
 
   private open(conn: RunConn): void {
     if (conn.es !== null || conn.terminal || conn.state === "failed") return;
+    if (conn.pendingTerminality) return;
     if (conn.retryTimer !== null) {
       clearTimeout(conn.retryTimer);
       conn.retryTimer = null;
@@ -480,6 +530,7 @@ export class StreamHub {
       consecutive_failures: number;
       last_seq: number | null;
       terminal: boolean;
+      pending_terminality: boolean;
       ports: number;
       open: boolean;
     }>;
@@ -494,6 +545,7 @@ export class StreamHub {
         consecutive_failures: c.consecutiveFailures,
         last_seq: c.lastSeq,
         terminal: c.terminal,
+        pending_terminality: c.pendingTerminality,
         ports: c.ports.size,
         open: c.es !== null,
       })),

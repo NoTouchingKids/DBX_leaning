@@ -54,43 +54,34 @@ test("a finished run already in the client's cache opens no live channel", async
 });
 
 /**
- * KNOWN DEFECT — this test is expected to FAIL, and `test.fail()` says so.
+ * This test was written failing, and the defect it named is now fixed.
  *
- * Opening a finished run in a browser that has never seen it opens one SSE
- * connection to it. Measured, not inferred: the app serves one more
- * `GET /api/runs/{id}/stream` than before the page loaded.
+ * What it caught: opening a finished run in a browser that had never seen it
+ * opened one SSE connection to it. Measured, not inferred — the app served
+ * one more `GET /api/runs/{id}/stream` than before the page loaded.
  *
- * Why: `RunWorkspace` passes `terminal: rowTerminal` to
- * `useReconnectableRunStream`, and `rowTerminal` comes from `GET
- * /api/runs/{id}`. On the first render that query has not resolved, so it is
- * `false`; `useRunStream` reads `terminal` once, inside the `subscribe`
- * callback, and deliberately excludes it from the dependency list ("learning
- * mid-stream that a run finished must not tear the subscription down"). So
- * the subscription is taken out as non-terminal and the hub opens a channel.
- * The warm-cache case above escapes it only because `hub.ts` finds
+ * Why it happened: `useRunStream` reads `terminal` once inside its subscribe
+ * callback and deliberately keeps it out of the dependency list, because
+ * learning mid-stream that a run finished must not tear a live subscription
+ * down and rebuild it. Correct at that end, and it left a hole at the other:
+ * on a cold page the run row has not loaded, so `terminal` is false on the
+ * first render and the hub opens a channel to a run that will never send
+ * anything. The warm-cache case above escaped it only because the hub finds
  * `cached.terminal` in IndexedDB first.
  *
- * How bad: one connection per cold view of a finished run, closed as soon as
- * the server's connect-time snapshot delivers the terminal status — the UI
- * never even shows it as live. Small, but it is exactly the waste the rule
- * exists to prevent, and it is invisible to every offline test because the
- * fake EventSource in jsdom costs nothing to open.
+ * The fix keeps the constraint that caused it: the answer is forwarded as a
+ * one-way `terminal-hint` rather than as a resubscribe. If it lands while the
+ * worker is still reading IndexedDB — the common case on a cold page — no
+ * connection is opened at all, because the check that decides runs after that
+ * read. If it lands later, the open channel is closed.
  *
- * Removing `test.fail()` is the acceptance check for a fix. It is left
- * failing rather than deleted or renamed to something weaker, because a test
- * named after what the code does instead of what it should do stops being a
- * test.
+ * Invisible to all 661 offline tests, because a fake EventSource in jsdom
+ * costs nothing to open. That is what this suite is for.
  */
 test("a finished run the client has never seen opens no live channel", async ({
   browser,
   page,
 }) => {
-  test.fail(
-    true,
-    "known defect: the subscription is taken out before GET /api/runs/{id} resolves, " +
-      "so the hub opens a channel to a run it has not yet been told is finished",
-  );
-
   const runId = await finishedRun(page);
   const afterTheRun = streamConnectionCount(runId);
 

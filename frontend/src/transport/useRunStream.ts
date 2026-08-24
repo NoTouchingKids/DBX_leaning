@@ -17,7 +17,7 @@
  * React Query; run telemetry belongs to this; nothing else is shared.
  */
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 import { getTransport } from "./client";
 import { RunStore, type RunSnapshot } from "./runStore";
@@ -25,8 +25,18 @@ import { RunStore, type RunSnapshot } from "./runStore";
 export interface UseRunStreamOptions {
   /** Pass `false` while the run id is not known yet. */
   enabled?: boolean;
-  /** From `GET /api/runs/{id}`. A terminal run is served from cache with no
-   *  live channel — passing `true` is what avoids opening one. */
+  /**
+   * Whether the run has already finished, from `GET /api/runs/{id}`.
+   *
+   * **`undefined` is a third state and not a synonym for `false`.** It means
+   * "not known yet": the run hydrates from IndexedDB and NO live channel is
+   * opened until the answer arrives. A caller that genuinely knows — one that
+   * just triggered a run, say — should pass `false` explicitly and get a
+   * channel immediately.
+   *
+   * Guessing `false` while a fetch is in flight is what opened a live channel
+   * to runs that were already over. See the effect below.
+   */
   terminal?: boolean;
 }
 
@@ -49,9 +59,10 @@ export function useRunStream(
     (onStoreChange: () => void) => {
       if (key === null) return NEVER();
       const transport = getTransport();
-      // `terminal` is read once, here. Learning mid-stream that a run
-      // finished must not tear the subscription down and rebuild it — the
-      // worker closes the channel itself on a terminal status.
+      // `terminal` is read once, here, and may be undefined — which the
+      // worker treats as "hydrate, but open nothing yet". Learning mid-stream
+      // that a run finished must not tear the subscription down and rebuild
+      // it, so the answer arrives separately, in the effect below.
       const release = transport.acquire(key, terminal);
       const unsubscribe = transport.getStore(key).subscribe(onStoreChange);
       return () => {
@@ -62,6 +73,26 @@ export function useRunStream(
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
     [key],
   );
+
+  // The answer to the question `subscribe` could not answer.
+  //
+  // `terminal` is read once inside `subscribe` and is deliberately not a
+  // dependency of it — re-subscribing would tear a live run's stream down and
+  // rebuild it every time it finished. So the answer is forwarded here
+  // instead, and until it arrives the worker holds off on opening anything.
+  //
+  // An earlier version of this only forwarded `true`, to *close* a channel
+  // that had already opened. It does not work, and a real browser showed why:
+  // `GET /api/runs/{id}` is a network round trip while the IndexedDB hydrate
+  // is sub-millisecond, so the channel was always already open by the time
+  // the answer landed. Gating beats chasing.
+  //
+  // Invisible to every offline test, because a fake EventSource costs nothing
+  // to open and so a wasted one looks exactly like no connection at all.
+  useEffect(() => {
+    if (key === null || terminal === undefined) return;
+    getTransport().setTerminality(key, terminal);
+  }, [key, terminal]);
 
   return useSyncExternalStore(subscribe, store.getSnapshot, store.getSnapshot);
 }

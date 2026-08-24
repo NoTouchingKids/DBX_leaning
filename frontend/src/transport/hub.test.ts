@@ -346,6 +346,48 @@ describe("StreamHub — terminal runs", () => {
     expect(es.closed).toBe(true);
   });
 
+  it("opens no channel when the terminal hint lands during hydration", async () => {
+    // The cold-page case, and the reason the hint exists. A page subscribes
+    // before `GET /api/runs/{id}` has resolved, so it says "not terminal"
+    // because it does not know yet. The answer arrives a moment later, while
+    // the worker is still reading IndexedDB — and the check that decides
+    // whether to open runs after that read, so nothing is opened.
+    const { hub } = makeHub();
+    const port = new RecordingPort();
+    hub.connect(port);
+    hub.handle(port, { kind: "subscribe", run_id: RUN });
+    hub.handle(port, { kind: "run-terminality", run_id: RUN, terminal: true });
+
+    await vi.waitFor(() => {
+      if (!port.events.some((e) => e.kind === "hydrate")) throw new Error("not hydrated");
+    });
+
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it("closes an open channel when the terminal hint arrives late", async () => {
+    const { hub } = makeHub();
+    const port = new RecordingPort();
+    await subscribe(hub, port);
+    FakeEventSource.last.open();
+    expect(FakeEventSource.last.closed).toBe(false);
+
+    hub.handle(port, { kind: "run-terminality", run_id: RUN, terminal: true });
+
+    expect(FakeEventSource.last.closed).toBe(true);
+    expect(hub.stats().connections[0]?.terminal).toBe(true);
+  });
+
+  it("ignores a terminal hint for a run nothing is watching", async () => {
+    const { hub } = makeHub();
+    const port = new RecordingPort();
+    hub.connect(port);
+    // Must not create a connection record as a side effect of being told
+    // about a run — that would leak one per hint.
+    hub.handle(port, { kind: "run-terminality", run_id: "run-nobody-watches", terminal: true });
+    expect(hub.stats().runs).toBe(0);
+  });
+
   it("reopens nothing for a run already cached as terminal", async () => {
     const { hub, persistence } = makeHub();
     await persistence.putRun({

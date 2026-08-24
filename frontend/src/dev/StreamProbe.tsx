@@ -31,7 +31,10 @@ function Field({ label, value }: { label: string; value: string | number }) {
 export default function StreamProbe() {
   const [input, setInput] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
-  const snap = useRunStream(runId);
+  // Explicitly `false`, not omitted. Undefined now means "I do not know yet"
+  // and holds the channel closed until told; this page has no run row to
+  // consult and exists to open a channel and watch what happens to it.
+  const snap = useRunStream(runId, { terminal: false });
 
   // Contiguity is the acceptance criterion, so it is computed rather than
   // eyeballed. Note it can legitimately never reach "contiguous": the live

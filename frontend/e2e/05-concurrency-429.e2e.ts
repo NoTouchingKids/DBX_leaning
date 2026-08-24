@@ -34,6 +34,11 @@ test("filling the concurrency ceiling refuses the next run with the server's own
   page,
   request,
 }) => {
+  // Longer than the file-wide default: this test holds five model processes
+  // on one machine and then waits for all of them to finish, so that the
+  // stack is handed back with an empty ceiling.
+  test.setTimeout(360_000);
+
   const active = async (): Promise<RunRow[]> => {
     const response = await request.get(`${BASE_URL}/api/runs?limit=500`);
     expect(response.ok()).toBeTruthy();
