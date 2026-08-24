@@ -28,6 +28,7 @@ __all__ = [
     "PanelColumns",
     "load_panel",
     "synthetic_panel",
+    "validate_table_name",
 ]
 
 #: Where the model looks for real data. Deliberately named after what it wants
@@ -97,7 +98,14 @@ def _identifier(name: str, what: str) -> str:
     return str(name)
 
 
-def _table_name(table: str) -> str:
+def validate_table_name(table: str) -> str:
+    """A 1-, 2- or 3-part name of bare identifiers, or `ValueError`.
+
+    Called from the model's constructor as well as from `load_panel`, so a
+    malformed `table` in the job config fails immediately rather than at the
+    first read — by which point the run has already claimed one of five
+    account-wide task slots.
+    """
     parts = str(table).split(".")
     if not 1 <= len(parts) <= 3:
         raise ValueError(f"table={table!r} is not a 1-, 2- or 3-part name")
@@ -121,7 +129,7 @@ def load_panel(
     would work on a laptop and hang on the job after taking one of five
     account-wide task slots (`docs/free-edition-constraints.md`).
     """
-    table = _table_name(table)
+    table = validate_table_name(table)
     projection = ", ".join(columns.selected)
     sql = f"""
         SELECT {projection}
@@ -155,7 +163,7 @@ def load_panel(
 
 #: (entity, ISO3) pairs. Real countries, so a per-group view reads like
 #: something rather than like `group_0017`.
-_COUNTRIES: tuple[tuple[str, str], ...] = (
+_COUNTRIES: tuple[tuple[str, str | None], ...] = (
     ("Argentina", "ARG"), ("Australia", "AUS"), ("Austria", "AUT"), ("Bangladesh", "BGD"),
     ("Belgium", "BEL"), ("Brazil", "BRA"), ("Canada", "CAN"), ("Chile", "CHL"),
     ("China", "CHN"), ("Colombia", "COL"), ("Denmark", "DNK"), ("Egypt", "EGY"),

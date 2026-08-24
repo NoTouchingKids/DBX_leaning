@@ -443,8 +443,17 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_panel_fit (
     n_observations     INT,
     first_period       DOUBLE,
     last_period        DOUBLE,
-    -- Outcome for THIS group. 'fitted' or a failure reason; see the comment
-    -- above. Null coefficients are expected when this is not 'fitted'.
+    -- Outcome for THIS group. Exactly 'fitted' or 'failed' — two values, so
+    -- "how many failed" is one GROUP BY with no need to enumerate the reason
+    -- set. `failure_reason` carries the detail and is null when fitted.
+    --
+    -- This comment previously said `status` was "'fitted' or a failure
+    -- reason", which would have made `failure_reason` a byte-for-byte
+    -- duplicate of it on every failed row and left the common question
+    -- unanswerable without knowing every reason in advance. Two columns, two
+    -- grouping cardinalities.
+    --
+    -- Null coefficients are expected on a failed row.
     status             STRING,
     failure_reason     STRING,
     -- The fit. Degree is configurable, so coefficients are stored as a
@@ -457,6 +466,14 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_panel_fit (
     r_squared          DOUBLE,
     rmse               DOUBLE,
     -- Run-level, repeated per row.
+    -- `groups_total` is the real total, known before the first fit.
+    --
+    -- `groups_fitted` / `groups_failed` are NOT run totals and cannot be:
+    -- results are emitted in chunks, so the first chunk is written long
+    -- before the run has final counts. They are stamped at flush time as the
+    -- counts AS OF the end of that chunk — identical for every row in a
+    -- chunk, monotonic across chunks. The run totals are in this table by
+    -- construction: COUNT(*) WHERE status = 'fitted'.
     groups_total       INT,
     groups_fitted      INT,
     groups_failed      INT,

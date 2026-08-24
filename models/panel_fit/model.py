@@ -92,7 +92,7 @@ from typing import Any
 
 from models._data import Dataset
 
-from .panel_data import DEFAULT_PANEL_TABLE, PanelColumns, load_panel
+from .panel_data import DEFAULT_PANEL_TABLE, PanelColumns, load_panel, validate_table_name
 
 __all__ = [
     "DEFAULT_PANEL_TABLE",
@@ -160,7 +160,7 @@ DEFAULT_FAILURE_LOG_LIMIT = 12
 class _Group:
     """One unit of work: a group key and the observations under it."""
 
-    __slots__ = ("key", "label", "periods", "x", "y", "rows_seen")
+    __slots__ = ("key", "label", "periods", "observations", "rows_seen")
 
     def __init__(self, key: str, label: str | None) -> None:
         self.key = key
@@ -168,10 +168,39 @@ class _Group:
         #: Every period the group appears at, usable observation or not — so a
         #: group that failed can still say *when* it existed.
         self.periods: list[float] = []
-        #: Predictor and response, only where both are present and finite.
-        self.x: list[float] = []
-        self.y: list[float] = []
+        #: `(period, predictor, response)` for the rows where both the
+        #: predictor and the response are present and finite. The period rides
+        #: along because it is not always the predictor: with
+        #: `predictor_column` set to a covariate, `first_period` read off the
+        #: predictor would report a GDP figure as a year.
+        self.observations: list[tuple[float, float, float]] = []
         self.rows_seen = 0
+
+    def finalise(self) -> None:
+        """Put the observations in period order, once, after grouping.
+
+        Not cosmetic. Least squares over the same points in a different order
+        gives answers that differ in the last bits of the mantissa, so a model
+        that fitted them in arrival order would produce a slightly different
+        results table every time SQL chose a different plan — and SQL promises
+        no ordering at all. Sorting on the whole triple rather than the period
+        alone keeps that total even when a group reports twice in one period.
+        """
+        self.periods.sort()
+        self.observations.sort()
+
+    @property
+    def x(self) -> list[float]:
+        return [observation[1] for observation in self.observations]
+
+    @property
+    def y(self) -> list[float]:
+        return [observation[2] for observation in self.observations]
+
+    @property
+    def fitted_periods(self) -> list[float]:
+        """Periods of the observations that were actually usable."""
+        return [observation[0] for observation in self.observations]
 
 
 class PanelFitModel:
@@ -191,7 +220,9 @@ class PanelFitModel:
         #: A caller-supplied panel wins over the loader — that is how the
         #: tests build a group with an exact defect.
         self._rows_config: Sequence[dict[str, Any]] | None = cfg.get("rows")
-        self.table = str(cfg.get("table", DEFAULT_PANEL_TABLE))
+        # Validated here, not at the first read: a malformed name should fail
+        # before the run claims one of five account-wide task slots.
+        self.table = validate_table_name(str(cfg.get("table", DEFAULT_PANEL_TABLE)))
         self.columns = PanelColumns(
             group=str(cfg.get("group_column", "entity")),
             label=cfg.get("label_column", "code"),
@@ -321,8 +352,7 @@ class PanelFitModel:
                 row.get(cols.predictor)
             )
             if response is not None and predictor is not None:
-                group.x.append(predictor)
-                group.y.append(response)
+                group.observations.append((period, predictor, response))
 
         self.rows_unplaceable = unplaceable
 
@@ -331,6 +361,8 @@ class PanelFitModel:
         # chunking. A dict's insertion order would depend on how the rows came
         # back, which SQL does not promise.
         groups = [by_key[key] for key in sorted(by_key)]
+        for group in groups:
+            group.finalise()
         if self.max_groups is not None:
             groups = groups[: self.max_groups]
         self._groups = groups
@@ -396,7 +428,7 @@ class PanelFitModel:
                     failures_logged += 1
                     self._log(
                         f"{group.key}: {row['failure_reason']} "
-                        f"({row['n_observations']} usable observations)",
+                        f"({row['n_observations']} usable of {group.rows_seen} rows)",
                         level="WARNING",
                         phase="fit",
                     )
@@ -477,8 +509,9 @@ class PanelFitModel:
     # --- one group --------------------------------------------------------
 
     def _fit_group(self, group: _Group, total: int) -> dict[str, Any]:
-        n = len(group.x)
-        reason, coefficients, r_squared, rmse = self._fit(group.x, group.y)
+        x, y = group.x, group.y
+        n = len(x)
+        reason, coefficients, r_squared, rmse = self._fit(x, y)
 
         # `status` is two-valued and `failure_reason` carries the detail.
         # `uc_ddl/002_model_results.sql` comments status as "'fitted' or a
@@ -489,10 +522,13 @@ class PanelFitModel:
         # four. Flagged rather than changed — the DDL is another track's file.
         status = STATUS_FAILED if reason else STATUS_FITTED
 
-        # Periods of the observations actually fitted; the group's whole span
-        # when there were none, so a `too_few_observations` row still says
-        # when the group existed rather than showing two nulls.
-        span = group.x if n else group.periods
+        # A fitted row's span is the sample the coefficients describe. A
+        # failed row's is the whole stretch the group appears over, which is
+        # the more useful answer to "what happened to Chad?" — it distinguishes
+        # a country that reported once from one that reported for twenty years
+        # and never gave a value. Periods, never the predictor: those are only
+        # the same column when `predictor_column` defaults to the period.
+        span = group.fitted_periods if reason is None else group.periods
         return {
             "group_key": group.key,
             "group_label": group.label,
@@ -664,6 +700,11 @@ class PanelFitModel:
                 "group_failure_reason": row["failure_reason"],
                 "group_r_squared": row["r_squared"],
                 "n_observations": row["n_observations"],
+                # Rows the group had, against rows that survived the null and
+                # non-finite drop: the difference between "this unit is small"
+                # and "this unit did not report", which is the first thing
+                # anyone asks about a failure.
+                "rows_seen": group.rows_seen,
                 "metric_higher_is_better": True,
                 "degree": self.degree,
                 "chunks_emitted": self.chunks_emitted,
