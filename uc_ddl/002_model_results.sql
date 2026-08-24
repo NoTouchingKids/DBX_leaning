@@ -369,3 +369,104 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_neural_net (
 )
 USING DELTA
 COMMENT 'Classification report: one row per pace class, run-level metrics repeated.';
+
+-- ---------------------------------------------------------------------------
+-- ortools_jobshop
+--
+-- One row per scheduled operation, which is the natural grain: a job-shop
+-- solution IS an assignment of (job, operation) to a machine and a start
+-- time, and a flat table of those is directly renderable as a Gantt chart
+-- without a join.
+--
+-- Deliberately parallel to results_gurobi_scheduling in shape, because the
+-- interesting comparison between the two solvers is on the same problem
+-- expressed the same way. What differs is `solver_status` and the bound
+-- columns: CP-SAT reports OPTIMAL/FEASIBLE/INFEASIBLE where Gurobi reports
+-- its own set, and only one of the two has a licence-imposed size cap.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_ortools_jobshop (
+    run_id             STRING NOT NULL,
+    chunk_index        INT,
+    -- The schedule itself.
+    job_id             INT,
+    job_label          STRING,
+    operation_index    INT,
+    machine_id         INT,
+    machine_label      STRING,
+    start_minute       INT,
+    duration_minutes   INT,
+    end_minute         INT,
+    -- Run-level, repeated per row so a single SELECT answers "how good was
+    -- this schedule" without a join — the same flat-table reasoning the other
+    -- results tables use.
+    makespan           INT,
+    best_bound         DOUBLE,
+    solver_status      STRING,
+    solutions_found    INT,
+    wall_time_seconds  DOUBLE,
+    -- Instance size, so a run can be told apart from one that solved a
+    -- different problem. Also the number that matters when comparing against
+    -- the Gurobi models, which cannot exceed 2000 variables at all.
+    n_jobs             INT,
+    n_machines         INT,
+    n_operations       INT,
+    seed               BIGINT,
+    -- Provenance (models/_data): a run on real rows and a run that fell back
+    -- to the generator must not look identical afterwards.
+    data_source          STRING,
+    data_synthetic       BOOLEAN,
+    data_rows            BIGINT,
+    data_fallback_reason STRING
+)
+USING DELTA
+COMMENT 'Job-shop schedule: one row per scheduled operation, run-level metrics repeated.';
+
+-- ---------------------------------------------------------------------------
+-- panel_fit
+--
+-- One row per GROUP, not per observation. The model fits each group
+-- independently, so the group is the unit of both work and outcome.
+--
+-- `status` is the column that makes this table different from every other
+-- results table here: a group can FAIL — too few points, a singular design
+-- matrix, a non-finite fit — while the RUN succeeds. Those rows are written
+-- with their reason and null coefficients rather than dropped, because "we
+-- could not fit Chad" and "Chad was never in the data" are different answers
+-- and only one of them is a data problem.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_panel_fit (
+    run_id             STRING NOT NULL,
+    chunk_index        INT,
+    -- The unit of work.
+    group_key          STRING,
+    group_label        STRING,
+    n_observations     INT,
+    first_period       DOUBLE,
+    last_period        DOUBLE,
+    -- Outcome for THIS group. 'fitted' or a failure reason; see the comment
+    -- above. Null coefficients are expected when this is not 'fitted'.
+    status             STRING,
+    failure_reason     STRING,
+    -- The fit. Degree is configurable, so coefficients are stored as a
+    -- delimited string rather than as N columns that would change shape with
+    -- config — the two named ones are the ones every degree has.
+    intercept          DOUBLE,
+    slope              DOUBLE,
+    coefficients       STRING,
+    degree             INT,
+    r_squared          DOUBLE,
+    rmse               DOUBLE,
+    -- Run-level, repeated per row.
+    groups_total       INT,
+    groups_fitted      INT,
+    groups_failed      INT,
+    response           STRING,
+    predictor          STRING,
+    -- Provenance (models/_data).
+    data_source          STRING,
+    data_synthetic       BOOLEAN,
+    data_rows            BIGINT,
+    data_fallback_reason STRING
+)
+USING DELTA
+COMMENT 'Per-group curve fits: one row per group INCLUDING groups that failed to fit.';

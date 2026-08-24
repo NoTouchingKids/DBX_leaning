@@ -48,8 +48,18 @@ delta = [
 #
 # Re-verify whenever this pin moves:  python scripts/check_gurobi_licence.py
 gurobi = ["gurobipy>=13,<14"]
+# OR-Tools CP-SAT: the open-source counterweight to the Gurobi models.
+# Constraint programming rather than branch-and-bound, and — the point —
+# NO variable or constraint cap, where the bundled Gurobi licence stops at
+# 2000/2000. A problem that outgrows gurobi_scheduling has somewhere to go.
+# Apache-2.0, CPU-only, no licence file and no token endpoint to reach.
+ortools = ["ortools>=9.14,<10"]
 forecasting = ["numpy>=1.26", "scikit-learn>=1.4"]
 mcmc = ["numpy>=1.26", "emcee>=3.1"]
+# Least squares on a country x year panel. numpy and nothing else — no
+# scikit-learn, no scipy: `polyfit` and `lstsq` are the whole toolkit, and a
+# per-country fit of a few dozen points does not need more.
+panel = ["numpy>=1.26"]
 # Conjugate arithmetic: math.lgamma for the incomplete beta, numpy for one
 # grid convolution. Its own extra rather than sharing mcmc's, which would
 # ship emcee to a job that never imports it — the same unused weight the
@@ -79,7 +89,7 @@ annealing = []
 # everyone who just wanted the light ones. Install [nn] explicitly.
 # tests/deploy/test_requirements.py enforces this rather than trusting it.
 models = [
-    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,streaming,annealing]",
+    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,streaming,annealing,ortools,panel]",
 ]
 
 [dependency-groups]
@@ -123,6 +133,11 @@ neural_net = "nn"
 streaming_results = "streaming"
 # Maps to an intentionally empty extra — see the note above it.
 annealing = "annealing"
+# The open-source scheduler. Same problem domain as gurobi_scheduling, a
+# different solver paradigm and no size cap.
+ortools_jobshop = "ortools"
+# Many small independent fits over panel data, with per-unit outcomes.
+panel_fit = "panel"
 
 [tool.setuptools]
 packages = ["shared", "app", "job", "models"]
