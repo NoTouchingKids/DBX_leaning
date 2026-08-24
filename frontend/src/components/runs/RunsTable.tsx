@@ -68,11 +68,19 @@ export function RunsTable({ rows }: { rows: readonly Run[] }) {
                 }`}
               >
                 <td className={CELL}>
-                  {/* Past-run detail is not built (`/runs/:runId` is a stub),
-                      so the row links to the model page with the run
-                      preselected — the same view, hydrated from Delta. */}
+                  {/* Where a row leads depends on whether the run is over.
+                      A finished run goes to `/runs/:runId`, which is immutable
+                      and served from cache with no live channel. A run that is
+                      still going goes to its model page, where it can actually
+                      be watched — and cancelled, which the detail page cannot
+                      do. Sending a live run to the past-run view would show it
+                      frozen at whatever Delta happened to hold. */}
                   <Link
-                    to={`/models/${row.model}?run=${encodeURIComponent(row.run_id)}`}
+                    to={
+                      isTerminal(row.status)
+                        ? `/runs/${encodeURIComponent(row.run_id)}`
+                        : `/models/${row.model}?run=${encodeURIComponent(row.run_id)}`
+                    }
                     className="font-mono text-[0.74rem] text-accent no-underline hover:underline"
                   >
                     {truncateId(row.run_id, 12, 4)}

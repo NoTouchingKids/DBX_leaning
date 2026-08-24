@@ -19,7 +19,6 @@
  * own `more` flag and against cursor movement — never against seq contiguity.
  */
 
-import type { BackfillResponse } from "@/lib/api";
 import {
   isTerminal,
   type Message,
@@ -131,14 +130,21 @@ export interface AssembledHistory {
  * at rest" is true rather than merely intended. A hand-built snapshot is free
  * to be subtly impossible; this one is not.
  *
- * `hydrate: true` even for an empty result: on this page an empty store means
- * "Delta returned nothing", which is a real answer (bayesian_ab is closed
- * form and can finish before it emits a single progress message), and it must
- * not be confused with "not read yet".
+ * `hydrate` is set from whether Delta has ANSWERED, not from whether it
+ * answered with anything. An empty store with `hydrated: true` means "this
+ * run really emitted nothing", which is a real answer — bayesian_ab is closed
+ * form and can finish before it emits a single progress message. An empty
+ * store with `hydrated: false` means "not read yet". A view is entitled to
+ * tell those apart, so a page that has not fetched yet must not claim the
+ * first one.
  */
 export function assembleHistory(input: {
   runId: string;
-  pages: readonly Pick<BackfillResponse, "messages">[];
+  /** Raw pages, in cursor order. `unknown` rather than `Message[]`, because
+   *  that is what they are: `BackfillResponse` types them as messages, but a
+   *  backfilled row is missing `run_id` until `normalizeBackfilled` puts it
+   *  back. Typing the input honestly is what stops that being forgotten. */
+  pages: readonly { messages: readonly unknown[] }[];
   /** The registry row's status — authoritative, and the reason a run with no
    *  `status` message at all still renders as finished. */
   rowStatus: RunStatus | null;
@@ -149,7 +155,7 @@ export function assembleHistory(input: {
   const { messages, unusable } = normalizeBackfilled(input.runId, rows);
 
   const store = new RunStore(input.runId);
-  store.ingest(messages, { hydrate: true });
+  store.ingest(messages, { hydrate: input.pages.length > 0 });
 
   // A terminal run whose terminal `status` message never reached Delta is
   // still terminal; the registry row is what says so. Only applied when the

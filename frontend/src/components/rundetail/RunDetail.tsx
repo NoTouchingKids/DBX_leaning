@@ -43,7 +43,7 @@ import {
   UnusableNotice,
 } from "./HistoryNotices";
 import { TerminalResults } from "./TerminalResults";
-import { useRunHistory } from "./useRunHistory";
+import { useRunHistory, type RunHistory } from "./useRunHistory";
 
 /** Matches `RunIdentityBar`'s own chip, which is not exported. */
 function Chip({ label, children }: { label: string; children: ReactNode }) {
@@ -229,7 +229,7 @@ function HistoryFooter({
   history,
   runTerminal,
 }: {
-  history: ReturnType<typeof useRunHistory>;
+  history: RunHistory;
   runTerminal: boolean;
 }) {
   const { snapshot } = history;

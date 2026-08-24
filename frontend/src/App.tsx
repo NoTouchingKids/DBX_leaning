@@ -29,6 +29,7 @@ import StreamProbe from "@/dev/StreamProbe";
 import { HomePage } from "@/pages/HomePage";
 import { ModelPage } from "@/pages/ModelPage";
 import { NotFound } from "@/pages/NotFound";
+import { RunDetailPage } from "@/pages/RunDetailPage";
 import { RunsPage } from "@/pages/RunsPage";
 
 const client = new QueryClient({
@@ -53,15 +54,7 @@ export default function App() {
           <Route element={<AppShell />}>
             <Route index element={<HomePage />} />
             <Route path="runs" element={<RunsPage />} />
-            <Route
-              path="runs/:runId"
-              element={
-                <NotFound
-                  title="Past-run detail is not built yet"
-                  detail="A finished run is watchable from its model page — the same view, hydrated from Delta instead of a live stream. Open it from the run history table."
-                />
-              }
-            />
+            <Route path="runs/:runId" element={<RunDetailPage />} />
             <Route path="models/:model" element={<ModelPage />} />
             <Route path="dev/probe" element={<StreamProbe />} />
             {/* The review surface for the nine signature animations. There is
