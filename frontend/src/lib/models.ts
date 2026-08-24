@@ -494,6 +494,18 @@ export interface BayesianAbArmSummary {
 
 export interface BayesianAbProgressPayload {
   stage: string;
+  /**
+   * ONE-BASED, and a count of COMPLETED stages rather than an array index.
+   * `models/bayesian_ab/model.py` iterates `enumerate(STAGES, start=1)` and
+   * emits after the stage body has run, so the first message carries 1 and
+   * the last carries 5.
+   *
+   * Spelled out because it was previously left implicit and two readers drew
+   * opposite conclusions from the same file: `percent_complete` documented as
+   * 20/40/60/80/100 only works if this is 1-based, while
+   * `BAYESIAN_AB_STAGES[stage_index]` only works if it is 0-based. It is
+   * 1-based; the array lookup needs `stage_index - 1`.
+   */
   stage_index: number;
   stages_total: number;
   /** Literally the string "stages". A rendering instruction the model puts in
