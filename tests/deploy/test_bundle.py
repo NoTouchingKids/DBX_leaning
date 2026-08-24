@@ -9,6 +9,7 @@ rather than at 3am on a real workspace.
 from __future__ import annotations
 
 import pathlib
+from fnmatch import fnmatch
 
 import pytest
 import yaml
@@ -17,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 RESOURCES = ROOT / "resources"
 REQUIREMENTS = ROOT / "deploy" / "requirements"
 
-#: The five model packages, discovered rather than listed.
+#: The model packages, discovered rather than listed.
 MODELS = sorted(
     p.name
     for p in (ROOT / "models").iterdir()
@@ -170,6 +171,37 @@ def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
 def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
     excluded = set(bundle["sync"]["exclude"])
     for pattern in (".venv/**", ".git/**", "**/__pycache__/**"):
+        assert pattern in excluded, f"{pattern} would be synced to the workspace"
+
+
+def test_the_built_frontend_reaches_the_workspace(bundle):
+    """The app serves ``frontend/dist``; nothing in the workspace can build it.
+
+    Excluding ``frontend/**`` wholesale is the obvious tidy-up and it deploys
+    an app that answers 503 on every page while the API works — a failure that
+    looks like a routing bug and is really a packaging one. ``sync.include``
+    is also what gets past .gitignore, which correctly ignores build output.
+    """
+    assert "frontend/dist/**" in set(bundle["sync"].get("include", []))
+
+
+def test_no_exclude_contradicts_the_frontend_include(bundle):
+    """Whether ``include`` or ``exclude`` wins on a contradiction is not
+    something this repo can verify without a live workspace. So there must not
+    be a contradiction: no exclude pattern may cover ``frontend/dist``.
+    """
+    for pattern in bundle["sync"]["exclude"]:
+        assert not fnmatch("frontend/dist/index.html", pattern), (
+            f"exclude {pattern!r} may cancel the frontend/dist include, and "
+            "which one wins is unverified"
+        )
+
+
+def test_the_frontend_source_does_not_reach_the_workspace(bundle):
+    """node_modules alone would dwarf the rest of the sync, and there is no
+    Node runtime in the workspace to make any of it useful."""
+    excluded = set(bundle["sync"]["exclude"])
+    for pattern in ("frontend/node_modules/**", "frontend/src/**"):
         assert pattern in excluded, f"{pattern} would be synced to the workspace"
 
 
