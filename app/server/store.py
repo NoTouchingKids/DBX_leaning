@@ -211,6 +211,14 @@ class PostgresRunStore:
     def __init__(self, dsn: str, *, connect=None) -> None:
         self._dsn = dsn
         self._connect = connect  # injectable for tests
+        #: What the server said it is, read once at `ensure_schema`. Reported
+        #: by `/healthz` because the alternative is asserting it, and this
+        #: repo asserted wrong: it claimed "Lakebase runs PostgreSQL 18" while
+        #: a real instance came back `PG_VERSION_16`, the default. The version
+        #: is chosen at creation and immutable after, so a deployment can
+        #: legitimately be on either. One string from the server settles it,
+        #: and costs a query on a connection already being opened.
+        self.server_version: str | None = None
 
     async def _conn(self):
         if self._connect is not None:
@@ -223,8 +231,21 @@ class PostgresRunStore:
         conn = await self._conn()
         try:
             await conn.execute(SCHEMA_SQL)
+            self.server_version = await self._read_server_version(conn)
         finally:
             await conn.close()
+
+    @staticmethod
+    async def _read_server_version(conn) -> str | None:
+        """Never fatal. A store that works but cannot report its version is
+        strictly better than a startup that fails over a diagnostic."""
+        try:
+            cur = await conn.execute("SHOW server_version")
+            row = await cur.fetchone()
+        except Exception:  # noqa: BLE001
+            log.debug("could not read the Postgres server version", exc_info=True)
+            return None
+        return str(row[0]) if row else None
 
     async def claim_slot(
         self, run_id: str, *, model: str, ceiling: int, requested_by: str | None = None

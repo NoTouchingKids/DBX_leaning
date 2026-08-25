@@ -30,6 +30,17 @@ async def healthz(hub: Hub) -> dict:
         "status": "degraded" if hub.degraded else "ok",
         "protocol_schema_version": SCHEMA_VERSION,
         "degraded": hub.degraded,
+        # Which run store is live, and — for Lakebase — what Postgres actually
+        # answered. A deployment that thinks it is on Lakebase while running
+        # on the warehouse keeps the concurrency race and the missing primary
+        # key without anyone noticing. The version is the other half: Lakebase
+        # defaults to 16 and can be created on 18, immutably, so which one a
+        # deployment has is a fact to read rather than assume. Both are
+        # None-safe: no store at all is a valid, degraded state.
+        "store": {
+            "kind": getattr(hub.store, "name", None),
+            "server_version": getattr(hub.store, "server_version", None),
+        },
         "live_jobs": len(hub.job_sockets.run_ids),
         "messages_ingested": hub.messages_ingested,
     }

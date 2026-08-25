@@ -66,6 +66,51 @@ psql "host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslm
 `databricks database` is Public Preview and its flags may move; check
 `databricks database create-database-instance --help` if the above is refused.
 
+**Pinning the Postgres major version — do it at creation or not at all.**
+`pg_version` has no CLI flag, so it goes in the body, and it is **immutable**:
+the CLI's own resource metadata marks it `spec:immutable` /
+`recreate_on_changes`, and `update-database-instance` has no flag for it.
+Changing your mind later means deleting the instance and making a new one.
+
+```bash
+databricks database create-database-instance --json '{
+  "name": "dbx-leaning", "capacity": "CU_1", "pg_version": "PG_VERSION_18"
+}'
+```
+
+**The default is 16.** Observed on 2026-08-25: an instance created with
+`--capacity CU_1` and no `pg_version` came back `"pg_version":
+"PG_VERSION_16"`. Note the literal — `PG_VERSION_18`, not `PG_18`.
+
+To move an existing instance to 18, recreate it. Nothing is lost if it has
+not served a run yet; `run_status` is rebuilt by `ensure_schema()` at startup,
+and no telemetry lives here — that is all in Delta:
+
+```bash
+databricks database delete-database-instance dbx-leaning --purge
+databricks database create-database-instance --json '{
+  "name": "dbx-leaning", "capacity": "CU_1", "pg_version": "PG_VERSION_18"
+}'
+```
+
+The DNS name changes when you do, so re-deploy with the new
+`--var="lakebase_host=..."`.
+
+**Nothing here needs a particular version.** `lakebase_ddl/001_run_status.sql`
+uses primary keys, `ON CONFLICT`, advisory locks and a partial index, none of
+which changed between 16 and 18. Rather than assert what a deployment got,
+the app reads it: `PostgresRunStore.ensure_schema()` runs `SHOW
+server_version` on the connection it already has open, and `GET /healthz`
+returns it:
+
+```json
+"store": { "kind": "postgres", "server_version": "16.10" }
+```
+
+`kind` is the other half of that — a deployment that thinks it is on Lakebase
+while silently running on the warehouse store keeps the concurrency race and
+the missing primary key, and this is what makes that visible.
+
 The app applies that schema at startup too, but a deploy that cannot reach the
 instance reports `degraded: lakebase` rather than failing — so do not use
 startup as proof the schema is there.

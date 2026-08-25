@@ -9,11 +9,18 @@
 -- progress, events, results — stays in Delta (uc_ddl/). See app/server/store.py for
 -- why this one table is different.
 --
--- Lakebase runs PostgreSQL 18. This was developed and tested against 16,
--- which is what the development environment provides; nothing used here
--- (primary keys, ON CONFLICT, advisory locks, partial indexes) changed
--- between those versions, but that is a statement about the feature set, not
--- a test result.
+-- Nothing here is version-sensitive: primary keys, ON CONFLICT, advisory
+-- locks and partial indexes are unchanged between PostgreSQL 16 and 18.
+--
+-- An earlier version of this comment asserted "Lakebase runs PostgreSQL 18".
+-- It does not, by default: an instance created on 2026-08-25 with no
+-- `pg_version` came back `PG_VERSION_16`. The version is choosable at
+-- creation and immutable afterwards — see deploy/README.md.
+--
+-- So the app does not assert it either. `ensure_schema()` runs
+-- `SHOW server_version` on the connection it already has open, and
+-- `GET /healthz` reports what the server actually said, under
+-- `store.server_version`.
 
 CREATE TABLE IF NOT EXISTS run_status (
     run_id       TEXT PRIMARY KEY,

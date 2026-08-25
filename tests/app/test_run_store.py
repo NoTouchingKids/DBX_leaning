@@ -283,3 +283,35 @@ async def test_a_status_update_does_not_wipe_the_job_run_id():
     merge = next(q for q, _ in sql.queries if "MERGE INTO" in q)
     matched = merge.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")[0]
     assert "COALESCE" in matched.upper(), "a null job_run_id must not overwrite a stored one"
+
+
+async def test_the_store_reports_the_postgres_version_it_actually_got(tmp_path):
+    """This repo once asserted "Lakebase runs PostgreSQL 18"; a real instance
+    came back `PG_VERSION_16`, which is the default.
+
+    The version is chosen at creation and immutable after, so a deployment can
+    legitimately be on either and the only way to know is to ask. This asserts
+    the answer is populated and looks like a version, not that it equals any
+    particular one — pinning a number here would fail the day an instance is
+    recreated on a different one, which is not a defect.
+    """
+    pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
+    server = pgserver.get_server(tmp_path / "pg")
+    try:
+        store = PostgresRunStore(server.get_uri())
+        await store.ensure_schema()
+        assert store.server_version is not None
+        assert store.server_version[0].isdigit(), store.server_version
+    finally:
+        server.cleanup()
+
+
+async def test_a_version_read_that_fails_does_not_break_startup():
+    """A store that works but cannot report its version is strictly better
+    than a startup that fails over a diagnostic."""
+
+    class Boom:
+        async def execute(self, *_a, **_k):
+            raise RuntimeError("no SHOW for you")
+
+    assert await PostgresRunStore._read_server_version(Boom()) is None

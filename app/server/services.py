@@ -173,7 +173,8 @@ class ServiceHub:
                 log.error(self.degraded["lakebase"])
             else:
                 self.store = store
-                log.info("run store: Lakebase (postgres)")
+                version = getattr(store, "server_version", None)
+                log.info("run store: Lakebase (postgres %s)", version or "version unknown")
                 return
 
         if self.repo is not None:
