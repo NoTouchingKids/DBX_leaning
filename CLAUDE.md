@@ -164,7 +164,13 @@ models/         One package per model — eleven of them: gurobi_scheduling/,
 shared/         The message envelope + protocol helpers, imported by both
                 app/ and job/ (and indirectly by models/ via the callback
                 they're handed — models never import shared/ directly)
-frontend/       React SPA. Transport spine built and tested; shell in progress
+frontend/       React SPA source — the AppKit `client/`. Never deployed:
+                `vite.config.ts` writes `../dist`, and the bundle excludes
+                `frontend/**` wholesale
+dist/           The built SPA, at the app root. COMMITTED, because a deploy
+                driven from inside Databricks has no Node runtime and sees
+                only tracked files. Rebuild and commit it when the frontend
+                changes, or the deployed UI is silently stale
 uc_ddl/         Unity Catalog DDL (telemetry + per-model results tables)
 lakebase_ddl/   Postgres DDL (run_status), applied at app startup
 schema/         Generated JSON Schema for the wire protocol
@@ -176,6 +182,15 @@ tests/          Offline; nothing here needs a Databricks connection
 docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
+
+**The repo root is the app root.** `resources/app.yml` gives Databricks Apps
+this directory as its `source_code_path`, so `app/`, `shared/`,
+`requirements.txt` and `dist/` sit together the way AppKit's `my-app/` holds
+its server, `client/` and `dist/` — with FastAPI where their Node server
+would be. Nothing is staged or assembled first. The one hard rule is that no
+symlink may reach the workspace: the App export rejects them, and `.venv` and
+`frontend/node_modules` are excluded in `databricks.yml` for that reason, not
+for tidiness.
 
 ## Deployment shape: a model is a microservice
 

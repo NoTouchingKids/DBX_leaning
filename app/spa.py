@@ -37,8 +37,9 @@ log = logging.getLogger(__name__)
 __all__ = ["RESERVED_PREFIXES", "NO_BUNDLE", "resolve_dist", "mount_spa"]
 
 #: ``app/`` lives one level below the repo root, which is what a relative
-#: ``frontend/dist`` is relative *to* — not the process's cwd, which on
-#: Databricks Apps is not something this code chose.
+#: ``dist`` is relative *to* — not the process's cwd, which on Databricks
+#: Apps is not something this code chose. The repo root is also the app
+#: root there (``resources/app.yml``), so the two agree.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: First path segments the SPA fallback must never answer for. Everything here
@@ -50,8 +51,9 @@ RESERVED_PREFIXES = frozenset(
 
 NO_BUNDLE = (
     "the frontend bundle has not been built, so there is nothing to serve at "
-    "this path. Build it (`pnpm build` in frontend/) or point "
-    "DBX_FRONTEND_DIST at the dist directory. The API is unaffected."
+    "this path. Build it (`pnpm build` in frontend/, which writes ../dist) "
+    "or point DBX_FRONTEND_DIST at the dist directory. The API is "
+    "unaffected."
 )
 
 

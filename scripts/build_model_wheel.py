@@ -19,7 +19,7 @@ Usage::
 
     uv run python scripts/build_model_wheel.py mcmc
     uv run python scripts/build_model_wheel.py --all
-    uv run python scripts/build_model_wheel.py scenario forecasting -o dist/
+    uv run python scripts/build_model_wheel.py scenario forecasting -o build/wheels/
 
 Requires ``uv`` on PATH (already the project's build/dependency tool —
 see ``CLAUDE.md``, "uv, and the lockfile is the source of truth").
@@ -145,8 +145,7 @@ def stage_and_build(
     src_model_path = REPO_ROOT / "models" / model_dir_name
     if not src_model_path.is_dir():
         raise BuildError(
-            f"models/{model_dir_name} does not exist "
-            f"(looked under {REPO_ROOT / 'models'})"
+            f"models/{model_dir_name} does not exist (looked under {REPO_ROOT / 'models'})"
         )
     try:
         extra = extra_for(model_dir_name)
@@ -199,7 +198,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--all", action="store_true", help="build every model under models/")
     parser.add_argument(
-        "-o", "--out-dir", default="dist", type=Path, help="output root (default: dist/)"
+        # NOT `dist`: that name at the repo root is the built SPA now, and it
+        # is tracked (see frontend/.gitignore). Wheels go under `build/`,
+        # which .gitignore already covers.
+        "-o",
+        "--out-dir",
+        default="build/wheels",
+        type=Path,
+        help="output root (default: build/wheels/)",
     )
     parser.add_argument(
         "--with-delta",

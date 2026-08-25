@@ -12,12 +12,16 @@ __pycache__/
 # these unanchored, and `lib/` then matches at ANY depth — which silently
 # excluded `frontend/src/lib/`, i.e. the entire wire contract, from two
 # commits that claimed to add it. `git add -A` says nothing when a path is
-# ignored. `dist/` stays unanchored on purpose: it should catch
-# `frontend/dist` too.
+# ignored.
+#
+# `dist/` is no longer here at all. It used to be unanchored on purpose, to
+# catch `frontend/dist` as well as sdist output — but `dist/` at the repo root
+# is now the built SPA, and it is COMMITTED. See frontend/.gitignore for why.
+# `scripts/build_model_wheel.py` writes to `build/wheels`, which `/build/`
+# above already covers, so nothing else wants this name.
 .Python
 /build/
 /develop-eggs/
-dist/
 /downloads/
 /eggs/
 /.eggs/
@@ -27,6 +31,11 @@ dist/
 /sdist/
 /var/
 /wheels/
+
+# The built SPA, at the app root — see frontend/.gitignore for why it is
+# tracked at all. Sourcemaps are the one part that is not: 5.1 MB against
+# 1.2 MB for the bundle, regenerated on every build.
+/dist/**/*.map
 /share/python-wheels/
 *.egg-info/
 .installed.cfg

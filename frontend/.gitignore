@@ -15,11 +15,25 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-# Build output. Ignored here on purpose even though `databricks.yml` deploys
-# it: `sync.include: frontend/dist/**` is what overrides .gitignore, so dist
-# reaches the workspace (app/spa.py serves it) without git tracking a build
-# artifact. Do not remove this line without changing that file too.
-dist
+
+# The build output is not in this directory. `vite.config.ts` writes `../dist`
+# — the repo root, which is also the APP root: `resources/app.yml` hands that
+# folder to Databricks Apps, and `app/spa.py` serves the bundle out of it.
+# This tree is the client SOURCE, and `databricks.yml` excludes all of it.
+#
+# That `dist/` is COMMITTED, which is unusual and deliberate. Deploying from
+# inside Databricks — a Git folder, a notebook — there is no Node runtime and
+# only git-tracked files exist, so a gitignored bundle would simply not be
+# there and every page would answer 503 while the API worked fine. Committing
+# it is the only route the SPA has into a workspace-driven deploy.
+#
+# The cost is real: **rebuild and commit dist whenever the frontend changes**,
+# or the deployed UI is silently stale.
+#
+# Sourcemaps stay out. `vite.config.ts` sets `sourcemap: true` and they are
+# 5.1 MB against 1.2 MB for the bundle itself — worth having locally, not
+# worth a fresh copy in git on every frontend change. The root .gitignore
+# carries that rule, next to the tracked directory it applies to.
 dist-ssr
 *.local
 

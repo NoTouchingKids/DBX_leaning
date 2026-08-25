@@ -51,10 +51,10 @@ export const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 
 /**
  * Nothing this suite produces goes inside the repository — not the build it
- * serves, not the Postgres cluster, not Playwright's own traces. `frontend/`
- * ignores `dist`, but it ignores nothing else, and a browser test that leaves
- * untracked files behind in a tree four agents are working in is a bad
- * neighbour.
+ * serves, not the Postgres cluster, not Playwright's own traces. A browser
+ * test that leaves untracked files behind in a tree four agents are working
+ * in is a bad neighbour, and the repo's own `dist/` is now TRACKED, so a
+ * build landing there would show up as a diff rather than as noise.
  */
 export const WORK_DIR =
   process.env.DBX_E2E_WORK_DIR ?? path.join(os.tmpdir(), "dbx-leaning-e2e");

@@ -58,7 +58,23 @@ export default defineConfig({
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
   build: {
-    outDir: "dist",
+    // ../dist, not ./dist: the built bundle belongs to the APP, not to this
+    // source tree. `resources/app.yml` gives Databricks Apps the repo root as
+    // its source folder, so `main.py`'s package, `requirements.txt` and this
+    // output all sit at the app root — the layout the AppKit docs describe as
+    // client/ + dist/ + the server, with FastAPI in place of their Node
+    // server. `app/spa.py` resolves a relative dist against the repo root, so
+    // `DBX_FRONTEND_DIST=dist` means this directory both locally and deployed.
+    //
+    // Keeping it out of `frontend/` is also what lets the bundle exclude
+    // `frontend/**` wholesale instead of naming build-time config files one
+    // at a time to avoid swallowing the one directory that must travel.
+    //
+    // emptyOutDir must be explicit: Vite refuses to clear an outDir outside
+    // its root without being told to, since that is how a config typo
+    // deletes a source tree.
+    outDir: "../dist",
+    emptyOutDir: true,
     assetsDir: "assets",
     sourcemap: true,
   },

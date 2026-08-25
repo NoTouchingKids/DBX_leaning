@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 from fnmatch import fnmatch
 
 import pytest
@@ -82,8 +83,7 @@ def test_jobs_declare_exactly_the_parameters_the_app_sends(jobs):
     for model in MODELS:
         declared = {p["name"] for p in jobs[f"model_{model}"]["parameters"]}
         assert declared == set(JOB_PARAMETER_NAMES), (
-            f"model_{model} declares {sorted(declared)}, "
-            f"app sends {sorted(JOB_PARAMETER_NAMES)}"
+            f"model_{model} declares {sorted(declared)}, app sends {sorted(JOB_PARAMETER_NAMES)}"
         )
 
 
@@ -120,9 +120,9 @@ def test_each_job_has_its_own_environment_and_requirements(jobs):
         assert job["tasks"][0]["environment_key"] == env["environment_key"]
 
         deps = env["spec"]["dependencies"]
-        assert deps == [
-            f"-r ${{workspace.file_path}}/deploy/requirements/{model}.txt"
-        ], f"model_{model} deps: {deps}"
+        assert deps == [f"-r ${{workspace.file_path}}/deploy/requirements/{model}.txt"], (
+            f"model_{model} deps: {deps}"
+        )
         assert (REQUIREMENTS / f"{model}.txt").exists()
 
 
@@ -164,63 +164,106 @@ def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
     env = {e["name"]: e for e in app["config"]["env"]}
 
     assert "value" not in env["DBX_APP_TOKEN"], "the ingress token must not be a literal"
-    # camelCase, unlike every other key in that file, and `bundle validate`
-    # accepts both spellings — so the wrong one is silently ignored and the
-    # app starts with no token, which `_authorised` treats as "accept
-    # everyone". Established by a real deploy, not by the schema.
-    assert env["DBX_APP_TOKEN"]["valueFrom"] == "app-token", "camelCase; snake_case is ignored"
-    assert "value_from" not in env["DBX_APP_TOKEN"], "snake_case is silently ignored here"
+    # Both spellings are real, in different files. `app.yaml` — the file the
+    # Apps runtime reads — takes `valueFrom`; a BUNDLE resource takes
+    # `value_from`, and the CLI generates the former from the latter.
+    # `databricks bundle schema` defines only `value_from` here, and getting
+    # it wrong does not fail the deploy: CLI v1.13.0 warns that "The
+    # 'valueFrom' field will be ignored" and carries on, so the app starts
+    # with no token — which `_authorised` treats as "accept everyone".
+    assert env["DBX_APP_TOKEN"]["value_from"] == "app-token", (
+        "a bundle resource takes value_from; valueFrom is the app.yaml "
+        "spelling, is ignored here, and leaves the ingress open"
+    )
+    assert "valueFrom" not in env["DBX_APP_TOKEN"], "ignored here, and silently"
     secret = next(r for r in app["resources"] if r["name"] == "app-token")["secret"]
     assert secret["permission"] == "READ"
 
 
+def test_the_app_is_deployed_from_the_repo_root(bundle):
+    """The repo root is the app root — `app/`, `shared/`, `requirements.txt`
+    and `dist/` together, the way AppKit's `my-app/` holds its server,
+    `client/` and `dist/`.
+
+    Anything else needs a staging step to assemble, and a staged directory is
+    build output: gitignored, absent from a fresh checkout, and absent from a
+    Databricks Git folder, where the deploy may be driven from inside the
+    workspace and only tracked files exist.
+    """
+    app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+    assert app["source_code_path"] == "../"
+
+
 def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
-    excluded = set(bundle["sync"]["exclude"])
-    for pattern in (".venv/**", ".git/**", "**/__pycache__/**"):
-        assert pattern in excluded, f"{pattern} would be synced to the workspace"
-
-
-def test_the_built_frontend_reaches_the_workspace(bundle):
-    """The app serves ``frontend/dist``; nothing in the workspace can build it.
-
-    Excluding ``frontend/**`` wholesale is the obvious tidy-up and it deploys
-    an app that answers 503 on every page while the API works — a failure that
-    looks like a routing bug and is really a packaging one. ``sync.include``
-    is also what gets past .gitignore, which correctly ignores build output.
-    """
-    assert "frontend/dist/**" in set(bundle["sync"].get("include", []))
-
-
-def test_no_exclude_contradicts_the_frontend_include(bundle):
-    """Whether ``include`` or ``exclude`` wins on a contradiction is not
-    something this repo can verify without a live workspace. So there must not
-    be a contradiction: no exclude pattern may cover ``frontend/dist``.
-    """
-    for pattern in bundle["sync"]["exclude"]:
-        assert not fnmatch("frontend/dist/index.html", pattern), (
-            f"exclude {pattern!r} may cancel the frontend/dist include, and "
-            "which one wins is unverified"
-        )
-
-
-def test_the_frontend_source_does_not_reach_the_workspace(bundle):
-    """node_modules alone would dwarf the rest of the sync, and there is no
-    Node runtime in the workspace to make any of it useful.
-
-    "Source" means the build-time config too, not just `src/`. Only `dist/`
-    is readable by anything over there, and the section said as much while
-    quietly shipping four tsconfigs, vite.config.ts, playwright.config.ts,
-    package.json, the lockfile and e2e/.
+    """Two of these are not tidiness. The App export rejects symlinks, naming
+    one file — and `.venv/bin/python` is only the first of them, with
+    `frontend/node_modules` holding thousands because that is how pnpm stores
+    packages. Either one reaching the workspace fails the whole deploy.
     """
     excluded = set(bundle["sync"]["exclude"])
     for pattern in (
-        "frontend/node_modules/**",
-        "frontend/src/**",
-        "frontend/e2e/**",
-        "frontend/package.json",
-        "frontend/vite.config.ts",
+        ".venv/**",
+        "frontend/**",
+        ".git/**",
+        "**/__pycache__/**",
     ):
         assert pattern in excluded, f"{pattern} would be synced to the workspace"
+
+
+def test_the_built_frontend_is_not_excluded(bundle):
+    """`app/spa.py` serves `dist/`, and nothing in the workspace can build it.
+
+    This used to need a `sync.include` and a rule that no exclude contradict
+    it, because dist lived under `frontend/` — so `frontend/**` could not be
+    excluded wholesale and every build-time config had to be named one at a
+    time. `vite.config.ts` now writes `../dist`, at the app root, and the
+    conflict is gone: assert it stays gone.
+    """
+    for pattern in bundle["sync"]["exclude"]:
+        assert not fnmatch("dist/index.html", pattern), (
+            f"exclude {pattern!r} drops the built SPA; the app would answer "
+            "503 on every page while the API worked"
+        )
+        assert not fnmatch("dist/assets/index.js", pattern), (
+            f"exclude {pattern!r} drops the SPA assets"
+        )
+
+
+def test_the_app_is_told_where_the_built_frontend_landed(bundle):
+    """`DBX_FRONTEND_DIST` and `vite.config.ts`'s `outDir` are two halves of
+    one decision, written in different languages. Neither file can see the
+    other, so this is what holds them together.
+    """
+    app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+    env = {e["name"]: e.get("value") for e in app["config"]["env"]}
+    assert env.get("DBX_FRONTEND_DIST") == "dist"
+
+    vite = (ROOT / "frontend" / "vite.config.ts").read_text()
+    assert 'outDir: "../dist"' in vite, (
+        "vite must write the app root's dist/; DBX_FRONTEND_DIST points there"
+    )
+
+
+def test_the_built_frontend_is_tracked_by_git():
+    """Committed build output, which is unusual and load-bearing here.
+
+    A deploy driven from inside Databricks — a Git folder, a notebook — has no
+    Node runtime and sees only tracked files. A gitignored bundle would simply
+    not be there, and every page would answer 503 while the API worked fine.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "dist"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert "dist/index.html" in tracked, (
+        "the built SPA must be committed; run `pnpm build` in frontend/"
+    )
+    assert not [f for f in tracked if f.endswith(".map")], (
+        "sourcemaps are 4x the bundle and regenerate on every build"
+    )
 
 
 def test_the_bundle_declares_the_variables_the_resources_use(bundle):
@@ -313,9 +356,7 @@ def test_every_model_results_table_exists_in_the_ddl():
     created = set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+\S+\.(\w+)\s*\(", ddl))
 
     missing = {
-        model: table
-        for model, table in _declared_results_tables().items()
-        if table not in created
+        model: table for model, table in _declared_results_tables().items() if table not in created
     }
     assert not missing, (
         f"declared results_table with no CREATE TABLE in uc_ddl/002_model_results.sql: "

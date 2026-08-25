@@ -59,10 +59,15 @@ mock reproduces usefully.
 watching a run's raw transport state — connection tier, connection state, seq
 gaps — without the rest of the UI in the way.
 
-**`pnpm build` is a required step before `databricks bundle deploy`, not an
-optional one.** The bundle syncs `frontend/dist` and excludes the source;
-skip the build and the deploy succeeds, the API works, and every page answers
-503 with `app/spa.py`'s `NO_BUNDLE` message. See `deploy/README.md`.
+**`pnpm build` writes `../dist`, at the repo root, and that directory is
+COMMITTED.** The repo root is the app root a deploy hands to Databricks Apps,
+so `dist/` sits beside `app/` and `requirements.txt` and this tree is excluded
+from the sync entirely. It is in git because a deploy driven from inside
+Databricks has no Node runtime and sees only tracked files.
+
+So **rebuild and commit `dist/` whenever anything here changes**, or the
+deployed UI is silently the previous one. Sourcemaps are gitignored. See
+`deploy/README.md`.
 
 ## Browser tests (`e2e/`)
 

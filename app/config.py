@@ -78,7 +78,13 @@ class AppConfig:
     #: runtime, so this app serves the SPA itself (see app/spa.py). Relative
     #: paths are resolved against the repo root, not the process cwd. Absent
     #: on a source checkout and during tests — that degrades, it is not fatal.
-    frontend_dist: str = "frontend/dist"
+    #:
+    #: `dist/`, at the repo root, because the repo root IS the app root: it is
+    #: what `resources/app.yml` hands Databricks Apps as the source folder, so
+    #: `frontend/` is the client source (never deployed) and `dist/` is the
+    #: built output beside the server (always deployed). `frontend/vite.config.ts`
+    #: writes there.
+    frontend_dist: str = "dist"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> AppConfig:
@@ -117,7 +123,7 @@ class AppConfig:
             max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
             job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
-            frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "frontend/dist",
+            frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "dist",
         )
 
     def job_id_for(self, model: str) -> int | None:

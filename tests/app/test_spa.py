@@ -190,4 +190,7 @@ def test_the_default_dist_is_repo_relative_not_cwd_relative(config):
     against the repo root means the path does not depend on one."""
     resolved = resolve_dist(config().frontend_dist)
     assert resolved.is_absolute()
-    assert resolved.parts[-2:] == ("frontend", "dist")
+    # `dist/` at the repo root, which is also the app root a deploy hands to
+    # Databricks Apps — not `frontend/dist`, which is the client SOURCE tree.
+    assert resolved.parts[-1] == "dist"
+    assert resolved.parts[-2] != "frontend"

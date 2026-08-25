@@ -151,10 +151,11 @@ Edition) is a drop-in, not a rewrite that touches every call site.
 - No `databricks-sdk`, no `databricks-sql-connector`, no Spark. Plain REST
   over `httpx`.
 - No polling of any kind for status or cancel.
-- No frontend code — this agent is API-only. (`app/spa.py` serving
-  `frontend/dist` is the one exception, and it serves a bundle it does not
-  build: Databricks Apps has no Node runtime, so `pnpm build` has to happen
-  before `databricks bundle deploy` or every page answers 503.)
+- No frontend code — this agent is API-only. (`app/spa.py` serving `dist/` is
+  the one exception, and it serves a bundle it does not build: Databricks Apps
+  has no Node runtime, so `pnpm build` — which writes the repo root's `dist/`
+  from `frontend/` — has to happen, and be committed, before a deploy, or
+  every page serves the previous bundle or answers 503.)
 
 ## Tests
 

@@ -18,28 +18,26 @@ resources:
         Triggers and observes long-running models. Jobs run whether or not
         this is up; when it is, it relays their telemetry live over SSE.
 
-      # NOT `../`. The App deployment exports this folder, and the export
-      # rejects symlinks outright:
+      # The repo root IS the app root, the way AppKit's `my-app/` holds the
+      # server, `client/` and `dist/` together. Here that is `app/` +
+      # `shared/` + `requirements.txt` + `dist/`, and `command` below runs
+      # `app.main:app` out of it.
+      #
+      # What the export cannot survive is a SYMLINK:
       #
       #   Failed to export .../DBX_leaning/.venv/bin/python
       #   INVALID_PARAMETER_VALUE: ... is not an exportable asset. type=symlink
       #
-      # `.venv` is what fails first and is not the real problem —
-      # `frontend/node_modules` holds thousands of symlinks because that is how
-      # pnpm stores packages, so deleting `.venv` only moves the failure. The
-      # repo root is structurally not exportable.
+      # It exports the WORKSPACE folder, not the local one, so the fix is that
+      # nothing symlinked ever reaches the workspace. `.venv` and
+      # `frontend/node_modules` — thousands of them, that being how pnpm
+      # stores packages — are both in `databricks.yml`'s `sync.exclude`, which
+      # `tests/deploy/test_bundle.py` asserts.
       #
-      # `scripts/stage_app.py` assembles exactly what the app needs — app/,
-      # shared/, requirements.txt and the built frontend — and asserts the
-      # result is symlink-free. `tests/deploy/test_app_source.py` walks the
-      # import graph so the staged set cannot silently go stale.
-      #
-      # It is BUILD OUTPUT and gitignored, so this path does not exist in a
-      # fresh clone and `bundle deploy` fails with a bare
-      # `stat build/app_source: no such file or directory`. Deploy with
-      # `scripts/deploy.sh -t dev`, which builds the frontend, stages, and
-      # deploys in one go.
-      source_code_path: ../build/app_source
+      # A sync exclude does not remove what an EARLIER deploy already put
+      # there. If a previous run uploaded `.venv`, delete it in the workspace
+      # once — deploy/README.md has the command.
+      source_code_path: ../
 
       # The token a job presents on the WS/HTTP ingress. Held as a secret and
       # injected here; the *job* never stores it — the app passes it per run
@@ -61,12 +59,13 @@ resources:
           - --port
           - "8000"
         env:
-          # The built SPA lives at the staged app's root, not at
-          # `frontend/dist` — the frontend source does not travel.
-          # `app/config.py` resolves a relative path against the app root,
-          # which in the staged layout is where this sits.
+          # The built SPA. `frontend/` is the client SOURCE and never
+          # deploys; `frontend/vite.config.ts` writes `../dist`, so the output
+          # lands at the app root beside the server. `app/config.py` already
+          # defaults to this — set explicitly because a deploy should not rest
+          # on a Python default matching a build config written in TypeScript.
           - name: DBX_FRONTEND_DIST
-            value: static
+            value: dist
 
           - name: DBX_CATALOG
             value: ${var.catalog}
@@ -95,7 +94,7 @@ resources:
           # variable — a variable would land in the deployment state:
           #
           #   - name: DBX_LAKEBASE_PASSWORD
-          #     valueFrom: lakebase-password
+          #     value_from: lakebase-password
           #
           # with a matching entry under `resources:` above, alongside
           # `app-token`.
@@ -130,14 +129,27 @@ resources:
           - name: DBX_APP_PUBLIC_URL
             value: ${var.app_public_url}
 
-          # `valueFrom`, camelCase — NOT `value_from`. Established by a real
-          # deploy, and worth stating because this repo previously believed
-          # the opposite: every other key in this file is snake_case, and
-          # `bundle validate` accepts both, so the wrong one is silently
-          # ignored and the app comes up with no ingress token. Which, per
-          # `app/routes/ingest.py::_authorised`, means an OPEN ingress — an
-          # empty token is the development posture that accepts everyone.
+          # `value_from`, snake_case. BOTH SPELLINGS ARE REAL, in different
+          # files, which is why this keeps getting flipped:
+          #
+          #   app.yaml         (what the Apps runtime reads)  ->  valueFrom
+          #   resources/*.yml  (what the bundle declares)     ->  value_from
+          #
+          # This is a bundle file. `databricks bundle schema` defines only
+          # `value_from` under `resources.apps.*.config.env`, and the CLI
+          # translates it into `valueFrom` in the app.yaml it generates. CLI
+          # v1.13.0 says so out loud rather than failing:
+          #
+          #   Warning: Use 'value_from' instead of 'valueFrom'
+          #   The field 'valueFrom' should be 'value_from' (snake_case).
+          #   The 'valueFrom' field will be ignored.
+          #
+          # "Ignored" is the whole problem. An ignored token means the app
+          # starts with DBX_APP_TOKEN empty, and per
+          # `app/routes/ingest.py::_authorised` an empty token is the
+          # development posture that accepts EVERYONE — an open job ingress.
+          # A warning is cheap to scroll past; the failure is silent.
           #
           # `tests/deploy/test_bundle.py` asserts the spelling.
           - name: DBX_APP_TOKEN
-            valueFrom: app-token
+            value_from: app-token

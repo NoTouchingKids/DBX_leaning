@@ -32,76 +32,99 @@ databricks secrets put-secret dbx-leaning app-token --string-value "$(openssl ra
 reconciliation). Nothing writes through it — see `docs/architecture.md` on why
 the write path bypasses it entirely.
 
-## Deploy
+## Layout: the repo root is the app root
 
-```bash
-scripts/deploy.sh -t dev
-```
-
-That is the whole thing. Anything after the script name goes straight through
-to `databricks bundle deploy`, so `--var=...` works exactly as it would there.
-
-It exists because two of the things this bundle deploys are **build output**,
-and both are gitignored — correctly, they are generated:
-
-| generated | by | what it is |
-| --- | --- | --- |
-| `frontend/dist/` | `pnpm build` | the SPA `app/spa.py` serves |
-| `build/app_source/` | `scripts/stage_app.py` | the symlink-free folder the App export can accept |
-
-A fresh clone has neither, so `databricks bundle deploy` on its own fails with
+The shape is the one the AppKit docs describe — a client source tree, a build
+output directory, and the server, all under one root — with FastAPI where
+their Node server would be:
 
 ```
-Error: stat build/app_source: no such file or directory
+DBX_leaning/            <- source_code_path: this is what Databricks Apps gets
+├── frontend/           the CLIENT source (their client/). Never deployed.
+│   ├── index.html
+│   ├── vite.config.ts  build.outDir: "../dist"
+│   └── src/
+├── dist/               the built SPA. Committed. app/spa.py serves it.
+├── app/                the FastAPI server — main.py, routes/, spa.py
+├── shared/             the message envelope, imported by app/ and job/
+├── requirements.txt    app deps, where Databricks Apps looks for them
+├── job/  models/  entrypoints/     the jobs, which the app never imports
+└── databricks.yml  resources/      the bundle
 ```
 
-which is accurate and says nothing about what to do. The long way, if you want
-the steps separately:
+Two consequences worth stating, because both have bitten this repo:
 
-```bash
-cd frontend && pnpm install && pnpm build && cd ..   # see below — required
-uv run python scripts/stage_app.py                   # see below — required
-databricks bundle validate                           # schema and references
-databricks bundle deploy -t dev
-```
+**`dist/` is committed.** Build output in git is unusual. It is here because a
+deploy driven from *inside* Databricks — a Git folder, a notebook — has no
+Node runtime and sees only tracked files, so a gitignored bundle would simply
+not be there. The cost is that **the frontend build has to be rebuilt and
+committed whenever the frontend changes**, or the deployed UI is silently
+stale. Sourcemaps stay out of git: 5.1 MB against 1.2 MB for the bundle.
 
-`uv run python scripts/stage_app.py --check` answers "is there a deployable
-staged app right now" without rebuilding one.
-
-**Staging the app is a required step.** The App deployment exports its
-`source_code_path` folder, and that export **rejects symlinks**:
+**No symlink may reach the workspace.** The App deployment exports its
+`source_code_path` folder and the export rejects symlinks, naming one file:
 
 ```
 Failed to export .../DBX_leaning/.venv/bin/python
 INVALID_PARAMETER_VALUE: Path (...) is not an exportable asset. type=symlink
 ```
 
-`.venv` is what fails first and is not the real problem. `frontend/node_modules`
-holds thousands of symlinks, because that is how pnpm stores packages — delete
-`.venv` and the export fails on those instead. **The repo root is structurally
-not exportable.**
+`.venv` is what fails first and is not the whole problem — `frontend/node_modules`
+holds thousands, that being how pnpm stores packages. Both are in
+`databricks.yml`'s `sync.exclude`, so neither is ever uploaded, and
+`tests/deploy/test_bundle.py` asserts it.
 
-So `scripts/stage_app.py` assembles `build/app_source/` with exactly what the
-app needs — `app/`, `shared/`, `requirements.txt` and the built frontend as
-`static/` — and asserts the result is symlink-free. It is about 6 MB against a
-repo root that carries eleven model packages, a job harness, a frontend source
-tree and two dependency trees, none of which the app imports.
-`tests/deploy/test_app_source.py` walks the real import graph, so the staged
-set cannot silently go stale.
-
-**If a previous deploy already put `.venv` in the workspace**, delete it there
-— a stale copy is still an unexportable symlink farm:
+**A sync exclude does not clean up what an earlier deploy already uploaded.**
+If a previous run put `.venv` in the workspace, delete it there once:
 
 ```bash
 databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
 ```
 
-**Building the frontend is a required step, not an optional one.** There is no
-Node runtime in the workspace, so nothing there will ever build it; the bundle
-syncs `frontend/dist` and excludes the source. Skip the build and the deploy
-succeeds, the API works, and every page answers 503 with the message in
-`app/spa.py::NO_BUNDLE`. `pnpm build` runs `tsc -b` first, so a type error
-fails the build rather than shipping a stale `dist/`.
+## Deploy
+
+```bash
+cd frontend && pnpm install && pnpm build && cd ..   # only if the SPA changed
+databricks bundle validate                           # schema and references
+databricks bundle deploy -t dev
+```
+
+The build step is only needed when `frontend/` has changed since `dist/` was
+last committed, because `dist/` is in git — which is also what makes
+`databricks bundle deploy` work unchanged from inside a Databricks Git folder,
+where there is no Node to run it.
+
+**`pnpm build` runs `tsc -b` first**, so a type error fails the build rather
+than shipping a stale `dist/`. Commit the result: a rebuilt `dist/` that is
+not committed deploys the previous UI without saying so.
+
+Skip the build when the SPA has not changed and nothing is lost. Skip it when
+it *has* changed and the deploy succeeds, the API works, and every page serves
+the old bundle — or, on a checkout that never built one, answers 503 with the
+message in `app/spa.py::NO_BUNDLE`.
+
+## Local development
+
+Both halves run together, and it is the same code that deploys:
+
+```bash
+uv run python scripts/dev_stack.py     # FastAPI + a real job runner + Postgres
+cd frontend && pnpm dev                # Vite, proxying /api, /ws, /healthz
+```
+
+`frontend/vite.config.ts` proxies to `DBX_DEV_API` (default
+`http://127.0.0.1:8000`, matching `dev_stack.py::DEFAULT_APP_PORT`), so the
+browser talks to the real FastAPI app — real SSE, real WebSocket ingress, real
+`Last-Event-ID` resume. See `scripts/dev_stack.py`'s docstring for exactly
+which parts are the shipped code and which are substituted.
+
+To exercise what actually deploys instead — FastAPI serving the built bundle,
+one process, no Vite — build first and open the app's own port:
+
+```bash
+cd frontend && pnpm build && cd ..
+uv run python scripts/dev_stack.py
+```
 
 ## Lakebase
 
@@ -177,13 +200,13 @@ What deploys is therefore exactly what the tests ran against.
 lock, if a model's library leaks into another model's environment, or if two
 environments end up pinning different versions of a shared dependency.
 
-**The frontend is the exception to "the sync mirrors the repo".** `databricks.yml`
-excludes `frontend/src`, `frontend/node_modules` and `frontend/public`, and
-names `frontend/dist` under `sync.include` — which is also what gets it past
-.gitignore, since a build artifact is correctly ignored by git. The app finds
-it at `frontend/dist` relative to the repo root by default
-(`app/config.py::frontend_dist`); `DBX_FRONTEND_DIST` overrides that if the
-layout ever changes.
+**The frontend is the exception to "the sync mirrors the repo".**
+`databricks.yml` excludes `frontend/**` outright — the client source is
+useless in a workspace with no Node runtime, and `node_modules` alone would
+dwarf the rest of the sync. What deploys is `dist/`, which is not in that
+directory: `frontend/vite.config.ts` writes `../dist`, at the app root, where
+`app/config.py::frontend_dist` looks for it by default and
+`resources/app.yml` names it explicitly as `DBX_FRONTEND_DIST`.
 
 ## Parameters
 
