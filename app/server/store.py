@@ -208,8 +208,16 @@ class PostgresRunStore:
 
     name = "postgres"
 
-    def __init__(self, dsn: str, *, connect=None) -> None:
+    def __init__(self, dsn: str, *, password_provider=None, connect=None) -> None:
         self._dsn = dsn
+        #: Awaited on every connection, when set. Lakebase's password is a
+        #: short-lived OAuth token, so it cannot live in the DSN: baked in at
+        #: startup it works for about an hour, and this app runs for up to 24.
+        #: Resolving it here is the reason a connection is opened per
+        #: operation rather than pooled. None means a static password (or
+        #: none at all) is already in the DSN — the local dev stack, or an
+        #: instance with `enable_pg_native_login` turned on.
+        self._password_provider = password_provider
         self._connect = connect  # injectable for tests
         #: What the server said it is, read once at `ensure_schema`. Reported
         #: by `/healthz` because the alternative is asserting it, and this
@@ -225,7 +233,12 @@ class PostgresRunStore:
             return await self._connect()
         import psycopg
 
-        return await psycopg.AsyncConnection.connect(self._dsn, autocommit=True)
+        params: dict[str, Any] = {"autocommit": True}
+        if self._password_provider is not None:
+            # A keyword overrides whatever the DSN says, so the DSN never has
+            # to carry a credential at all.
+            params["password"] = await self._password_provider()
+        return await psycopg.AsyncConnection.connect(self._dsn, **params)
 
     async def ensure_schema(self) -> None:
         conn = await self._conn()

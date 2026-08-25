@@ -319,16 +319,46 @@ it at startup too, but a deploy that cannot reach the instance reports
 `degraded: lakebase` rather than failing, so do not rely on that to tell you
 the schema is there.
 
-**The credential is the one piece unverified against a real workspace.**
-Lakebase authenticates with a short-lived Databricks OAuth token — which is
-why `app/server/store.py` opens a connection per operation instead of pooling, making
-rotation a non-issue. No `DBX_LAKEBASE_PASSWORD` is set in `resources/app.yml`,
-so `_lakebase_dsn` falls back to `DATABRICKS_TOKEN`. If that is not present in
-the Apps runtime, add the credential as a **secret**, never as a bundle
-variable — a variable ends up in the deployment state. The exact YAML is in a
-comment in `resources/app.yml` next to the other Lakebase settings, and
-`tests/deploy/test_bundle.py` fails if a credential is ever added as a
-variable.
+### The credential is a token, not a setting
+
+An instance created with `enable_pg_native_login: false` — **the default** —
+accepts only a short-lived Databricks OAuth token as its Postgres password.
+There is no password to put in a secret, and none is set.
+
+So the app fetches one, per connection:
+
+```
+DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET   injected by Databricks Apps
+    -> POST {host}/oidc/v1/token, grant_type=client_credentials
+    -> the token becomes the Postgres password for that connection
+```
+
+`server/oauth.py` caches it until shortly before it expires, so the common
+case is a dict lookup and the uncommon one is a single round trip. This is
+also the reason `server/store.py` opens a connection per operation rather than
+pooling.
+
+**The obvious alternative is a bug, and this app had it.** Reading the
+credential once at startup and building a connection string from it works —
+for about an hour. An App runs for up to 24, so a deployment sees every
+Postgres operation succeed through the morning and fail thereafter, with
+nothing in the logs pointing back at startup, which is where the fault is.
+
+Two things about this remain unverified against a real workspace: that the
+Apps runtime injects those two variables under those names, and that
+`scope=all-apis` is granted to an app's service principal. Both are
+overridable — `DBX_OAUTH_CLIENT_ID` and `DBX_OAUTH_CLIENT_SECRET` take
+precedence — and a failed exchange raises `TokenUnavailable` naming the
+endpoint and OAuth's own error code rather than sending an empty password to
+Postgres, which would surface as a password mismatch and send you looking for
+the wrong problem.
+
+**A static password is still supported**, for the local dev stack (embedded
+Postgres, no auth) and for an instance created with native login on: set
+`DBX_LAKEBASE_PASSWORD` — as a **secret**, never a bundle variable, since a
+variable ends up in the deployment state. The YAML is commented in
+`resources/app.yml`, and `tests/deploy/test_bundle.py` fails if a credential
+is ever added as a variable.
 
 ## After the first deploy
 

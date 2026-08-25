@@ -20,6 +20,7 @@ from shared.tables import TableSet
 from .broadcaster import Broadcaster, InProcessBroadcaster
 from .config import AppConfig
 from .jobs_api import JobsApi
+from .oauth import OAuthTokenProvider
 from .repository import RunRepository
 from .sql import SqlClient
 from .store import PostgresRunStore, RunStore, WarehouseRunStore
@@ -157,6 +158,26 @@ class ServiceHub:
 
         self.volume = path
 
+    @staticmethod
+    def _lakebase_password(cfg: AppConfig):
+        """How the store gets a password, or None to use whatever is in the DSN.
+
+        Lakebase takes a short-lived OAuth token and, with
+        `enable_pg_native_login` off — the default — takes nothing else. So
+        the normal deployment resolves one per connection. A static password
+        is the local-stack and native-login case.
+        """
+        if not cfg.has_client_credentials:
+            return None
+
+        provider = OAuthTokenProvider(
+            cfg.workspace_host,  # type: ignore[arg-type]  # has_client_credentials checked it
+            cfg.oauth_client_id,  # type: ignore[arg-type]
+            cfg.oauth_client_secret,  # type: ignore[arg-type]
+        )
+        log.info("Lakebase credential: OAuth token from %s", provider.url)
+        return provider.token
+
     async def _start_store(self, cfg: AppConfig) -> None:
         """Pick the run store once, and say which one loudly.
 
@@ -165,7 +186,9 @@ class ServiceHub:
         key without anyone noticing.
         """
         if cfg.lakebase_dsn:
-            store: RunStore = PostgresRunStore(cfg.lakebase_dsn)
+            store: RunStore = PostgresRunStore(
+                cfg.lakebase_dsn, password_provider=self._lakebase_password(cfg)
+            )
             try:
                 await store.ensure_schema()
             except Exception as exc:  # noqa: BLE001

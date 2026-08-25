@@ -315,3 +315,47 @@ async def test_a_version_read_that_fails_does_not_break_startup():
             raise RuntimeError("no SHOW for you")
 
     assert await PostgresRunStore._read_server_version(Boom()) is None
+
+
+async def test_the_password_is_resolved_on_every_connection_not_once():
+    """Lakebase's password is a short-lived OAuth token, so a DSN that carries
+    one is valid for about an hour against an app that runs for up to 24.
+
+    This is the assertion that the token is fetched per connection: two
+    operations, two resolutions, and the second one gets the newer token.
+    """
+    tokens = iter(["tok-1", "tok-2", "tok-3"])
+    seen: list[str] = []
+
+    async def provider() -> str:
+        value = next(tokens)
+        seen.append(value)
+        return value
+
+    class FakeConn:
+        async def execute(self, *_a, **_k):
+            class Cur:
+                async def fetchone(self):
+                    return ("16.10",)
+
+            return Cur()
+
+        async def close(self):
+            pass
+
+    async def connect():
+        # Mirrors what _conn does for real: resolve, then hand the value over.
+        await provider()
+        return FakeConn()
+
+    store = PostgresRunStore("postgresql://pg/db", password_provider=provider, connect=connect)
+    await store.ensure_schema()
+    await store.ensure_schema()
+    assert seen == ["tok-1", "tok-2"], "the credential was reused across connections"
+
+
+async def test_no_provider_means_the_dsn_is_used_unchanged():
+    """The local dev stack has no auth at all, and an instance with
+    `enable_pg_native_login` on has a real password in the DSN."""
+    store = PostgresRunStore("postgresql://pg/db")
+    assert store._password_provider is None

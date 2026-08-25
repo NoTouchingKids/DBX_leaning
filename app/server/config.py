@@ -98,6 +98,21 @@ class AppConfig:
     #: fails, and `/healthz` says so.
     app_volume: str | None = None
 
+    #: The app's own service principal, injected by Databricks Apps. Exchanged
+    #: for a short-lived OAuth token at `/oidc/v1/token` (see `oauth.py`),
+    #: which is the ONLY credential a Lakebase instance accepts unless
+    #: `enable_pg_native_login` was turned on — and it is off by default.
+    #:
+    #: Absent, the run store falls back to a static password from
+    #: `DBX_LAKEBASE_PASSWORD` or `DATABRICKS_TOKEN`, which is what the local
+    #: dev stack and a native-login instance need.
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
+
+    @property
+    def has_client_credentials(self) -> bool:
+        return bool(self.oauth_client_id and self.oauth_client_secret and self.workspace_host)
+
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> AppConfig:
         e = os.environ if env is None else env
@@ -137,6 +152,14 @@ class AppConfig:
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
             frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "dist",
             app_volume=(e.get("DBX_APP_VOLUME") or "").strip() or None,
+            oauth_client_id=(
+                e.get("DBX_OAUTH_CLIENT_ID") or e.get("DATABRICKS_CLIENT_ID") or ""
+            ).strip()
+            or None,
+            oauth_client_secret=(
+                e.get("DBX_OAUTH_CLIENT_SECRET") or e.get("DATABRICKS_CLIENT_SECRET") or ""
+            ).strip()
+            or None,
         )
 
     def job_id_for(self, model: str) -> int | None:
@@ -151,10 +174,19 @@ class AppConfig:
 def _lakebase_dsn(e: Mapping[str, str]) -> str | None:
     """Build the Lakebase connection string, if one is configured.
 
-    Either a whole DSN, or the parts. The password is a short-lived
-    Databricks OAuth token, which is why ``app/server/store.py`` opens a connection
-    per operation rather than pooling — resolving the credential at connect
-    time makes rotation a non-issue.
+    Either a whole DSN, or the parts.
+
+    **A password here is the fallback, not the main path.** Lakebase accepts a
+    short-lived OAuth token and, unless ``enable_pg_native_login`` was turned
+    on at creation, nothing else — so for a real deployment this returns a DSN
+    with NO credential in it and ``services.py`` hands the store an
+    :class:`~server.oauth.OAuthTokenProvider` that resolves one per
+    connection. A token baked in here would be valid for about an hour against
+    an app that runs for up to 24.
+
+    ``DBX_LAKEBASE_PASSWORD`` and ``DATABRICKS_TOKEN`` are still read, for the
+    local dev stack (embedded Postgres, no auth) and for an instance with
+    native login enabled.
     """
     dsn = (e.get("DBX_LAKEBASE_DSN") or "").strip()
     if dsn:
