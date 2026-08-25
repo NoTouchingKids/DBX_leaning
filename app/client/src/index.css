@@ -38,57 +38,90 @@
 
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace;
+
+  --shadow-card: var(--shadow-card);
+  --shadow-float: var(--shadow-float);
 }
 
+/*
+ * Light. A cool neutral ramp with one blue: everything interactive is the
+ * blue, everything else is grey, and the state colours are used only for
+ * state. A second decorative accent is what makes an interface look like it
+ * was assembled rather than designed.
+ *
+ * Every pair a user reads is at least WCAG AA, and body text is AAA — the
+ * ratios are in the commit that introduced these values, not asserted here.
+ */
 :root {
-  --c-paper: #faf9f6;
+  --c-paper: #f5f7fa;
   --c-raised: #ffffff;
-  --c-sidebar: #f1efe6;
-  --c-ink: #221f1a;
-  --c-dim: #6c6558;
-  --c-faint: #948d7c;
-  --c-line: #dad3c3;
-  --c-edge: #b9b09a;
+  --c-sidebar: #ffffff;
+  --c-ink: #101828;
+  --c-dim: #475467;
+  --c-faint: #667085;
+  --c-line: #eaecf0;
+  --c-edge: #d0d5dd;
 
-  --c-accent: #c1560e;
-  --c-accent-soft: #f5e2ce;
-  --c-accent-ink: #7a3707;
-  --c-good: #2e7a4c;
-  --c-good-soft: #e2f0e6;
-  --c-bad: #b3271e;
-  --c-bad-soft: #fbe4e1;
-  --c-warn: #93650a;
-  --c-warn-soft: #f5ecd3;
-  --c-info: #2f5fbf;
-  --c-info-soft: #e1e9fa;
-  --c-idle: #6c6976;
-  --c-idle-soft: #e7e5ec;
+  --c-accent: #1d4ed8;
+  --c-accent-soft: #eff4ff;
+  --c-accent-ink: #1e3a8a;
+  --c-good: #067647;
+  --c-good-soft: #ecfdf3;
+  --c-bad: #b42318;
+  --c-bad-soft: #fef3f2;
+  --c-warn: #b54708;
+  --c-warn-soft: #fffaeb;
+  --c-info: #175cd3;
+  --c-info-soft: #eff8ff;
+  --c-idle: #475467;
+  --c-idle-soft: #f2f4f7;
+
+  /*
+   * Two shadows, not five. Cards sit on the page; only things that float over
+   * it — menus, the copy toast — get the deeper one. A ramp of six
+   * indistinguishable elevations is a tell that nobody chose.
+   */
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.05);
+  --shadow-float: 0 12px 16px -4px rgb(16 24 40 / 0.08), 0 4px 6px -2px rgb(16 24 40 / 0.03);
+  --ring-focus: 0 0 0 3px rgb(29 78 216 / 0.22);
 }
 
+/*
+ * Dark. Not the light palette inverted: the ground is a deep blue-grey so the
+ * same blue still reads as the accent, and the surfaces step UP from it
+ * rather than down, which is how depth works when the page is dark.
+ */
 @media (prefers-color-scheme: dark) {
   :root {
-    --c-paper: #15161b;
-    --c-raised: #1c1e25;
-    --c-sidebar: #191a20;
-    --c-ink: #ece7db;
-    --c-dim: #a49c8b;
-    --c-faint: #7c7666;
-    --c-line: #33353e;
-    --c-edge: #484b56;
+    --c-paper: #0c111d;
+    --c-raised: #131a29;
+    --c-sidebar: #0f1626;
+    --c-ink: #e6ebf5;
+    --c-dim: #98a2b3;
+    --c-faint: #7d8998;
+    --c-line: #212a3b;
+    --c-edge: #344054;
 
-    --c-accent: #ff9a5c;
-    --c-accent-soft: #3a2814;
-    --c-accent-ink: #ffcda4;
-    --c-good: #7ed3a0;
-    --c-good-soft: #173224;
-    --c-bad: #ff8f83;
-    --c-bad-soft: #3a1c18;
-    --c-warn: #e8c467;
-    --c-warn-soft: #332a10;
-    --c-info: #8bb2ff;
-    --c-info-soft: #1c2740;
-    --c-idle: #aeaabd;
-    --c-idle-soft: #2a2a33;
+    --c-accent: #84adff;
+    --c-accent-soft: #172554;
+    --c-accent-ink: #b2ccff;
+    --c-good: #47cd89;
+    --c-good-soft: #053321;
+    --c-bad: #fda29b;
+    --c-bad-soft: #55160c;
+    --c-warn: #fdb022;
+    --c-warn-soft: #4e1d09;
+    --c-info: #84caff;
+    --c-info-soft: #102a56;
+    --c-idle: #98a2b3;
+    --c-idle-soft: #1d2939;
+
+    /* A shadow on a dark ground reads as dirt. Depth comes from the surface
+       step instead, so these are near-invisible and kept only so the same
+       utility classes work in both themes. */
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3);
+    --shadow-float: 0 12px 20px -6px rgb(0 0 0 / 0.5);
+    --ring-focus: 0 0 0 3px rgb(132 173 255 / 0.28);
   }
 }
 
@@ -103,6 +136,28 @@ body {
   color: var(--c-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  /* Headings below 1.25rem look loose at default tracking in a UI font; this
+     is the small negative that makes them read as set rather than typed. */
+  letter-spacing: -0.005em;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.018em;
+}
+
+/*
+ * One focus ring, everywhere, and never removed.
+ *
+ * Tailwind's reset drops the UA outline, and a keyboard user then navigates an
+ * interface with no visible position. `:focus-visible` keeps it off the mouse
+ * path, so this costs a pointer user nothing.
+ */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+  border-radius: 6px;
 }
 
 /*

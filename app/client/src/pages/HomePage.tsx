@@ -12,7 +12,9 @@
 import { Link } from "react-router";
 
 import { PageHead } from "@/components/layout/PageHead";
+import { Callout } from "@/components/ui/Callout";
 import { Card } from "@/components/ui/Card";
+import { DataList, DataRow } from "@/components/ui/DataList";
 import { useHealthz, useModels, useWhoami } from "@/hooks/useApi";
 import { MODEL_SPECS } from "@/lib/models";
 
@@ -35,32 +37,28 @@ export function HomePage() {
 
       <div className="mb-5 grid gap-4 sm:grid-cols-2">
         <Card title="This app">
-          <dl className="text-[0.8rem]">
-            <div className="flex justify-between border-b border-dashed border-line py-1.5">
-              <dt className="text-dim">Signed in as</dt>
-              <dd className="font-mono">{whoami.data?.email ?? "—"}</dd>
-            </div>
-            <div className="flex justify-between border-b border-dashed border-line py-1.5">
-              <dt className="text-dim">Health</dt>
-              <dd className="font-mono">{health.data?.status ?? "…"}</dd>
-            </div>
-            <div className="flex justify-between border-b border-dashed border-line py-1.5">
-              <dt className="text-dim">Live job sockets</dt>
-              <dd className="font-mono">{health.data?.live_jobs ?? "—"}</dd>
-            </div>
-            <div className="flex justify-between py-1.5">
-              <dt className="text-dim">Protocol schema</dt>
-              <dd className="font-mono">v{health.data?.protocol_schema_version ?? "—"}</dd>
-            </div>
-          </dl>
+          <DataList>
+            <DataRow label="Signed in as">{whoami.data?.email ?? "—"}</DataRow>
+            <DataRow label="Health">{health.data?.status ?? "…"}</DataRow>
+            <DataRow label="Live job sockets">{health.data?.live_jobs ?? "—"}</DataRow>
+            <DataRow label="Protocol schema">
+              v{health.data?.protocol_schema_version ?? "—"}
+            </DataRow>
+          </DataList>
           {degraded.length > 0 && (
-            <ul className="mt-3 list-disc pl-4 text-[0.72rem] text-warn">
-              {degraded.map(([service, reason]) => (
-                <li key={service}>
-                  <code>{service}</code>: {reason}
-                </li>
-              ))}
-            </ul>
+            /* A callout, not a bulleted list in warning-coloured text. These
+               are the reasons a deploy is running in a reduced mode, and a
+               user needs to see them as one thing they can act on rather than
+               as red prose trailing off the bottom of a panel. */
+            <div className="mt-4">
+              <Callout tone="warn" title={`Running degraded (${degraded.length})`}>
+                {degraded.map(([service, reason]) => (
+                  <div key={service} className="mt-1 first:mt-0">
+                    <code className="font-semibold">{service}</code> — {reason}
+                  </div>
+                ))}
+              </Callout>
+            </div>
           )}
           <p className="mt-3 text-[0.7rem] leading-relaxed text-faint">
             Identity here is cosmetic — it comes from the platform proxy and is

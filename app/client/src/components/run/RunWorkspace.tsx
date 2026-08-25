@@ -32,6 +32,7 @@ import type { ModelView } from "@/components/models/contract";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Callout } from "@/components/ui/Callout";
+import { HonestyNote } from "@/components/ui/HonestyNote";
 import { PageHead } from "@/components/layout/PageHead";
 import {
   useCancelRun,
@@ -345,10 +346,7 @@ export function RunWorkspace({
                     that is read as data is the failure mode this note exists
                     to prevent, so it cannot be the animation's job to show it.
                   */}
-                  <p className="mt-3 max-w-[64ch] text-[0.7rem] leading-relaxed text-faint">
-                    <strong className="text-dim">What is real here:</strong>{" "}
-                    {view.honesty}
-                  </p>
+                  <HonestyNote>{view.honesty}</HonestyNote>
                 </Card>
               )}
 

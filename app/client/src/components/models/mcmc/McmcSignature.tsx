@@ -119,7 +119,7 @@ export function McmcSignature({ state, snapshot }: ModelViewProps) {
 
       <div className="px-4 pt-3 pb-4">
         <div
-          className="relative h-[150px] overflow-hidden rounded-lg border border-dashed border-edge bg-paper"
+          className="relative h-[150px] overflow-hidden rounded-lg border border-line bg-paper"
           // Decorative: the animation's meaning is stated in prose next to it
           // by the page, and a dozen unlabelled dots are noise to a screen
           // reader. The numbers above are the accessible version of this.

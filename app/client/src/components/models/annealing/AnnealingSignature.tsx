@@ -135,7 +135,7 @@ export function AnnealingSignature({ state, snapshot }: ModelViewProps) {
 
       <div
         aria-hidden="true"
-        className="grid h-[132px] gap-[3px] rounded-[8px] border border-dashed border-edge bg-paper p-2"
+        className="grid h-[132px] gap-[3px] rounded-lg border border-line bg-paper p-2"
         style={{
           gridTemplateColumns: `repeat(${COLUMNS}, minmax(0, 1fr))`,
           gridAutoRows: "1fr",

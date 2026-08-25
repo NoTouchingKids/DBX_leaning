@@ -14,7 +14,7 @@ import { Card } from "@/components/ui/Card";
 
 function Note({ heading, children }: { heading: string; children: ReactNode }) {
   return (
-    <li className="border-b border-dashed border-line pb-2.5 last:border-b-0 last:pb-0">
+    <li className="border-b border-line pb-2.5 last:border-b-0 last:pb-0">
       <b className="text-ink">{heading}</b>{" "}
       <span className="text-dim">{children}</span>
     </li>
@@ -23,7 +23,12 @@ function Note({ heading, children }: { heading: string; children: ReactNode }) {
 
 export function HistoryNotes() {
   return (
-    <Card title="Reading this table" hint="properties of GET /api/runs" className="mt-5">
+    <Card
+      title="Reading this table"
+      hint="properties of GET /api/runs"
+      collapsible
+      className="mt-5"
+    >
       <ul className="m-0 flex list-none flex-col gap-2.5 p-0 text-[0.74rem] leading-relaxed">
         <Note heading="There is no result column, and there cannot be one from this endpoint.">
           <code>list_runs</code> selects <code>run_id, job_run_id, model, status, detail,

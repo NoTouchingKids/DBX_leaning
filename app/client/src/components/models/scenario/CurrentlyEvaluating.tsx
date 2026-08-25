@@ -90,7 +90,7 @@ export function CurrentlyEvaluating({ state, snapshot }: ModelViewProps) {
         </dl>
       </div>
 
-      <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 border-t border-dashed border-line pt-2 font-mono text-[0.72rem]">
+      <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 border-t border-line pt-2 font-mono text-[0.72rem]">
         <span className="text-dim">
           scenarios{" "}
           <span className="font-semibold text-ink">

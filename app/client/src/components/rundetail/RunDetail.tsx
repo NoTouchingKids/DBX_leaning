@@ -29,6 +29,7 @@ import { isStrandedRun } from "@/components/run/runState";
 import { Button } from "@/components/ui/Button";
 import { Callout } from "@/components/ui/Callout";
 import { Card } from "@/components/ui/Card";
+import { HonestyNote } from "@/components/ui/HonestyNote";
 import { useRunDetail } from "@/hooks/useApi";
 import { isApiError } from "@/lib/apiClient";
 import { isTerminal } from "@/lib/envelope";
@@ -189,9 +190,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <view.Signature state={state} snapshot={snapshot} />
             {/* Rendered by the page, never by the animation — an animation
                 cannot be trusted to show its own disclaimer. */}
-            <p className="mt-3 max-w-[64ch] text-[0.7rem] leading-relaxed text-faint">
-              <strong className="text-dim">What is real here:</strong> {view.honesty}
-            </p>
+            <HonestyNote>{view.honesty}</HonestyNote>
           </Card>
         )}
 
@@ -240,7 +239,7 @@ function HistoryFooter({
     snapshot.results.length;
 
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-[10px] border border-dashed border-edge px-4 py-2.5 text-[0.72rem] text-dim">
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-raised px-4 py-2.5 text-[0.72rem] text-dim">
       <span className="font-mono">
         {history.loading
           ? "reading from Delta…"

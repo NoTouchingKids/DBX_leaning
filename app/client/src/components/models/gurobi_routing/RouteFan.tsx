@@ -108,7 +108,7 @@ export function RouteFan({ state, snapshot }: ModelViewProps) {
         reducedMotion={reduced}
       />
 
-      <div className="rounded-lg border border-dashed border-edge bg-paper">
+      <div className="rounded-lg border border-line bg-paper">
         <svg
           viewBox={`0 0 ${BOX} ${BOX}`}
           preserveAspectRatio="xMidYMid meet"

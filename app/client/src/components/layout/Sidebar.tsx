@@ -34,20 +34,36 @@ function NavRow({
       end={end}
       title={collapsed ? primary : undefined}
       className={({ isActive }) =>
-        `flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left no-underline ` +
+        // flex-none: this is a flex child of a scrolling column, and without
+        // it the browser shrinks rows below their content height under
+        // vertical pressure — which clipped every label once the model list
+        // was long enough to overflow.
+        `relative flex w-full flex-none items-center gap-2.5 rounded-lg px-2.5 py-2 ` +
+        `text-left no-underline transition-colors duration-100 motion-reduce:transition-none ` +
         (isActive
-          ? "border-edge bg-raised shadow-[inset_2px_0_0_var(--c-accent)]"
-          : "border-transparent hover:bg-raised") +
+          ? "bg-accent-soft text-accent font-medium"
+          : "text-ink hover:bg-paper") +
         (collapsed ? " justify-center" : "")
       }
     >
       {({ isActive }) => (
         <>
+          {/* The active marker is a bar on the rail, not a border round the
+              row: it survives the row being collapsed to an icon, and it is
+              the one thing the eye can find without reading. */}
+          {isActive && (
+            <span
+              aria-hidden
+              className="absolute inset-y-1.5 left-0 w-[3px] rounded-r-full bg-accent"
+            />
+          )}
           <span
             className={
-              `flex h-[26px] w-[26px] flex-none items-center justify-center rounded-md border ` +
-              `bg-paper text-[0.6rem] font-bold ` +
-              (isActive ? "border-accent text-accent" : "border-edge text-dim")
+              `flex h-[26px] w-[26px] flex-none items-center justify-center rounded-md ` +
+              `border text-[0.6rem] font-bold ` +
+              (isActive
+                ? "border-accent/40 bg-raised text-accent"
+                : "border-line bg-paper text-faint")
             }
           >
             {glyph}
@@ -64,8 +80,14 @@ function NavRow({
               (collapsed ? "w-0 opacity-0" : "w-auto opacity-100")
             }
           >
-            <span className="block font-semibold">{primary}</span>
-            <span className="block text-[0.68rem] text-dim">{secondary}</span>
+            <span className="block font-medium">{primary}</span>
+            <span
+              className={
+                "block text-[0.6875rem] " + (isActive ? "text-accent/70" : "text-faint")
+              }
+            >
+              {secondary}
+            </span>
           </span>
         </>
       )}
@@ -77,7 +99,10 @@ function GroupLabel({ children, collapsed }: { children: string; collapsed: bool
   return (
     <div
       className={
-        `overflow-hidden px-2.5 pt-3 pb-1 text-[0.63rem] tracking-[0.09em] text-faint uppercase ` +
+        // flex-none for the same reason as the rows above: without it this
+        // shrinks under vertical pressure and the label is clipped mid-cap.
+        `flex-none overflow-hidden px-2.5 pt-5 pb-1.5 text-[0.6875rem] font-semibold ` +
+        `tracking-[0.06em] text-faint uppercase ` +
         `transition-opacity duration-150 motion-reduce:transition-none ` +
         (collapsed ? "h-0 py-0 opacity-0" : "opacity-100")
       }
@@ -96,8 +121,8 @@ export function Sidebar({
 }) {
   return (
     <aside className="sticky top-0 flex h-screen min-w-0 flex-col overflow-hidden border-r border-line bg-sidebar">
-      <div className="flex flex-none items-center gap-2.5 border-b border-dashed border-edge px-3 py-4">
-        <div className="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-md border-[1.5px] border-ink bg-raised text-[0.62rem] font-bold">
+      <div className="flex flex-none items-center gap-2.5 border-b border-line px-3 py-4">
+        <div className="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-lg bg-accent text-[0.65rem] font-bold text-white">
           DB
         </div>
         <div
@@ -106,8 +131,8 @@ export function Sidebar({
             `motion-reduce:transition-none ` + (collapsed ? "w-0 opacity-0" : "opacity-100")
           }
         >
-          <div className="text-[0.86rem] font-bold">DBX_leaning</div>
-          <div className="text-[0.68rem] text-dim">modelling platform</div>
+          <div className="text-[0.875rem] font-semibold">DBX_leaning</div>
+          <div className="text-[0.6875rem] text-faint">modelling platform</div>
         </div>
         <button
           type="button"
@@ -162,7 +187,7 @@ export function Sidebar({
 
       <div
         className={
-          `mt-auto overflow-hidden border-t border-dashed border-edge px-4 py-3 text-[0.68rem] ` +
+          `mt-auto overflow-hidden border-t border-line px-4 py-3 text-[0.68rem] ` +
           `leading-relaxed text-dim transition-opacity duration-150 motion-reduce:transition-none ` +
           (collapsed ? "opacity-0" : "opacity-100")
         }

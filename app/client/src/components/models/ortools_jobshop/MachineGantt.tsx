@@ -126,7 +126,7 @@ export function MachineGantt({ state, snapshot }: ModelViewProps) {
       />
 
       <div
-        className="rounded-lg border border-dashed border-edge bg-paper p-2.5"
+        className="rounded-lg border border-line bg-paper p-2.5"
         role="img"
         aria-label={`${copy.title}. ${copy.detail}`}
       >
