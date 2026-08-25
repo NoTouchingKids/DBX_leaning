@@ -67,7 +67,7 @@ resources:
           # variable — a variable would land in the deployment state:
           #
           #   - name: DBX_LAKEBASE_PASSWORD
-          #     value_from: lakebase-password
+          #     valueFrom: lakebase-password
           #
           # with a matching entry under `resources:` above, alongside
           # `app-token`.
@@ -103,4 +103,4 @@ resources:
             value: ${var.app_public_url}
 
           - name: DBX_APP_TOKEN
-            value_from: app-token
+            valueFrom: app-token

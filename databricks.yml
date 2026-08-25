@@ -28,7 +28,7 @@ variables:
     description: >-
       SQL warehouse for the app's READ path only (backfill, reconciliation).
       Free Edition allows one, 2X-Small. Nothing writes through it.
-    default: ""
+    default: "7474655945367403"
   app_secret_scope:
     description: Secret scope holding the token a job presents to the app.
     default: dbx-leaning
@@ -38,7 +38,7 @@ variables:
       to attach. Empty is valid and normal — the run proceeds unobserved and
       stays fully durable. Fill this in after the first deploy, once the app
       has a URL.
-    default: ""
+    default: "https://dbx-leaning-7474655945367403.aws.databricksapps.com"
 
   # --- Lakebase (managed Postgres): where run_status lives ---------------
   #

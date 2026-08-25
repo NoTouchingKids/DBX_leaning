@@ -164,7 +164,7 @@ def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
     env = {e["name"]: e for e in app["config"]["env"]}
 
     assert "value" not in env["DBX_APP_TOKEN"], "the ingress token must not be a literal"
-    assert env["DBX_APP_TOKEN"]["value_from"] == "app-token"
+    assert env["DBX_APP_TOKEN"]["valueFrom"] == "app-token"
     secret = next(r for r in app["resources"] if r["name"] == "app-token")["secret"]
     assert secret["permission"] == "READ"
 
