@@ -36,8 +36,37 @@ the write path bypasses it entirely.
 
 ```bash
 cd frontend && pnpm install && pnpm build && cd ..   # see below — required
+uv run python scripts/stage_app.py                   # see below — required
 databricks bundle validate                           # schema and references
 databricks bundle deploy -t dev
+```
+
+**Staging the app is a required step.** The App deployment exports its
+`source_code_path` folder, and that export **rejects symlinks**:
+
+```
+Failed to export .../DBX_leaning/.venv/bin/python
+INVALID_PARAMETER_VALUE: Path (...) is not an exportable asset. type=symlink
+```
+
+`.venv` is what fails first and is not the real problem. `frontend/node_modules`
+holds thousands of symlinks, because that is how pnpm stores packages — delete
+`.venv` and the export fails on those instead. **The repo root is structurally
+not exportable.**
+
+So `scripts/stage_app.py` assembles `build/app_source/` with exactly what the
+app needs — `app/`, `shared/`, `requirements.txt` and the built frontend as
+`static/` — and asserts the result is symlink-free. It is about 6 MB against a
+repo root that carries eleven model packages, a job harness, a frontend source
+tree and two dependency trees, none of which the app imports.
+`tests/deploy/test_app_source.py` walks the real import graph, so the staged
+set cannot silently go stale.
+
+**If a previous deploy already put `.venv` in the workspace**, delete it there
+— a stale copy is still an unexportable symlink farm:
+
+```bash
+databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
 ```
 
 **Building the frontend is a required step, not an optional one.** There is no

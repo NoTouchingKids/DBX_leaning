@@ -18,7 +18,23 @@ resources:
         Triggers and observes long-running models. Jobs run whether or not
         this is up; when it is, it relays their telemetry live over SSE.
 
-      source_code_path: ../
+      # NOT `../`. The App deployment exports this folder, and the export
+      # rejects symlinks outright:
+      #
+      #   Failed to export .../DBX_leaning/.venv/bin/python
+      #   INVALID_PARAMETER_VALUE: ... is not an exportable asset. type=symlink
+      #
+      # `.venv` is what fails first and is not the real problem —
+      # `frontend/node_modules` holds thousands of symlinks because that is how
+      # pnpm stores packages, so deleting `.venv` only moves the failure. The
+      # repo root is structurally not exportable.
+      #
+      # `scripts/stage_app.py` assembles exactly what the app needs — app/,
+      # shared/, requirements.txt and the built frontend — and asserts the
+      # result is symlink-free. Run it before `databricks bundle deploy`;
+      # `tests/deploy/test_app_source.py` walks the import graph so the staged
+      # set cannot silently go stale.
+      source_code_path: ../build/app_source
 
       # The token a job presents on the WS/HTTP ingress. Held as a secret and
       # injected here; the *job* never stores it — the app passes it per run
@@ -40,6 +56,13 @@ resources:
           - --port
           - "8000"
         env:
+          # The built SPA lives at the staged app's root, not at
+          # `frontend/dist` — the frontend source does not travel.
+          # `app/config.py` resolves a relative path against the app root,
+          # which in the staged layout is where this sits.
+          - name: DBX_FRONTEND_DIST
+            value: static
+
           - name: DBX_CATALOG
             value: ${var.catalog}
           - name: DBX_SCHEMA
