@@ -66,35 +66,26 @@ psql "host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslm
 `databricks database` is Public Preview and its flags may move; check
 `databricks database create-database-instance --help` if the above is refused.
 
-**Pinning the Postgres major version — do it at creation or not at all.**
-`pg_version` has no CLI flag, so it goes in the body, and it is **immutable**:
-the CLI's own resource metadata marks it `spec:immutable` /
-`recreate_on_changes`, and `update-database-instance` has no flag for it.
-Changing your mind later means deleting the instance and making a new one.
+**Choosing the Postgres major version — use the workspace UI.**
+`databricks database create-database-instance` gives you **16**, and there is
+no way to change that from the CLI:
 
-```bash
-databricks database create-database-instance --json '{
-  "name": "dbx-leaning", "capacity": "CU_1", "pg_version": "PG_VERSION_18"
-}'
-```
+- there is no `--pg-version` flag, and
+- passing `pg_version` in `--json` is ignored. Tried on 2026-08-25 with
+  `"pg_version": "PG_VERSION_18"`; the instance came back
+  `"pg_version": "PG_VERSION_16"` with no error. The field exists on the
+  object because it is returned, not because create accepts it.
 
-**The default is 16.** Observed on 2026-08-25: an instance created with
-`--capacity CU_1` and no `pg_version` came back `"pg_version":
-"PG_VERSION_16"`. Note the literal — `PG_VERSION_18`, not `PG_18`.
+The workspace UI (**Compute → Database instances → Create**) offers the
+version. Create it there if you want 18, then carry on with the DNS name and
+the DDL below.
 
-To move an existing instance to 18, recreate it. Nothing is lost if it has
-not served a run yet; `run_status` is rebuilt by `ensure_schema()` at startup,
-and no telemetry lives here — that is all in Delta:
-
-```bash
-databricks database delete-database-instance dbx-leaning --purge
-databricks database create-database-instance --json '{
-  "name": "dbx-leaning", "capacity": "CU_1", "pg_version": "PG_VERSION_18"
-}'
-```
-
-The DNS name changes when you do, so re-deploy with the new
-`--var="lakebase_host=..."`.
+**And it cannot be changed afterwards.** There is no `pg_version` flag on
+`update-database-instance` either. Moving an existing instance to another
+major means deleting it and creating a new one — cheap while it has not
+served a run, since `run_status` is the only table here and `ensure_schema()`
+rebuilds it at startup. No telemetry lives in Postgres; that is all in Delta.
+The DNS name changes, so redeploy with the new `--var="lakebase_host=..."`.
 
 **Nothing here needs a particular version.** `lakebase_ddl/001_run_status.sql`
 uses primary keys, `ON CONFLICT`, advisory locks and a partial index, none of

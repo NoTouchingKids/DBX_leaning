@@ -13,9 +13,10 @@
 -- locks and partial indexes are unchanged between PostgreSQL 16 and 18.
 --
 -- An earlier version of this comment asserted "Lakebase runs PostgreSQL 18".
--- It does not, by default: an instance created on 2026-08-25 with no
--- `pg_version` came back `PG_VERSION_16`. The version is choosable at
--- creation and immutable afterwards — see deploy/README.md.
+-- It does not: instances created through the CLI on 2026-08-25 came back
+-- `PG_VERSION_16`, including one that passed `pg_version: PG_VERSION_18`,
+-- which the create path ignores without erroring. The version is choosable
+-- only in the workspace UI, and only at creation — see deploy/README.md.
 --
 -- So the app does not assert it either. `ensure_schema()` runs
 -- `SHOW server_version` on the connection it already has open, and
