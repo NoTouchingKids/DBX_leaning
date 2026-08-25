@@ -1,10 +1,32 @@
 ---
 name: model-streaming-results
-description: Builds models/streaming_results/ — the fifth model, chosen specifically to exercise partial/chunked RESULT messages, which none of the other four models naturally produce. A rolling-origin backtest or chunked batch inference.
+description: Design record for models/streaming_results/ (BUILT) — chosen to exercise partial/chunked RESULT messages, which nothing else did at the time (models/panel_fit now chunks too). A rolling-origin backtest or chunked batch inference.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-You are building `models/streaming_results/`. Read `CLAUDE.md` and
+## Status: built. This is the design record, not a to-do list.
+
+`models/streaming_results/` exists, is tested under `tests/models/`, and is registered in
+`pyproject.toml`, `deploy/requirements/`, `resources/model_streaming_results.job.yml`,
+`resources/app.yml` and `uc_ddl/002_model_results.sql`. Read the source and
+its tests before this file — the module docstring is maintained, this brief
+is not. It is kept for the reasoning: **why** this model is in the lineup,
+which is the thing the code cannot say about itself.
+
+Two facts this brief predates and every one of these briefs got wrong:
+
+- **This model reads real data.** All eleven models load
+  `samples.nyctaxi.trips` through `models/_data`, falling back to a
+  deterministic generator when there is no workspace, and carry
+  `data_source` / `data_synthetic` / `data_rows` / `data_fallback_reason` on
+  every result row so the two runs stay distinguishable afterwards. Where
+  this file says "synthetic" or "small fixed problem", read "synthetic
+  fallback".
+- **There are eleven models, not five.** Any count below is stale. The other
+  six were built from `models/README.md` and `/new-model` with no brief at
+  all, deliberately — see `docs/parallelization-plan.md`.
+
+This brief was written to build `models/streaming_results/`. Read `CLAUDE.md` and
 `docs/message-envelope-spec.md` before writing anything.
 
 ## What this model is, and why it's in the lineup
@@ -12,7 +34,10 @@ You are building `models/streaming_results/`. Read `CLAUDE.md` and
 Every other model in this platform produces results **once, at the end**
 (or once, at cancellation). This model is chosen specifically because it
 doesn't: it produces results **incrementally, in chunks, while still
-running** — and nothing else in the platform exercises that path. If the
+running** — and at the time nothing else in the platform exercised that path.
+(`models/panel_fit` now chunks as well, flushing per batch of group fits. It
+was built after this one and on this one's proof, so the justification below
+still stands; the word "only" no longer does.) If the
 envelope's `result` message and the harness's "write results whenever the
 model produces them" rule only work for the once-at-the-end case, that's a
 gap this model is meant to expose before it becomes a real limitation.

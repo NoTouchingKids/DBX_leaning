@@ -386,7 +386,12 @@ COMMENT 'Classification report: one row per pace class, run-level metrics repeat
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_ortools_jobshop (
     run_id             STRING NOT NULL,
-    chunk_index        INT,
+    -- NOT NULL like the other nine: job/emitter.py stamps run_id and
+    -- chunk_index on every row before the write and the model must not supply
+    -- either, so a null here would mean the harness was bypassed. This and
+    -- results_panel_fit were the two that declared it nullable; the
+    -- difference meant nothing and read as if it did.
+    chunk_index        INT    NOT NULL,
     -- The schedule itself.
     job_id             INT,
     job_label          STRING,
@@ -436,7 +441,11 @@ COMMENT 'Job-shop schedule: one row per scheduled operation, run-level metrics r
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_panel_fit (
     run_id             STRING NOT NULL,
-    chunk_index        INT,
+    -- NOT NULL for the same reason as results_ortools_jobshop above: the
+    -- harness stamps it, so a null would mean the harness was bypassed. This
+    -- model streams several chunks per run, which makes the column load-
+    -- bearing rather than always 0.
+    chunk_index        INT    NOT NULL,
     -- The unit of work.
     group_key          STRING,
     group_label        STRING,

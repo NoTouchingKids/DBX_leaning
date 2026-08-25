@@ -1,12 +1,14 @@
 ---
 name: transport-app
-description: Builds the app/ FastAPI application — SSE to the client, the WS endpoint jobs connect to, ServiceHub/DI, whoami, run reconciliation. Use for anything under app/.
+description: Design record for app/, the FastAPI application (BUILT) — SSE to the client, the WS endpoint jobs connect to, ServiceHub/DI, whoami, run reconciliation. Use for anything under app/.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-You are building `app/` — the FastAPI application. Read `CLAUDE.md`,
+You are working on `app/` — the FastAPI application. It is **built and
+tested**; this brief is the design record, not a to-do list. Read `CLAUDE.md`,
 `docs/architecture.md`, `docs/message-envelope-spec.md`, and
-`docs/free-edition-constraints.md` before writing anything.
+`docs/free-edition-constraints.md` before writing anything, and read the
+module you are changing — the source headers here are long on purpose.
 
 ## What this component is
 
@@ -36,14 +38,44 @@ attribution, not as an authorization boundary. If you need an
 authorization boundary, it comes from Unity Catalog grants, not from
 anything built here.
 
-**No ORM.** Text SQL via the Databricks SDK / Statement Execution API, bound
-parameters always — an untyped parameter gets compared as a string
-server-side, which has caused real bugs before (`"2" > "12"` lexicographic
-comparisons breaking cursor logic). Declare parameter types explicitly.
+**No ORM.** Plain text SQL, bound parameters always — an untyped parameter
+gets compared as a string server-side, which has caused real bugs before
+(`"2" > "12"` lexicographic comparisons breaking cursor logic). Declare
+parameter types explicitly.
 
-**Async-first.** `httpx` (or similar) for any outbound HTTP, non-blocking
-throughout. Use the Statement Execution API's own `wait_timeout` (5–50s) so
-a fast query is one round trip rather than polling for completion.
+**And no `databricks-sdk`.** This brief used to say "text SQL via the
+Databricks SDK / Statement Execution API"; the SDK half of that is wrong and
+adding it would be reverted. It is deliberately absent from every dependency
+set in `pyproject.toml` — the two APIs this app needs (Statement Execution
+and Jobs) are a few plain REST calls over `httpx`, and the SDK's weight would
+be paid by every *model* environment too. See `CLAUDE.md`, "Conventions", and
+the comment above `[project.optional-dependencies]`. Also not the
+`databricks-sql-connector`, and never Spark from the app.
+
+**Async-first.** `httpx` for any outbound HTTP, non-blocking throughout. Use
+the Statement Execution API's own `wait_timeout` (5–50s) so a fast query is
+one round trip rather than polling for completion.
+
+**Run state is in Lakebase (Postgres), not the warehouse.** This brief
+predates that decision and reads in places as if `run_status` were warehouse
+SQL; it is not. `app/store.py` has two implementations behind one interface:
+
+- `PostgresRunStore` — the design. A primary key on `run_id`, and an advisory
+  lock wrapping the count-and-claim, which is what makes the account-wide
+  5-concurrent-task ceiling *transactional* rather than advisory. Configured
+  by `DBX_LAKEBASE_*` in `resources/app.yml`.
+- `WarehouseRunStore` — the unconfigured default, so a deploy is never
+  blocked on provisioning Lakebase. It is **degraded, not equivalent**: no
+  primary key, no transaction around the ceiling check, and `release_slot` is
+  a documented no-op that relies on reconciliation.
+
+Two rules follow. Never write a query that assumes one of the two — go
+through the interface. And when a setting decides which one is live, the
+deploy has to set it: the code read `DBX_LAKEBASE_*` for weeks while
+`resources/app.yml` set none of them, so every deployed app silently ran the
+degraded store and nothing failed. `/healthz` reporting which store is live,
+and `services.py` logging it at startup, are what keep that visible;
+`tests/deploy/test_bundle.py` is what keeps the bundle honest.
 
 **Workers = 1 for now, but don't hard-wire that assumption everywhere.** Put
 the WS↔SSE relay behind a small `Broadcaster` interface with an in-process
@@ -99,10 +131,12 @@ Edition) is a drop-in, not a rewrite that touches every call site.
    authorization decision.
 
 5. **Startup reconciliation.** On `lifespan` startup, reconcile any runs
-   left in a non-terminal state against `run_status` and the Jobs API — a
+   left in a non-terminal state against the run store and the Jobs API — a
    job that finished (or started) while the app was down is the normal case
    here (apps run ~8h/day), not a rare edge case. No background polling
-   loop for this; it happens once, at startup.
+   loop for this; it happens once, at startup. On the warehouse store this is
+   also the only thing that frees a slot, since `release_slot` there is a
+   no-op — which is why it cannot become optional.
 
 6. **No warehouse-touching background loops of any kind.** No periodic
    status poll, no periodic "keep the app warm" ping. If something needs to
@@ -114,10 +148,18 @@ Edition) is a drop-in, not a rewrite that touches every call site.
 
 - No OBO, no per-user token handling.
 - No ORM, no query builder — plain parameterised SQL text.
+- No `databricks-sdk`, no `databricks-sql-connector`, no Spark. Plain REST
+  over `httpx`.
 - No polling of any kind for status or cancel.
-- No frontend code — this agent is API-only.
+- No frontend code — this agent is API-only. (`app/spa.py` serving
+  `frontend/dist` is the one exception, and it serves a bundle it does not
+  build: Databricks Apps has no Node runtime, so `pnpm build` has to happen
+  before `databricks bundle deploy` or every page answers 503.)
 
-## Tests to write
+## Tests
+
+These are written, under `tests/app/`. The list is kept because it is still
+what must not regress:
 
 - SSE reconnect: a client providing `Last-Event-ID` receives only messages
   after that seq, not a replay of everything.

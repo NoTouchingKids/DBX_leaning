@@ -2,8 +2,12 @@
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
     "target": "es2023",
-    /* WebWorker instead of DOM. The two cannot coexist in one program: both
-       declare EventTarget, MessageEvent, fetch and several hundred more. */
+    /* WebWorker instead of DOM, and `types: []` so no ambient @types package
+       drags lib.dom back in. This is what makes the check truthful: `document`
+       and `window` do not exist in a SharedWorker, and here they do not exist
+       in the type system either. (Loading both libs would not error —
+       `skipLibCheck` hides their duplicate declarations — it would just
+       quietly let worker code reference globals it will not have.) */
     "lib": ["ES2023", "WebWorker"],
     "module": "esnext",
     "types": [],

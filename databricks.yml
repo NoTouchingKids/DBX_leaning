@@ -105,6 +105,23 @@ sync:
     - frontend/src/**
     - frontend/public/**
     - frontend/coverage/**
+    - frontend/e2e/**
+    # Build-time config, named one file at a time rather than globbed.
+    # A glob here would be shorter and would reach into frontend/dist —
+    # `frontend/*.html` matches `frontend/dist/index.html` under some
+    # matchers — which is the one thing that must arrive. Nothing in this
+    # list may contradict the include above, because which of the two wins is
+    # not something this repo can verify without a live workspace.
+    - frontend/README.md
+    - frontend/index.html
+    - frontend/package.json
+    - frontend/pnpm-lock.yaml
+    - frontend/playwright.config.ts
+    - frontend/vite.config.ts
+    - frontend/tsconfig.json
+    - frontend/tsconfig.app.json
+    - frontend/tsconfig.node.json
+    - frontend/tsconfig.worker.json
     - tests/**
 
 targets:

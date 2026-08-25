@@ -293,7 +293,26 @@ class RunRepository:
         self, run_id: str, status: str, *, detail: str | None = None, job_run_id: str | None = None
     ) -> None:
         """The one write this app makes, and it is a single-row UPDATE of
-        current state — not telemetry. Bound parameters, no interpolation."""
+        current state — not telemetry. Bound parameters, no interpolation.
+
+        ``job_run_id`` is COALESCEd on the MATCHED branch, and both halves of
+        that matter.
+
+        It has to be written there at all because the row already exists by
+        the time anyone has a job run id: ``claim_slot`` inserts the row
+        BEFORE the Jobs API is called, so ``attach_job_run`` always takes the
+        MATCHED branch. Setting it only on NOT MATCHED — as this did — meant
+        the column stayed NULL forever on the warehouse store, and
+        ``reconcile._resolve`` needs it to ask the Jobs API how a run ended.
+        Without it that route is dead and reconciliation silently falls back
+        to the last ``run_events`` row, which is exactly what a crashed job
+        never wrote.
+
+        It has to be COALESCE rather than a plain assignment because every
+        ordinary status transition calls this with ``job_run_id=None``. A
+        straight assignment would null out the id on the first RUNNING write,
+        one message after it was stored.
+        """
         await self.sql.query(
             f"""
             MERGE INTO {self.t(RUN_STATUS)} AS t
@@ -301,6 +320,7 @@ class RunRepository:
             ON t.run_id = s.run_id
             WHEN MATCHED THEN UPDATE SET
                 t.status = :status, t.detail = :detail,
+                t.job_run_id = COALESCE(:job_run_id, t.job_run_id),
                 t.updated_ts = :updated_ts
             WHEN NOT MATCHED THEN INSERT (run_id, job_run_id, status, detail, updated_ts)
                 VALUES (:run_id, :job_run_id, :status, :detail, :updated_ts)

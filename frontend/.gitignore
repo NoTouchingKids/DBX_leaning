@@ -1,5 +1,12 @@
 # Logs
-logs
+#
+# `/logs` is ANCHORED, deliberately. Unanchored it matches a directory named
+# `logs` at any depth — and this tree has LogPane.tsx, logFilters.ts and a
+# whole log-viewing surface, so `src/components/run/logs/` is a plausible
+# next directory. That is exactly how a bare `lib/` in the root .gitignore
+# silently kept `frontend/src/lib` — the entire wire contract — out of two
+# commits. `git add -A` says nothing when a path is ignored.
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -8,9 +15,19 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+# Build output. Ignored here on purpose even though `databricks.yml` deploys
+# it: `sync.include: frontend/dist/**` is what overrides .gitignore, so dist
+# reaches the workspace (app/spa.py serves it) without git tracking a build
+# artifact. Do not remove this line without changing that file too.
 dist
 dist-ssr
 *.local
+
+# `vite.config.ts` configures an html coverage reporter, and vitest writes it
+# to ./coverage. Nothing ignored it, so `vitest run --coverage` left an
+# untracked directory in a shared tree. databricks.yml already excludes
+# `frontend/coverage/**` from the workspace sync; this is the other half.
+coverage
 
 # Editor directories and files
 .vscode/*

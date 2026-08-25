@@ -4,7 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend-tmp</title>
+    <!--
+      src/index.css carries a full `prefers-color-scheme: dark` palette, but
+      CSS can only repaint what it owns. Scrollbars, <select> popups, date
+      pickers and form autofill are drawn by the browser, and without this
+      declaration they stay light-themed on a dark page. It also stops the
+      white flash before the stylesheet has parsed.
+    -->
+    <meta name="color-scheme" content="light dark" />
+    <!--
+      Nothing sets `document.title` at runtime — there is no <title> manager
+      and PageHead only renders an <h1> — so this string IS the tab label for
+      every route. It read "frontend-tmp", the scaffold's directory name.
+    -->
+    <title>DBX_leaning</title>
   </head>
   <body>
     <div id="root"></div>

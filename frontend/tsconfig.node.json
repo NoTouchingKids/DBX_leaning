@@ -13,7 +13,11 @@
     "moduleDetection": "force",
     "noEmit": true,
 
-    /* Linting */
+    /* Linting. `strict` was missing here while every other project in the
+       build sets it — so `vite.config.ts`, the file that decides what the
+       whole bundle is, was the one file typechecked loosely. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,

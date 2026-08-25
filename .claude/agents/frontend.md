@@ -1,46 +1,83 @@
 ---
 name: frontend
-description: Builds frontend/ — the React SPA. Explicitly low priority; do not start this track until app/, job/, and one model work end to end.
+description: Works on frontend/ — the React SPA. The transport spine is built and tested; the app shell is in progress. Read frontend/README.md first — it is ahead of this brief.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-## Do not hand-write the protocol types
+## Status: this track has started, and this brief is behind the code
 
-`schema/envelope.schema.json` is generated from the server's own Pydantic
-models and checked against them in tests, so it cannot drift. Generate the
-TypeScript from it rather than transcribing `docs/message-envelope-spec.md`
-into interfaces by hand:
+This file was written before any of `frontend/` existed. It is kept because
+the *reasoning* in it is still the settled architecture and is not recorded
+anywhere else. It is not a description of what is left to do.
 
-```bash
-npx json-schema-to-typescript schema/envelope.schema.json -o src/protocol.ts
-```
+**Read `frontend/README.md` first.** It is maintained alongside the code and
+is the authority on what exists; this brief is the authority on why. Where
+they disagree, the README and the source win. Concretely, since this was
+written: the transport spine under `src/transport/` is finished and tested
+(SharedWorker, IndexedDB, reconnect policy, gap detection), there is a
+Playwright suite under `e2e/`, and the per-model pages are underway.
 
-It is a discriminated union on `type`, so `switch (msg.type)` narrows with
-compiler support, and `LogLevel`/`RunStatus` arrive as string-literal unions.
-The app also serves it at `GET /api/schema`, and reports
-`protocol_schema_version` on `/healthz` — worth comparing at startup, because
-a cached bundle talking to a redeployed server is otherwise invisible until
-something quietly fails to parse.
+The gate below has been met — `app/`, `job/` and eleven models work end to
+end offline, and `tests/integration/test_end_to_end.py` drives real models
+through the real harness. What is still missing is envelope traffic from a
+**deployed** run: `databricks bundle deploy` has never been executed.
 
-You are building `frontend/` — the React SPA. Read `CLAUDE.md`,
-`docs/message-envelope-spec.md`, and `docs/architecture.md` before writing
-anything.
+## The wire contract: hand-written, with a drift test — not generated
 
-## Before you start: is this actually the right time?
+This section used to say to generate the types with
+`npx json-schema-to-typescript schema/envelope.schema.json -o src/protocol.ts`.
+**Do not do that.** Two things changed:
 
-This track is explicitly deprioritised. If `app/`, `job/`, and at least one
-model in `models/` aren't working end to end yet, **stop and say so** rather
-than building against an imagined message shape — a UI built ahead of real
-envelope traffic is exactly the kind of rework this project's planning is
-trying to avoid.
+- The generated output was unreadable — `RunId1`, `Seq1`, `Type1`, one alias
+  per property occurrence — and carried none of the reasoning that makes the
+  contract usable. `src/lib/envelope.ts` is hand-written instead, and
+  `src/lib/envelope.contract.test.ts` is what stops it drifting: it checks
+  **both** directions against `schema/envelope.schema.json` (every property
+  and enum member the server can emit is declared here; nothing declared here
+  is absent from the server, validated with ajv under the schema's own
+  `additionalProperties: false`). That is a stronger guarantee than
+  generation, because it also covers the prose.
+- **`src/transport/protocol.ts` is now a different contract entirely** — the
+  page↔worker protocol, `WorkerRequest`/`WorkerEvent`, about connections and
+  seq holes rather than about run output. Writing the generated envelope to
+  that path would overwrite it. Conflating the two is how a UI ends up
+  rendering "reconnecting" as if it were a run state.
 
-## Stack (settled — see `claude/frontend-stack-adr.md` in the project docs for the full ADR and rationale; do not relitigate here)
+Still true and still worth doing: the app serves the schema at
+`GET /api/schema` and reports `protocol_schema_version` on `/healthz` —
+worth comparing at startup, because a cached bundle talking to a redeployed
+server is otherwise invisible until something quietly fails to parse.
+
+Read `CLAUDE.md`, `docs/message-envelope-spec.md`, and
+`docs/architecture.md` before writing anything.
+
+## Stack (settled — do not relitigate here)
+
+The ADR this section originally cited (`claude/frontend-stack-adr.md`) is not
+in this repo and never was — every reference to "the ADR" below is a dead
+link. What survived of it is this list, plus the three constraints in
+`frontend/README.md` ("The stack, and the one thing to know about each
+choice"), which is the current record.
+
+Three items below did not survive contact with the build, and
+`frontend/package.json` is the authority on all of them:
+
+- **No headless component library.** Radix/shadcn was never installed; the
+  component layer is plain Tailwind v4. Adding one now is a real decision,
+  not the settled default this list implies.
+- **No D3, no Plotly, no Three.js.** Recharts does all of it, MCMC included.
+  Treat the D3/Plotly/Three.js paragraphs below as options that were
+  considered and not taken, not as a plan to execute.
+- **React Compiler is NOT pinned.** `babel-plugin-react-compiler` is
+  `^1.0.0`, which is the exact thing the next bullet says not to do. Either
+  pin it or drop the instruction — but do not leave the file claiming a
+  guarantee the manifest does not give.
 
 - **React 19 baseline**, CSR SPA via Vite, React Router for navigation.
   99% of real usage is Chromium-based (Chrome/Edge); some Firefox; Safari/
   macOS is rare enough not to be a design constraint. This is why the
   SharedWorker architecture below is the primary path, not a hedge behind a
-  fallback — see "Runtime baseline" note in the ADR.
+  fallback.
 - **React Compiler, pinned to an exact version** (not `^1.0.0` — rare
   `useEffect`-dependency behaviour has changed across compiler versions, and
   without strong e2e coverage yet, floating the version is a real risk).
@@ -54,8 +91,8 @@ trying to avoid.
   MCMC's bespoke trace/rank plots, which need control Recharts doesn't give.
   **Plotly** is a named fallback if D3 turns out to be more effort than
   budgeted for MCMC specifically — don't reach for it by default.
-- **Animation: Framer Motion for most/simple animations; Three.js for
-  genuinely complex ones** (e.g. a model page that wants a richer visual
+- **Animation: Motion (the package formerly published as Framer Motion) for
+  most/simple animations; Three.js for genuinely complex ones** (e.g. a model page that wants a richer visual
   treatment than a chart gives). Lazy-load Three.js per page that uses it —
   never in the main bundle. Time-box the visual ambition per page and make
   sure it degrades gracefully (i.e. the page still works with the chart/data
@@ -68,8 +105,10 @@ trying to avoid.
 
 ## SharedWorker + named SSE events (settled architecture for the live channel)
 
-Per the ADR, the SSE connection is owned by a `SharedWorker`, not by
-individual tabs/pages:
+The SSE connection is owned by a `SharedWorker`, not by individual
+tabs/pages. This is the one section of this brief that was built exactly as
+written — `src/transport/` is the implementation and
+`frontend/README.md` ("The transport spine") is the map of it:
 
 - The worker holds the single `EventSource` connection per browser session
   (this is also what solves the HTTP/1.1 6-connections-per-origin problem —
@@ -109,20 +148,26 @@ individual tabs/pages:
    rather than building a generic TTL/eviction scheme: check the run's
    status before deciding whether a cached copy can be trusted as-is.
 
-3. **`seq`-gap detection, and make gaps visible.** Every message carries
-   `seq`; if live resumes at a higher `seq` than the highest one cached,
-   there's a gap. Show it in the UI as a visible marker, not a silent
-   discontinuity, rather than only offering a "load missing" action with no
-   indication anything is missing. This detection lives in the SharedWorker
-   (see above), computed once per run regardless of how many tabs are open.
+3. **`seq`-gap detection, and make gaps visible — but never act on a gap
+   automatically.** Every message carries `seq`; if live resumes at a higher
+   `seq` than the highest one cached, there is a hole. Show it as a visible
+   marker, not a silent discontinuity. This detection lives in the
+   SharedWorker, computed once per run regardless of how many tabs are open.
+
+   **The correction this brief originally got wrong:** a gap is not
+   necessarily a fault, and some holes never close. `seq` is gap-free at the
+   source, but the live path never sends `client_visible=false` logs and the
+   backfill endpoint filters them out too — so a run can be complete and
+   correct and still show permanent holes. "Backfill until contiguous" is
+   therefore an infinite loop, not a refinement. Report gaps; let a person
+   decide.
 
 4. **Backfill is user-triggered on reconnect to an active run; automatic
    only on first view of any run** (terminal or active — a first view of a
    terminal run should auto-fetch everything, since there's no "live" tail
-   to wait for). Optional refinement, not required for a first cut: auto-
-   fill small gaps (a rough threshold like under ~200 messages) without
-   asking, since that's cheap, and require an explicit action only for large
-   gaps.
+   to wait for). This brief used to suggest auto-filling "small" gaps without
+   asking; do not, for the reason in point 3 — a hole that cannot be filled
+   would be retried forever.
 
 5. **SSE connection, one per browser session, not one per run page.**
    HTTP/1.1 caps connections-per-origin at 6 — with one open SSE stream per
@@ -137,8 +182,11 @@ individual tabs/pages:
 6. **Reconnect counter: count consecutive connection *failures*, reset on
    every successful open.** `EventSource` retries forever by default and
    can't be capped declaratively — count failures in `onerror`, call
-   `source.close()` after a small number of consecutive failures (e.g. 3),
-   and surface a manual "reconnect" control at that point. **Do not count a
+   `source.close()` after a cap is hit, and surface a manual "reconnect"
+   control at that point. Built: `hub.ts` owns it and the cap is **10**, not
+   the "e.g. 3" this brief originally suggested — deliberately generous,
+   because tripping it on a healthy stream is the expensive mistake and
+   `useReconnectableRunStream` is the way back out once it does trip. **Do not count a
    routine reconnect as a failure** — if the ingress cuts idle/long-lived
    connections at some interval (this is a real, if unofficial, risk on this
    platform — see `docs/free-edition-constraints.md`), a healthy run would
@@ -163,6 +211,17 @@ casing), then layer model-specific richer views using each model's
 `payload` field once that model's real envelope traffic exists to build
 against.
 
+The per-model contract this needs is `src/lib/models.ts`, and it is worth
+knowing what it is before touching it: a **hand-derived** `ModelSpec` per
+model, read out of every `cfg.get(...)` call and every `emit("progress", ...)`
+payload in `models/<name>/model.py`. The server validates
+`TriggerRequest.config` not at all — it is `dict[str, Any]` passed verbatim
+into `DBX_MODEL_CONFIG` — so there is no schema to generate from and no test
+that will tell you when this file falls behind. Re-derive it whenever
+`models/` changes. It currently covers **nine of eleven models**:
+`ortools_jobshop` and `panel_fit` have no entry, so they are triggerable by
+API and absent from the UI.
+
 ## Explicit non-goals
 
 - Don't build model-specific pages ahead of that model's real message
@@ -183,9 +242,27 @@ against.
 - Don't reach for Three.js or D3 as a default — Three.js is scoped to
   specific complex-animation pages (lazy-loaded, must degrade gracefully),
   D3 is scoped to MCMC's trace/rank plots specifically. Recharts is the
-  default for everything else.
+  default for everything else. In the end neither was needed: nothing in
+  `package.json` pulls D3, Plotly or Three.js, and adding one is a new
+  decision rather than executing this plan.
+- Don't add a polling interval anywhere. The React Query client sets
+  `refetchInterval: false` globally on purpose — every HTTP read here
+  ultimately reaches a SQL warehouse billed by *uptime*, so a background
+  interval on an open tab costs money all day for information the SSE stream
+  already delivers. This is the rule most easily broken by accident, and it
+  is not in the original list because it was learned later.
 
-## Tests to write
+## Tests
+
+These were written as a wishlist and are now mostly real — `src/**/*.test.ts`
+in jsdom, plus six Playwright specs in `e2e/`. Check `frontend/README.md`
+("Browser tests") before adding another: the jsdom transport tests run against
+a fake `EventSource` and by construction cannot reproduce a real socket, a
+real `SharedWorker`, an IndexedDB surviving navigation, or a reconnect —
+which is the shape of every transport bug this project has actually shipped.
+That is what `e2e/` is for, and it is not a place to re-run unit tests slowly.
+
+The list this brief started with, kept because it is still the right list:
 
 - Reconnect counter resets on success; does not tear down a healthy stream
   after N routine reconnects.
@@ -199,4 +276,5 @@ against.
   worker connection rather than opening a second `EventSource` (verify via
   a request count, not just visually).
 - A page whose Three.js scene fails/times out to load still renders its
-  chart and data correctly (degrade-gracefully regression test).
+  chart and data correctly (degrade-gracefully regression test) — moot while
+  no page uses Three.js.

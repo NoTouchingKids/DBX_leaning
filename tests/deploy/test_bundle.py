@@ -200,9 +200,21 @@ def test_no_exclude_contradicts_the_frontend_include(bundle):
 
 def test_the_frontend_source_does_not_reach_the_workspace(bundle):
     """node_modules alone would dwarf the rest of the sync, and there is no
-    Node runtime in the workspace to make any of it useful."""
+    Node runtime in the workspace to make any of it useful.
+
+    "Source" means the build-time config too, not just `src/`. Only `dist/`
+    is readable by anything over there, and the section said as much while
+    quietly shipping four tsconfigs, vite.config.ts, playwright.config.ts,
+    package.json, the lockfile and e2e/.
+    """
     excluded = set(bundle["sync"]["exclude"])
-    for pattern in ("frontend/node_modules/**", "frontend/src/**"):
+    for pattern in (
+        "frontend/node_modules/**",
+        "frontend/src/**",
+        "frontend/e2e/**",
+        "frontend/package.json",
+        "frontend/vite.config.ts",
+    ):
         assert pattern in excluded, f"{pattern} would be synced to the workspace"
 
 

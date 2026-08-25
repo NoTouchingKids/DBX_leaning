@@ -513,13 +513,12 @@ class PanelFitModel:
         n = len(x)
         reason, coefficients, r_squared, rmse = self._fit(x, y)
 
-        # `status` is two-valued and `failure_reason` carries the detail.
-        # `uc_ddl/002_model_results.sql` comments status as "'fitted' or a
-        # failure reason", which would make `failure_reason` a duplicate of
-        # `status` on every failed row and leave nothing that answers "how
-        # many failed" without enumerating the reason set. Two columns, two
-        # jobs: `status` groups into two buckets, `failure_reason` groups into
-        # four. Flagged rather than changed — the DDL is another track's file.
+        # Two-valued, with `failure_reason` carrying the detail: `status`
+        # groups into two buckets so "how many failed" is one GROUP BY, and
+        # the reason set does not have to be known in advance. The DDL says
+        # the same thing — it once described `status` as "'fitted' or a
+        # failure reason", which would have made the two columns identical on
+        # every failed row, and has since been corrected.
         status = STATUS_FAILED if reason else STATUS_FITTED
 
         # A fitted row's span is the sample the coefficients describe. A

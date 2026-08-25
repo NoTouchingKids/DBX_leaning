@@ -8,6 +8,27 @@
 -- Everything except run_status is append-only, written by the job through
 -- Delta. The SQL warehouse never sees a write on the telemetry path — its
 -- cost is driven by uptime, so the write path deliberately bypasses it.
+--
+-- ---------------------------------------------------------------------------
+-- `main.dbx_leaning` is HARDCODED here, and it is a variable everywhere else.
+--
+-- The bundle declares `var.catalog` / `var.schema` (defaulting to exactly
+-- these two values), passes them to every job as DBX_CATALOG/DBX_SCHEMA and
+-- to the app as env, and `shared/tables.py::TableSet` qualifies every write
+-- with whatever those say. These files are applied by hand —
+-- `databricks sql query --file` does no variable substitution — so nothing
+-- ties the two together.
+--
+-- Consequence: change either bundle variable and the tables get created in
+-- one place while every job writes to another. Delta will not save you; the
+-- write simply fails with TABLE_OR_VIEW_NOT_FOUND on a workspace, inside a
+-- job, at the end of a run. If you retarget a deployment, sed this file and
+-- 002 to match the same commit that changes the variable.
+--
+-- The CREATE CATALOG below is here for completeness and is a no-op on Free
+-- Edition, where `main` is pre-provisioned. It will not help a retargeted
+-- deployment: it names `main` literally too.
+-- ---------------------------------------------------------------------------
 
 CREATE CATALOG IF NOT EXISTS main;
 CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
@@ -23,6 +44,22 @@ CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
 -- This definition stays so a deployment works before Lakebase is provisioned,
 -- with two known limitations the Postgres version does not have: no primary
 -- key on run_id, and no transaction around the concurrency check.
+--
+-- Do NOT "tidy" this to match lakebase_ddl/001_run_status.sql. `model` and
+-- `started_ts` are NOT NULL there and deliberately nullable here, because the
+-- two stores reach this table by different routes: Postgres always inserts
+-- through claim_slot, which has both values, while the warehouse path also
+-- upserts through app/repository.py's MERGE, whose NOT MATCHED branch supplies
+-- only (run_id, job_run_id, status, detail, updated_ts). Adding NOT NULL to
+-- either column would turn that branch into a hard failure.
+--
+-- `job_run_id` is populated only on the Postgres path. The MERGE's MATCHED
+-- branch does not assign it and the row always exists by the time
+-- attach_job_run runs, so on the warehouse store this column stays NULL and
+-- startup reconciliation loses its Jobs-API route (app/reconcile.py falls back
+-- to the latest run_events row). That is an app/repository.py bug, recorded
+-- here because this is where someone reading the schema will wonder why the
+-- column is always empty.
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_status (
     run_id       STRING  NOT NULL,
     job_run_id   STRING,            -- Databricks' own run id, for reconciliation

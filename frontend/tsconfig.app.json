@@ -26,7 +26,15 @@
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src"],
-  /* The worker needs lib.webworker, which collides with lib.dom on hundreds
-     of identifiers. It gets its own program — see tsconfig.worker.json. */
+  /* The worker needs lib.webworker; this program has lib.dom. It gets its own
+     program — see tsconfig.worker.json — so that each side is checked against
+     the globals it will actually have at runtime: nothing under `src` can
+     reach `SharedWorkerGlobalScope` and have it compile, and `worker.ts`
+     cannot reach `document`.
+
+     Note that merely loading both libs at once does NOT fail the build:
+     `skipLibCheck` is on in both projects and it suppresses the TS6200 /
+     TS2374 duplicate-identifier errors the two lib files produce. The split
+     is load-bearing for the isolation above, not for a compile error. */
   "exclude": ["src/transport/worker.ts"]
 }

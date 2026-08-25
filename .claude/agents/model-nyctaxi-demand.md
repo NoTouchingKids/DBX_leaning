@@ -1,12 +1,53 @@
 ---
 name: model-nyctaxi-demand
-description: Builds models/nyctaxi_demand/ — a Spark-native aggregation over samples.nyctaxi.trips. The first model to read real Unity Catalog data via the job's own Spark session, rather than synthetic in-memory data.
+description: "UNBUILT PROPOSAL — models/nyctaxi_demand/ does not exist and its original justification is void. Do not dispatch this to write code without reading the header first."
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-You are building `models/nyctaxi_demand/`. Read `CLAUDE.md`,
-`docs/message-envelope-spec.md`, and `docs/free-edition-constraints.md`
-before writing anything.
+## STOP — this describes a model that was never built, on premises that are now false
+
+`models/nyctaxi_demand/` does not exist, and nothing in the repo references
+it. This file is kept as a **proposal**, not as a work order. It is the only
+brief here for an unbuilt model; every other `.claude/agents/model-*.md`
+documents something on disk.
+
+**Its central justification is gone.** This brief was written when the five
+models then in existence all used synthetic in-memory data, and it proposed
+closing that gap. That gap closed a different way: `models/_data` now reads
+`samples.nyctaxi.trips` for all eleven models, through the job's Spark
+session, falling back to a deterministic generator off-platform — and every
+result row carries `data_source` / `data_synthetic` / `data_rows` /
+`data_fallback_reason` so the two paths stay distinguishable. So the
+paragraph below claiming "none of them reads a real Unity Catalog table" is
+simply wrong now, and "the first to genuinely need Spark/UC as an input" is
+no longer available to be first at.
+
+**What is still unclaimed, if this is ever built.** Two things, and they are
+the only reasons left:
+
+1. *Spark stage-level progress.* Every model here reports progress from
+   inside its own loop. Nothing drives `percent_complete` from
+   `SparkContext.statusTracker()` or a `SparkListener` — a genuinely
+   different way to populate the same envelope fields, and the one thing in
+   this brief that no other model has proven.
+2. *A 2-D result shape.* Every results table on disk is a flat series, a
+   solution, a decision table or one row per unit. An hour × zone matrix
+   wants a heatmap, and neither the `preview_axes` LTTB path nor the frontend
+   has anything for that.
+
+Neither is a gap that hurts. Build this on the strength of those two or not
+at all — and if you do, follow `/new-model`, which is the current and
+maintained procedure, in preference to the sections below. Delete this file
+the day the model exists (its brief would be redundant) or the day someone
+decides it never will.
+
+Everything below this line is the original 2026 proposal, preserved
+unedited apart from this header. Read it as history.
+
+---
+
+Read `CLAUDE.md`, `docs/message-envelope-spec.md`, and
+`docs/free-edition-constraints.md` before writing anything.
 
 ## What this model is, and why it's in the lineup
 

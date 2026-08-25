@@ -17,6 +17,24 @@ import pytest
 
 from app.store import DuplicateRun, PostgresRunStore, RunRecord, SlotDenied
 from shared.envelope import RunStatus
+from shared.tables import TableSet
+
+
+class RecordingSql:
+    """Captures the SQL text and bound parameters, and answers nothing.
+
+    The warehouse store's writes are what these tests are about, so the read
+    path never runs — a MERGE is fire-and-forget here.
+    """
+
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, list]] = []
+
+    async def query(self, sql, params=None):
+        self.queries.append((sql, params or []))
+        return []
+
+    async def close(self): ...
 
 pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
 
@@ -217,3 +235,53 @@ async def test_non_terminal_is_what_reconciliation_reads(store):
 
 async def test_an_unknown_run_is_none_not_an_error(store):
     assert await store.get("never-existed") is None
+
+
+async def test_the_warehouse_store_actually_stores_the_job_run_id():
+    """`attach_job_run` on the warehouse path wrote nothing.
+
+    `claim_slot` inserts the row before the Jobs API is called, so by the time
+    a job run id exists the row does too — and `set_run_status`'s MERGE set
+    `job_run_id` only on its NOT MATCHED branch. The column stayed NULL
+    forever, and `app/reconcile.py::_resolve` needs it to ask the Jobs API how
+    a run ended. Without it that route is dead and reconciliation degrades to
+    the last `run_events` row, which is precisely what a job that crashed
+    before emitting anything never wrote.
+
+    Nothing failed, and nothing said so. Same quiet class as the Lakebase
+    wiring gap.
+    """
+    from app.repository import RunRepository
+    from app.store import WarehouseRunStore
+
+    sql = RecordingSql()
+    store = WarehouseRunStore(RunRepository(sql, TableSet()))
+
+    await store.attach_job_run("r1", 4242)
+
+    merge = next(q for q, _ in sql.queries if "MERGE INTO" in q)
+    matched = merge.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")[0]
+    assert "job_run_id" in matched, (
+        "the MATCHED branch never assigns job_run_id, so attach_job_run is a no-op"
+    )
+    params = next(p for q, p in sql.queries if "MERGE INTO" in q)
+    assert any(getattr(x, "value", None) == "4242" for x in params)
+
+
+async def test_a_status_update_does_not_wipe_the_job_run_id():
+    """Every ordinary transition calls `set_run_status` with `job_run_id=None`.
+
+    A plain `t.job_run_id = :job_run_id` on the MATCHED branch would fix the
+    bug above and immediately introduce a worse one: the id would be nulled on
+    the first RUNNING write, one message after it was stored. Hence COALESCE.
+    """
+    from app.repository import RunRepository
+
+    sql = RecordingSql()
+    repo = RunRepository(sql, TableSet())
+
+    await repo.set_run_status("r1", "RUNNING")
+
+    merge = next(q for q, _ in sql.queries if "MERGE INTO" in q)
+    matched = merge.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")[0]
+    assert "COALESCE" in matched.upper(), "a null job_run_id must not overwrite a stored one"

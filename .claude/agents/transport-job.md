@@ -1,10 +1,13 @@
 ---
 name: transport-job
-description: Builds the job/ harness — the Databricks Job entrypoint that loads a model, drives its execution, and gets its messages onto every live/durable channel. Use for anything under job/.
+description: Design record for job/, the harness (BUILT) — the Databricks Job entrypoint that loads a model, drives its execution, and gets its messages onto every live/durable channel. Use for anything under job/.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-You are building `job/` — the Databricks Job harness. Read `CLAUDE.md`,
+You are working on `job/` — the Databricks Job harness. It is **built and
+tested**; this brief is the design record, not a to-do list, and it has held
+up better than the others — read it as still-current unless the source says
+otherwise. Read `CLAUDE.md`,
 `docs/architecture.md`, `docs/message-envelope-spec.md`, and
 `docs/free-edition-constraints.md` before writing anything.
 
@@ -74,12 +77,19 @@ or subtly broken.
      the live channel is never the only copy.
 
 4. **Durable channel — always, regardless of live channel state.**
-   - Write via one `write_batch(table, rows)` interface with two
-     implementations: Spark (the one that works) and delta-rs (the target,
-     currently raising NotImplementedError — it cannot address a UC table by
-     name and writes to a local directory instead of failing), selected
-     once at process start based on what's importable/working in the
-     environment. Do not branch on implementation anywhere else in the code.
+   - Write via one `write_batch(table, rows)` interface, chosen once at
+     process start and never branched on again. `DBX_WRITER` takes four
+     values (`job/delta.py`, `WriterKind`):
+     **`spark`** is the only real path and what `auto` resolves to;
+     **`delta-rs`** is the target and raises `NotImplementedError` — it takes
+     a storage URI, not a UC name, and given a three-part name it writes to a
+     local directory *without erroring*, so a run would report SUCCEEDED with
+     its telemetry in a container about to be discarded. `auto` therefore
+     never picks it;
+     **`jsonl`** is a local development writer, and `auto` only falls back to
+     it when `DBX_ALLOW_LOCAL_WRITER=1` is set explicitly — otherwise no
+     Spark session is a hard `RuntimeError`, because silently writing a
+     production run's telemetry to a discarded file is worse than failing.
    - Flush on **whichever comes first**: buffered size ≥ 1 MB (configurable),
      age since last flush ≥ 30s (configurable), or end of run. The age bound
      exists specifically to cap how much is lost if the process dies —
@@ -113,17 +123,20 @@ or subtly broken.
 ## Explicit non-goals
 
 - No model-specific logic of any kind.
-- No direct SQL warehouse writes for logs/progress/results — that's what the
-  Delta writer replaces. (`run_status` transitions may still go through the
-  warehouse via bound-parameter SQL — check `docs/architecture.md` and
-  `transport-app.md` for where that boundary sits; when in doubt, keep
-  `job/` writing only to Delta and let `app/` own `run_status` mutations,
-  unless the model's own status write genuinely needs to happen from the job
-  process itself, in which case use bound parameters, never string
-  interpolation.)
-- No ORM. Text SQL, bound parameters, always.
+- **No SQL of any kind, to any store.** That boundary was left open when this
+  brief was written ("`run_status` transitions may still go through the
+  warehouse..."); it has since closed and `job/` contains no SQL at all. The
+  job writes append-only telemetry to Delta through `write_batch`, and
+  `app/` owns every `run_status` mutation — which now lives in Lakebase
+  Postgres, not the warehouse, and is not reachable from a job task anyway.
+  The job's contribution to run state is the `status` messages it emits,
+  which land in `run_events` and are what startup reconciliation reads back.
+- No ORM, and nothing that needs one.
 
-## Tests to write
+## Tests
+
+Written, under `tests/job/`. The list is kept because it is still what must
+not regress:
 
 - Model loader: successful discovery, and the specific failure message when
   a required piece is missing.
