@@ -138,6 +138,13 @@ function numOrNull(p: Payload, key: string): void {
   const v = p[key];
   expect(v === null || typeof v === "number", `${key} should be number|null, got ${JSON.stringify(v)}`).toBe(true);
 }
+function strOrNull(p: Payload, key: string): void {
+  const v = p[key];
+  expect(
+    v === null || typeof v === "string",
+    `${key} should be string|null, got ${JSON.stringify(v)}`,
+  ).toBe(true);
+}
 function str(p: Payload, key: string): string {
   expect(typeof p[key], `${key} should be a string`).toBe("string");
   return p[key] as string;
@@ -287,6 +294,52 @@ const VALIDATORS: Record<string, (p: Payload, i: number) => void> = {
     numOrNull(p, "best_val_accuracy");
     num(p, "baseline_accuracy");
     str(p, "device");
+    boolOrNull(p, "data_synthetic");
+  },
+  // JobshopProgressPayload
+  ortools_jobshop: (p) => {
+    // Nullable for the same reason as the Gurobi models', by a different
+    // mechanism: CP-SAT's pre-search bound is a real infinity, nulled by
+    // `_finite`.
+    numOrNull(p, "incumbent");
+    numOrNull(p, "best_bound");
+    numOrNull(p, "gap");
+    num(p, "solutions_found");
+    num(p, "wall_time");
+    num(p, "n_jobs");
+    num(p, "n_machines");
+    num(p, "n_operations");
+    // The model names its own denominator in the record, because the
+    // envelope has no label field for percent_complete and this is a TIME
+    // fraction rather than a search fraction.
+    str(p, "percent_complete_basis");
+    bool(p, "final");
+    // ABSENT, not null, until the solver has some — so `in`, never a null
+    // check. Same for solver_status, which appears only on the final sample.
+    if ("conflicts" in p) num(p, "conflicts");
+    if ("branches" in p) num(p, "branches");
+    if (p.final === true) str(p, "solver_status");
+  },
+  // PanelFitProgressPayload
+  panel_fit: (p) => {
+    const done = num(p, "groups_done");
+    num(p, "groups_total");
+    const fitted = num(p, "groups_fitted");
+    const failed = num(p, "groups_failed");
+    // The invariant the whole model exists to make visible. If this ever
+    // stops holding, every view of it is showing a lie.
+    expect(fitted + failed).toBe(done);
+    expect(typeof p.failure_counts).toBe("object");
+    str(p, "group_key");
+    str(p, "group_label");
+    expect(["fitted", "failed"]).toContain(str(p, "group_status"));
+    strOrNull(p, "group_failure_reason");
+    numOrNull(p, "group_r_squared");
+    num(p, "n_observations");
+    num(p, "rows_seen");
+    bool(p, "metric_higher_is_better");
+    num(p, "degree");
+    num(p, "chunks_emitted");
     boolOrNull(p, "data_synthetic");
   },
 };

@@ -25,6 +25,8 @@ import gurobiRouting from "./gurobi_routing";
 import gurobiScheduling from "./gurobi_scheduling";
 import mcmc from "./mcmc";
 import neuralNet from "./neural_net";
+import ortoolsJobshop from "./ortools_jobshop";
+import panelFit from "./panel_fit";
 import scenario from "./scenario";
 import streamingResults from "./streaming_results";
 
@@ -38,6 +40,8 @@ export const MODEL_VIEWS: readonly ModelView[] = [
   annealing,
   neuralNet,
   streamingResults,
+  ortoolsJobshop,
+  panelFit,
 ];
 
 const BY_NAME = new Map(MODEL_VIEWS.map((view) => [view.model, view]));

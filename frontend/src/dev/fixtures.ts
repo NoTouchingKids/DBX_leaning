@@ -966,6 +966,231 @@ const GENERIC_SCRIPT: ModelScript = {
   detail: { RUNNING: "running", SUCCEEDED: "done" },
 };
 
+/* ---------------------------------------------------------------- *
+ * ortools_jobshop
+ * ---------------------------------------------------------------- */
+
+/**
+ * The inverse of the Gurobi scripts, and deliberately so.
+ *
+ * A MIP callback fires constantly and its driver's job is to SUPPRESS.
+ * CP-SAT's solution callback fires only on an improving solution — a handful
+ * of times across a whole run — so this script emits few, widely spaced
+ * messages. A fixture that produced Gurobi-like chatter here would teach a
+ * view to expect traffic that never comes, and hide the case that matters:
+ * long stretches where nothing improves and the signature is correctly still.
+ *
+ * `percent_complete` is real here, unlike the Gurobi models' permanent null,
+ * but it is elapsed time against the time limit — a TIME fraction, not a
+ * search fraction. The final sample reports 100 because the search finished,
+ * which is the refinement that stops an optimal-in-3-seconds run looking dead
+ * at 5%.
+ *
+ * `conflicts` and `branches` are ABSENT on early messages, not null: CP-SAT
+ * does not hand them over until it has some.
+ */
+const ORTOOLS_JOBSHOP_SCRIPT: ModelScript = {
+  naturalCount: 6,
+  maxCount: 24,
+  metricLabel: "relative_gap",
+  durationS: 60,
+  progress: (count, rng, nullish) => {
+    const timeLimit = 60;
+    const nJobs = 60;
+    const nMachines = 4;
+    const nOperations = 214;
+    // A trivial machine-load bound, reached almost immediately and then
+    // barely moving — which is what makes the gap curve almost entirely
+    // incumbent movement on this model.
+    const bound = 1836;
+    let incumbent = 2410;
+    let found = 0;
+    return (i) => {
+      const last = i === count - 1;
+      found += 1;
+      // Improvements shrink as the search goes on; the last few barely move.
+      incumbent = Math.max(bound + 12, incumbent - (140 - i * 18) * (0.7 + rng() * 0.6));
+      const inc = nullish && i === 0 ? null : round(incumbent, 0);
+      const bnd = i === 0 ? null : bound; // pre-search bound is a real infinity
+      const gap = inc !== null && bnd !== null ? round((inc - bnd) / inc, 5) : null;
+      const elapsed = round((timeLimit * (i + 1)) / count, 2);
+      const payload: Record<string, unknown> = {
+        incumbent: inc,
+        best_bound: bnd,
+        gap,
+        solutions_found: found,
+        wall_time: elapsed,
+        n_jobs: nJobs,
+        n_machines: nMachines,
+        n_operations: nOperations,
+        percent_complete_basis: "elapsed_solver_time_against_time_limit",
+        final: last,
+      };
+      // Absent until the solver has some — `in`, never a null check.
+      if (i >= 1) payload.conflicts = 120 + i * 340;
+      if (i >= 1) payload.branches = 900 + i * 2100;
+      if (last) payload.solver_status = "OPTIMAL";
+      return {
+        elapsed_seconds: elapsed,
+        // A time fraction. 100 on the final sample because the search
+        // terminated on its own.
+        percent_complete: last ? 100 : round((100 * elapsed) / timeLimit, 2),
+        primary_metric: gap,
+        payload,
+      };
+    };
+  },
+  logs: [
+    { level: "INFO", phase: "input", text: "24 jobs standing for 1,203 transactions" },
+    { level: "INFO", phase: "build", text: "214 operations across 4 machines" },
+    { level: "INFO", phase: "solve", text: (i) => `improved incumbent #${i + 1}` },
+    // The log callback is what polls for cancellation — CP-SAT has no
+    // POLLING equivalent, so without it a cancel on a stalled search is not
+    // seen until the time limit.
+    { level: "DEBUG", phase: "solve", text: "cp-sat log (also the cancel poll)" },
+  ],
+  logSource: "model",
+  preview: (rng, chunk) =>
+    Array.from({ length: 8 }, (_, k) => {
+      const start = Math.round(40 * (chunk * 8 + k) + 120 * rng());
+      const duration = Math.round(12 + 48 * rng());
+      return {
+        job_id: chunk * 8 + k,
+        job_label: `Tokyo Tidbits x${Math.round(12 + 40 * rng())}`,
+        operation_index: k % 4,
+        machine_id: k % 4,
+        machine_label: ["mix", "bake", "decorate", "pack"][k % 4],
+        start_minute: start,
+        duration_minutes: duration,
+        end_minute: start + duration,
+      };
+    }),
+  rowCount: 214,
+  fetchHint: hint("main.dbx_leaning.results_ortools_jobshop"),
+  detail: {
+    RUNNING: "feasible: makespan 2130 min, gap 13.8%",
+    SUCCEEDED: "optimal: makespan 1858 min",
+    FAILED: "MODEL_INVALID",
+    CANCELLED: "cancelled: makespan 2210 min kept",
+    INFEASIBLE: "deadline 900 min cannot fit 214 operations",
+  },
+};
+
+/* ---------------------------------------------------------------- *
+ * panel_fit
+ * ---------------------------------------------------------------- */
+
+/**
+ * The only script here whose units can FAIL while the run succeeds, which is
+ * the whole reason the model exists — so the fixture must produce failures on
+ * the ordinary path, not only in an edge case. A run where everything fits
+ * would make the view's headline untestable.
+ *
+ * `groups_fitted + groups_failed === groups_done` on every message, always.
+ * There is a test.
+ *
+ * `data_synthetic` is true even on the non-nullish fixture, and that is
+ * faithful rather than lazy: `DEFAULT_PANEL_TABLE` has never been landed, so
+ * a default run really does take the generated panel every time.
+ */
+const PANEL_FIT_SCRIPT: ModelScript = {
+  naturalCount: 24,
+  metricLabel: "median_r_squared",
+  durationS: 20,
+  progress: (count, rng, nullish) => {
+    const total = count;
+    const reasons = [
+      "too_few_observations",
+      "zero_predictor_variance",
+      "singular_design",
+      "non_finite_result",
+    ] as const;
+    let fitted = 0;
+    let failed = 0;
+    const counts: Record<string, number> = {};
+    const rsq: number[] = [];
+    return (i) => {
+      const done = i + 1;
+      // Roughly one in six fails, which is a realistic panel: small countries
+      // with three observations are the norm, not the exception.
+      const fails = rng() < 0.17;
+      const reason = fails ? reasons[Math.floor(rng() * reasons.length) % 4] : null;
+      const observations = fails ? Math.round(1 + rng() * 3) : Math.round(18 + rng() * 42);
+      let r: number | null = null;
+      if (fails) {
+        failed += 1;
+        if (reason) counts[reason] = (counts[reason] ?? 0) + 1;
+      } else {
+        fitted += 1;
+        r = round(0.55 + rng() * 0.42, 4);
+        rsq.push(r);
+      }
+      const median =
+        rsq.length > 0 ? round([...rsq].sort((a, b) => a - b)[Math.floor(rsq.length / 2)] ?? 0, 4) : null;
+      return {
+        elapsed_seconds: round((20 * done) / total, 2),
+        // Groups done over groups total. No estimation — the denominator is
+        // known before the first fit.
+        percent_complete: round((100 * done) / total, 2),
+        primary_metric: median,
+        payload: {
+          groups_done: done,
+          groups_total: total,
+          groups_fitted: fitted,
+          groups_failed: failed,
+          failure_counts: { ...counts },
+          group_key: `G${String(done).padStart(3, "0")}`,
+          group_label: `country-${done}`,
+          group_status: fails ? "failed" : "fitted",
+          group_failure_reason: reason,
+          group_r_squared: r,
+          n_observations: observations,
+          // Rows the group HAD, against the ones that survived the null drop.
+          rows_seen: observations + (fails ? Math.round(rng() * 2) : 0),
+          metric_higher_is_better: true,
+          degree: 1,
+          chunks_emitted: Math.floor(done / 12),
+          data_source: "synthetic",
+          // True even here: the default table has never been created.
+          data_synthetic: nullish ? null : true,
+          data_rows: 4800,
+          data_fallback_reason: "main.dbx_leaning.owid_country_year does not exist",
+        },
+      };
+    };
+  },
+  logs: [
+    { level: "INFO", phase: "input", text: "panel table not found; using the generated panel" },
+    { level: "INFO", phase: "run", text: (i) => `group ${i + 1} fitted` },
+    { level: "WARNING", phase: "run", text: "too_few_observations: 3 rows below the degree + 2 floor" },
+  ],
+  logSource: "model",
+  preview: (rng, chunk) =>
+    Array.from({ length: 6 }, (_, k) => {
+      const fails = rng() < 0.17;
+      return {
+        group_key: `G${String(chunk * 6 + k).padStart(3, "0")}`,
+        group_label: `country-${chunk * 6 + k}`,
+        status: fails ? "failed" : "fitted",
+        failure_reason: fails ? "too_few_observations" : null,
+        n_observations: fails ? 3 : Math.round(20 + 40 * rng()),
+        slope: fails ? null : round(0.12 + rng() * 0.3, 5),
+        r_squared: fails ? null : round(0.6 + rng() * 0.35, 4),
+      };
+    }),
+  rowCount: 180,
+  fetchHint: hint("main.dbx_leaning.results_panel_fit"),
+  detail: {
+    RUNNING: "fitting group 14 of 24",
+    SUCCEEDED: "20 fitted, 4 failed",
+    FAILED: "response column not present in the panel",
+    CANCELLED: "cancelled after 11 groups; those fits kept",
+    // Not SUCCEEDED (row_count looks healthy) and not FAILED (nothing went
+    // wrong) — see docs/message-envelope-spec.md.
+    INFEASIBLE: "every group failed to fit",
+  },
+};
+
 const SCRIPTS: Record<string, ModelScript> = {
   gurobi_scheduling: GUROBI_SCHEDULING_SCRIPT,
   gurobi_routing: GUROBI_ROUTING_SCRIPT,
@@ -976,6 +1201,8 @@ const SCRIPTS: Record<string, ModelScript> = {
   annealing: ANNEALING_SCRIPT,
   bayesian_ab: BAYESIAN_AB_SCRIPT,
   neural_net: NEURAL_NET_SCRIPT,
+  ortools_jobshop: ORTOOLS_JOBSHOP_SCRIPT,
+  panel_fit: PANEL_FIT_SCRIPT,
 };
 
 /** Whether this model has a hand-written script or falls back to

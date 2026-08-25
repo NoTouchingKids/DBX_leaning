@@ -671,6 +671,193 @@ export interface NeuralNetProgressPayload {
  *  `pyproject.toml` and the nine `resources/model_*.job.yml` — all three sets
  *  agree today. They are three hand-maintained lists with no test tying them
  *  together, so re-check rather than trusting this comment. */
+/* ================================================================== *
+ * ortools_jobshop
+ * ================================================================== */
+
+/** `models/ortools_jobshop/instance.py::MAX_JOBS`. `build_instance` RAISES
+ *  above this, so a form should refuse rather than let a run fail. The cap is
+ *  the job task's hour, not a solver limit — CP-SAT has no size cap, which is
+ *  the whole point of this model against the two Gurobi ones. */
+export const JOBSHOP_MAX_JOBS = 400;
+
+export const ORTOOLS_JOBSHOP: ModelSpec = {
+  name: "ortools_jobshop",
+  label: "Job shop (CP-SAT)",
+  fields: [
+    {
+      key: "max_jobs",
+      label: "Jobs",
+      kind: "int",
+      default: 60,
+      hint: `Franchise-day product batches to schedule. Refused above ${JOBSHOP_MAX_JOBS}.`,
+    },
+    {
+      key: "max_time_in_seconds",
+      label: "Time limit (s)",
+      kind: "float",
+      default: 60,
+      hint: "Also the denominator for percent complete — see the payload note.",
+    },
+    { key: "seed", label: "Seed", kind: "int", default: 20260824 },
+    {
+      key: "use_sample_data",
+      label: "Use sample-catalog orders",
+      kind: "bool",
+      default: true,
+      hint: "On = real bakehouse transactions. Off = the deterministic generator.",
+    },
+    {
+      key: "workers",
+      label: "Solver workers",
+      kind: "int",
+      default: 0,
+      advanced: true,
+      hint: "0 means CP-SAT decides from available cores. Pin to 1 for a reproducible incumbent sequence.",
+    },
+    {
+      key: "deadline_minutes",
+      label: "Deadline (min)",
+      // INT, not float. The model reads it through `_optional_int`, so a
+      // float is silently truncated — 90.5 becomes 90 and nobody notices.
+      kind: "int",
+      advanced: true,
+      hint: "Omit for none. This is the ONLY way this model reaches INFEASIBLE — an open-horizon job shop can always run its jobs end to end.",
+    },
+    { key: "progress_every_s", label: "Progress interval (s)", kind: "float", default: 2, advanced: true },
+    {
+      key: "solver_log",
+      label: "Capture solver log",
+      kind: "bool",
+      default: true,
+      advanced: true,
+      hint: "Off costs cancellation latency, not just log volume: the log callback is what polls for cancel on a stalled search.",
+    },
+  ],
+};
+
+/**
+ * From `models/ortools_jobshop/model.py::_emit_progress`.
+ *
+ * `incumbent` and `best_bound` are nullable for the same reason as the Gurobi
+ * models', though by a different mechanism — CP-SAT's pre-search bound is a
+ * real infinity, nulled by `_finite`. `conflicts` and `branches` are ABSENT,
+ * not null, when the solver did not hand them over.
+ */
+export interface JobshopProgressPayload {
+  incumbent: number | null;
+  best_bound: number | null;
+  gap: number | null;
+  solutions_found: number;
+  wall_time: number;
+  n_jobs: number;
+  n_machines: number;
+  n_operations: number;
+  /** Literally "elapsed_solver_time_against_time_limit". The model names its
+   *  own basis in the record because the envelope has no label field for
+   *  percent_complete, and this is a TIME fraction, not a search fraction. */
+  percent_complete_basis: string;
+  final: boolean;
+  conflicts?: number;
+  branches?: number;
+  /** Only on the final sample. CP-SAT's own name: OPTIMAL / FEASIBLE /
+   *  INFEASIBLE / MODEL_INVALID / UNKNOWN — not a `RunStatus`. */
+  solver_status?: string;
+}
+/** `primary_metric_label` is **`relative_gap`**, deliberately not `mip_gap`:
+ *  same formula as the Gurobi driver, but this is not a MIP. `percent_complete`
+ *  is honest here and null only when no time limit is set. */
+
+/* ================================================================== *
+ * panel_fit
+ * ================================================================== */
+
+/** `models/panel_fit/model.py`. A closed set on purpose — a UI groups by
+ *  these, so they are not free text. */
+export const PANEL_FIT_FAILURE_REASONS = [
+  "too_few_observations",
+  "zero_predictor_variance",
+  "singular_design",
+  "non_finite_result",
+] as const;
+
+/** `GROUP_STATUSES`. Two values, so "how many failed" is one GROUP BY without
+ *  enumerating the reason set. */
+export const PANEL_FIT_GROUP_STATUSES = ["fitted", "failed"] as const;
+
+export const PANEL_FIT: ModelSpec = {
+  name: "panel_fit",
+  label: "Panel fit",
+  fields: [
+    {
+      key: "table",
+      label: "Panel table",
+      kind: "string",
+      default: "main.dbx_leaning.owid_country_year",
+      hint: "OWID-shaped country x year data. This table does NOT exist yet, so the default run uses the synthetic panel and says so in its provenance.",
+    },
+    { key: "response_column", label: "Response", kind: "string", default: "life_expectancy" },
+    { key: "predictor_column", label: "Predictor", kind: "string", default: "year", hint: "Defaults to the period column." },
+    { key: "group_column", label: "Group by", kind: "string", default: "entity" },
+    { key: "period_column", label: "Period", kind: "string", default: "year" },
+    { key: "degree", label: "Polynomial degree", kind: "int", default: 1, hint: "2 fits a curve — the Kuznets shape." },
+    { key: "limit", label: "Row limit", kind: "int", default: 20000 },
+    { key: "seed", label: "Seed", kind: "int", default: 24 },
+    {
+      key: "min_observations",
+      label: "Min observations / group",
+      kind: "int",
+      advanced: true,
+      hint: "Omit for degree + 2, the fewest points a fit of that degree can use.",
+    },
+    { key: "max_groups", label: "Max groups", kind: "int", advanced: true, hint: "Omit for all of them." },
+    { key: "chunk_size", label: "Result chunk size", kind: "int", default: 12, advanced: true },
+    { key: "progress_every", label: "Progress every N groups", kind: "int", default: 1, advanced: true },
+    { key: "failure_log_limit", label: "Failure log limit", kind: "int", default: 12, advanced: true },
+  ],
+};
+
+/**
+ * From `models/panel_fit/model.py`.
+ *
+ * The interesting field is the fitted/failed split, on EVERY progress message.
+ * No other model on this platform reports per-unit outcomes, and a client has
+ * to be able to tell a healthy run from one quietly failing a third of its
+ * groups without waiting for the results.
+ *
+ * `groups_fitted + groups_failed === groups_done`, always.
+ */
+export interface PanelFitProgressPayload {
+  groups_done: number;
+  groups_total: number;
+  groups_fitted: number;
+  groups_failed: number;
+  /** Reason -> count, keyed by `PANEL_FIT_FAILURE_REASONS`. */
+  failure_counts: Record<string, number>;
+  group_key: string;
+  group_label: string;
+  /** One of `PANEL_FIT_GROUP_STATUSES`. */
+  group_status: string;
+  group_failure_reason: string | null;
+  group_r_squared: number | null;
+  n_observations: number;
+  /** Rows the group HAD, against the ones that survived the null and
+   *  non-finite drop. The difference between "this unit is small" and "this
+   *  unit did not report", which is the first question about any failure. */
+  rows_seen: number;
+  metric_higher_is_better: boolean;
+  degree: number;
+  chunks_emitted: number;
+}
+/** `primary_metric` is the MEDIAN r-squared across fitted groups — median so
+ *  one pathological group cannot move a 180-group headline — and is null until
+ *  something has been fitted, which is legal. Higher is better here, unlike
+ *  forecasting. `percent_complete` is groups done over groups total, with no
+ *  estimation: the denominator is known before the first fit.
+ *
+ *  This model CHUNKS its results (`chunk_size` groups per chunk), so
+ *  `streaming_results` is no longer the only one that does. */
+
 export const MODEL_SPECS: readonly ModelSpec[] = [
   GUROBI_SCHEDULING,
   GUROBI_ROUTING,
@@ -681,6 +868,8 @@ export const MODEL_SPECS: readonly ModelSpec[] = [
   ANNEALING,
   BAYESIAN_AB,
   NEURAL_NET,
+  ORTOOLS_JOBSHOP,
+  PANEL_FIT,
 ];
 
 export type ModelName = (typeof MODEL_SPECS)[number]["name"];
