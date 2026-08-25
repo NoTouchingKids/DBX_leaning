@@ -43,6 +43,27 @@ export interface ConfigField {
   hint?: string;
 }
 
+/**
+ * What `models/_data`'s `Dataset.describe()` puts on a payload or a result
+ * row, for any model that carries provenance.
+ *
+ * Load-bearing, not bookkeeping: it is the only thing distinguishing a chart
+ * of measured data from a chart of invented data. Every loader here falls
+ * back to a deterministic generator when the real table is missing, and that
+ * fallback is silent by design — a run that never touched Unity Catalog looks
+ * exactly like one that did, apart from these four fields.
+ *
+ * `data_fallback_reason` is FREE TEXT and varies by environment — offline it
+ * reads "no Spark session (not running on a Databricks cluster)", on a
+ * workspace it names the table. Render it; never pattern-match it.
+ */
+export interface ProvenanceFields {
+  data_source: string;
+  data_synthetic: boolean | null;
+  data_rows: number;
+  data_fallback_reason: string | null;
+}
+
 export interface ModelSpec {
   name: string;
   label: string;
@@ -303,13 +324,13 @@ export const STREAMING_RESULTS: ModelSpec = {
   ],
 };
 
-export interface StreamingProgressPayload {
+export interface StreamingProgressPayload extends ProvenanceFields {
   windows_done: number;
   windows_total: number;
   origin: number;
-  /** The model spreads `**self._provenance` into the payload — so there are
-   *  EXTRA KEYS here beyond the three named ones. Do not write an exhaustive
-   *  destructure that assumes only these exist. */
+  /** The model spreads `**self._provenance` into the payload, which
+   *  `ProvenanceFields` now names. There may still be EXTRA KEYS beyond all
+   *  of these — do not write an exhaustive destructure that assumes not. */
   [key: string]: unknown;
 }
 /** `primary_metric` is `window_mae`. This is the model that emits `result`
@@ -799,6 +820,13 @@ export const PANEL_FIT: ModelSpec = {
     { key: "response_column", label: "Response", kind: "string", default: "life_expectancy" },
     { key: "predictor_column", label: "Predictor", kind: "string", default: "year", hint: "Defaults to the period column." },
     { key: "group_column", label: "Group by", kind: "string", default: "entity" },
+    {
+      key: "label_column",
+      label: "Group label",
+      kind: "string",
+      default: "code",
+      hint: "Feeds `group_label` — the display name a view shows for each group.",
+    },
     { key: "period_column", label: "Period", kind: "string", default: "year" },
     { key: "degree", label: "Polynomial degree", kind: "int", default: 1, hint: "2 fits a curve — the Kuznets shape." },
     { key: "limit", label: "Row limit", kind: "int", default: 20000 },
@@ -827,7 +855,7 @@ export const PANEL_FIT: ModelSpec = {
  *
  * `groups_fitted + groups_failed === groups_done`, always.
  */
-export interface PanelFitProgressPayload {
+export interface PanelFitProgressPayload extends ProvenanceFields {
   groups_done: number;
   groups_total: number;
   groups_fitted: number;

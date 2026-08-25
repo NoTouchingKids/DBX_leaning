@@ -604,13 +604,14 @@ describe("against src/dev/fixtures", () => {
       for (const state of STATES) {
         cleanup();
         const container = renderLattice(state, makeSnapshot("panel_fit", fixture, state));
-        // No error colour anywhere, in any of them. The fixture never emits an
-        // inconsistent payload, so the one legitimate use of `bad` in this
-        // view is unreachable here.
-        expect(container.innerHTML, `${fixture}/${state}`).not.toMatch(
-          /(^|[\s"])[a-z-]*-bad\b/,
-        );
         expect((container.textContent ?? "").length).toBeGreaterThan(20);
+        // A failed RUN is an error and is allowed to be red. A failed GROUP is
+        // not, and the distinction is the whole point — so the check is that
+        // red appears in exactly one state and nowhere else.
+        expect(
+          /(^|[\s"])[a-z-]*-bad\b/.test(container.innerHTML),
+          `${fixture}/${state}`,
+        ).toBe(state === "FAILED");
       }
     }
   });
