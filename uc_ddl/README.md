@@ -5,12 +5,18 @@ Apply in order. Idempotent — every statement is `IF NOT EXISTS`.
 ```bash
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/001_core_tables.sql
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/002_model_results.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/003_app_volume.sql
 ```
 
-| File | What |
-|---|---|
-| `001_core_tables.sql` | `run_status`, `run_events`, `run_logs`, `run_progress`, `run_results_meta` |
-| `002_model_results.sql` | One results table per model family |
+| File | What | Skipping it costs |
+|---|---|---|
+| `001_core_tables.sql` | `run_status`, `run_events`, `run_logs`, `run_progress`, `run_results_meta` | Every durable write fails at the end of a run |
+| `002_model_results.sql` | One results table per model family | That model's results are lost; its telemetry still lands |
+| `003_app_volume.sql` | `app_store`, the app's durable filesystem | `/healthz` reports `volume` degraded; nothing on the run path is affected |
+
+Only 001 is mandatory. 002 costs you a model's results; 003 is genuinely
+optional and degrades cleanly — see `resources/app.yml` for the grants that go
+with it.
 
 **Neither file has ever been executed.** `databricks bundle deploy` has never
 run against a workspace, so a syntax error in here would not have surfaced

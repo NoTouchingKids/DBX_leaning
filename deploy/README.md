@@ -17,7 +17,23 @@ entrypoints/run_model.py             what every job actually runs
 
 ## Before the first deploy
 
-**1. The tables.** Apply the DDL once — `uc_ddl/README.md`.
+Four things, in this order. Only the first two are required.
+
+**1. The Unity Catalog side — tables and the volume.** Apply the DDL once,
+in order; every statement is `IF NOT EXISTS`, so re-running is safe.
+
+```bash
+export DBX_WAREHOUSE_ID=7474655945367403          # matches databricks.yml's default
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/001_core_tables.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/002_model_results.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/003_app_volume.sql
+```
+
+`001` is the one that matters: it is where every run's telemetry lands, and
+without it a run fails at the end, after doing all the work. `002` is per-model
+results, `003` is the app's volume. See `uc_ddl/README.md` for what skipping
+each one costs, and for the `ALTER TABLE` note — `CREATE TABLE IF NOT EXISTS`
+does not add a column to a table that already exists.
 
 **2. The ingress secret.** The token a job presents to the app. The app reads
 it from a secret; the job never stores it at all — the app passes it per run
@@ -30,7 +46,29 @@ databricks secrets put-secret dbx-leaning app-token --string-value "$(openssl ra
 
 **3. A warehouse id**, for the app's read path only (backfill and startup
 reconciliation). Nothing writes through it — see `docs/architecture.md` on why
-the write path bypasses it entirely.
+the write path bypasses it entirely. Free Edition allows one, 2X-Small; its id
+is `databricks.yml`'s `warehouse_id` default and `app/app.yaml`'s
+`DBX_WAREHOUSE_ID`, and `tests/deploy/test_app_yaml.py` keeps those two equal.
+
+**4. Lakebase, optional but wanted** — the Postgres instance holding
+`run_status`. See the Lakebase section below for what leaving it out costs.
+It is a Databricks-side resource this bundle does not create:
+
+```bash
+databricks database create-database-instance dbx-leaning --capacity CU_1
+# waits for AVAILABLE by default; note `read_write_dns` in the output
+databricks database get-database-instance dbx-leaning -o json
+
+psql "host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslmode=require" \
+  -f lakebase_ddl/001_run_status.sql
+```
+
+`databricks database` is Public Preview and its flags may move; check
+`databricks database create-database-instance --help` if the above is refused.
+
+The app applies that schema at startup too, but a deploy that cannot reach the
+instance reports `degraded: lakebase` rather than failing — so do not use
+startup as proof the schema is there.
 
 ## Layout: `app/` is the whole app
 
