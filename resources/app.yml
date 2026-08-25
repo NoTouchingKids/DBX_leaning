@@ -125,5 +125,14 @@ resources:
           - name: DBX_APP_PUBLIC_URL
             value: ${var.app_public_url}
 
+          # `valueFrom`, camelCase — NOT `value_from`. Established by a real
+          # deploy, and worth stating because this repo previously believed
+          # the opposite: every other key in this file is snake_case, and
+          # `bundle validate` accepts both, so the wrong one is silently
+          # ignored and the app comes up with no ingress token. Which, per
+          # `app/routes/ingest.py::_authorised`, means an OPEN ingress — an
+          # empty token is the development posture that accepts everyone.
+          #
+          # `tests/deploy/test_bundle.py` asserts the spelling.
           - name: DBX_APP_TOKEN
             valueFrom: app-token

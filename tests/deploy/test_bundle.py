@@ -164,7 +164,12 @@ def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
     env = {e["name"]: e for e in app["config"]["env"]}
 
     assert "value" not in env["DBX_APP_TOKEN"], "the ingress token must not be a literal"
-    assert env["DBX_APP_TOKEN"]["valueFrom"] == "app-token"
+    # camelCase, unlike every other key in that file, and `bundle validate`
+    # accepts both spellings — so the wrong one is silently ignored and the
+    # app starts with no token, which `_authorised` treats as "accept
+    # everyone". Established by a real deploy, not by the schema.
+    assert env["DBX_APP_TOKEN"]["valueFrom"] == "app-token", "camelCase; snake_case is ignored"
+    assert "value_from" not in env["DBX_APP_TOKEN"], "snake_case is silently ignored here"
     secret = next(r for r in app["resources"] if r["name"] == "app-token")["secret"]
     assert secret["permission"] == "READ"
 
