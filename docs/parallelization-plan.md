@@ -5,7 +5,7 @@ them colliding, and in what order.
 
 **Where this stands.** The sequencing below has been run: the probes cleared
 (`docs/spike-results.md`), `shared/` landed and is frozen, and `job/`, `app/`
-and nine models are built and tested. What is still live is the *method* —
+and eleven models are built and tested. What is still live is the *method* —
 the file-disjointness rule, the shared-file warning about `pyproject.toml` and
 `uv.lock`, and the "freeze the contract before you fan out" discipline, which
 the frontend applied again for its own per-model views. Read the track table
@@ -20,9 +20,9 @@ Every other track depends on its shape. Building several things against a
 contract that's still moving means rework, not speed.
 
 The same rule has since been applied a second time, on the frontend:
-`frontend/src/components/models/contract.ts` was frozen before the nine
-per-model views were fanned out, for exactly this reason. When a fan-out is
-coming, find the contract it shares and freeze that first.
+`frontend/src/components/models/contract.ts` was frozen before the per-model
+views were fanned out, for exactly this reason. When a fan-out is coming, find
+the contract it shares and freeze that first.
 
 Practical sequencing:
 
@@ -47,22 +47,34 @@ branch = one Claude Code session.
 | `models/mcmc/` | `.claude/agents/model-mcmc.md` | `shared/` |
 | `models/streaming_results/` | `.claude/agents/model-streaming-results.md` | `shared/` |
 | `models/annealing/`, `models/bayesian_ab/`, `models/gurobi_routing/`, `models/neural_net/` | none — built after the pattern was established, from `models/README.md` and `/new-model` | `shared/` |
+| `models/ortools_jobshop/` — CP-SAT job shop, the open-source counterweight to the two Gurobi models: no licence file, no expiry, no size cap | none — same route, and later still | `shared/` |
+| `models/panel_fit/` — many small per-group fits, and the one model whose individual units may FAIL while the run SUCCEEDS | none — same route, and later still | `shared/` |
 | `frontend/` | `.claude/agents/frontend.md` | Explicitly low priority — start after `app/` + `job/` + one model work end to end |
 
-There are **nine** models on disk, not the five that got their own brief.
+There are **eleven** models on disk, not the five that got their own brief.
 `models/` on disk, `[tool.dbx-leaning.models]` in `pyproject.toml`, and
 `resources/model_*.job.yml` all have to agree; they are cross-checked in
 `tests/deploy/`. A brief per model turned out to be worth writing only while
 the contract was still being discovered — once `models/README.md` and
-`/new-model` existed, the later four needed no brief at all, and that is the
-signal to stop writing them rather than a gap to fill in.
+`/new-model` existed, the later six needed no brief at all, and that is the
+signal to stop writing them rather than a gap to fill in. Six is now enough
+of a run to call it settled rather than lucky, and the last two are the
+better evidence: `ortools_jobshop` and `panel_fit` arrived when there was
+considerably more surrounding platform to get wrong than there had been for
+the middle four — a registry in `pyproject.toml`, a job file, a generated
+requirements file, a results-table DDL — and `models/README.md` covered all
+of it.
 
 One brief describes a model that was never built:
 `.claude/agents/model-nyctaxi-demand.md`, the Spark-native aggregation
 proposed in `docs/model-expansion-and-packaging.md`. Its original
-justification is gone — all nine models now read `samples.nyctaxi.trips`
-through `models/_data` — so if it is ever built it is on the strength of its
-telemetry shape, not on closing a gap. See that document.
+justification is gone — nine of the eleven models read
+`samples.nyctaxi.trips` through `models/_data`, and the other two read
+elsewhere in Unity Catalog (`ortools_jobshop` builds its instance from
+`samples.bakehouse.sales_transactions`; `panel_fit` asks for a panel table
+nobody has landed and falls back to its generator) — so if it is ever built
+it is on the strength of its telemetry shape, not on closing a gap. See that
+document.
 
 The `models/*` tracks are the cleanest parallel case: same contract, zero
 file overlap, no dependency on each other or on `job`/`app` internals (a
@@ -130,9 +142,17 @@ subagent tool's own scheduling.
    end-to-end vertical slice.
 4. The remaining model tracks merge in any order once the first slice
    works; each is now just "does this model, plugged into the existing
-   harness, produce valid envelope messages and results." That held: four
-   more models (`annealing`, `bayesian_ab`, `gurobi_routing`, `neural_net`)
-   were added after the first five with no change to the harness.
+   harness, produce valid envelope messages and results." That held: six
+   more models (`annealing`, `bayesian_ab`, `gurobi_routing`, `neural_net`,
+   then `ortools_jobshop` and `panel_fit`) were added after the first five
+   with no change to the harness. `ortools_jobshop` is the sharpest test of
+   that claim, because it did surface a real gap: a CP-SAT solution callback
+   fires only on *improvement*, so a cancel went unseen on a hard instance
+   for the whole time limit. The fix was two more polls inside the model's
+   own callbacks, not a new hook in `job/` — which is what the duck-typed
+   contract is supposed to buy. Neither model touched `job/`, `app/` or
+   `shared/` at all; what they touched outside their own package is exactly
+   the registration list in `models/README.md`, one entry each.
 5. `frontend/` starts once step 3 is done, not before. That gate is met and
    the track has started — see `frontend/README.md` for where it is.
 

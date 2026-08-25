@@ -56,6 +56,14 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   on environment creation. Free Edition's restricted egress makes this risky
   unless the trusted-domain list is confirmed to include it. **This build
   uses the bundled restricted licence only — no WLS.**
+- **There is an escape hatch, and it is a different solver.**
+  `models/ortools_jobshop` runs on OR-Tools CP-SAT: Apache-2.0, CPU-only, no
+  licence file, no expiry date, nothing to contact, and **no variable or
+  constraint cap**. Every constraint in this section is a property of the
+  bundled Gurobi licence rather than of Free Edition, so a model that cannot
+  be sized to fit 2000/2000 — or that would be stranded by the expiry date —
+  has somewhere to go without asking the platform for anything. Its extra is
+  `ortools`, and only its own job environment installs it.
 
 ## Getting data in from outside
 
@@ -89,6 +97,18 @@ Whatever the route, the model still reads a table, and
 samples-specific. The synthetic fallback stays mandatory either way: it is
 what keeps a model runnable in tests and on a laptop, and it is the reason a
 missing table degrades instead of failing a run.
+
+`models/panel_fit` is what that looks like in practice, and it is worth
+reading before landing anything. It names
+`main.dbx_leaning.owid_country_year` as its default table — a table nobody
+has created — so *every* run at the default configuration takes the fallback
+and reports it: logged at the `input` phase, and stamped on every result row
+as `data_source` / `data_synthetic` / `data_rows` / `data_fallback_reason`.
+Nothing about that is a failure state. Pointing a model at the table it
+actually wants, and having the run say plainly that the table was not there,
+is a better position than pointing it at whatever happens to exist — and it
+means landing the CSV is the only step between here and real data, with no
+code change at all.
 
 ## Delta / Unity Catalog external writes
 

@@ -28,8 +28,8 @@ hour. A column list cannot catch either.
 
 | Schema | Tables | What it looks like |
 |---|---|---|
-| `nyctaxi` | `trips` | **In use today.** The one the current loaders read |
-| `bakehouse` | `sales_transactions`, `sales_customers`, `sales_franchises`, `sales_suppliers`, `media_customer_reviews`, `media_gold_reviews_chunked` | Retail transactions across franchises |
+| `nyctaxi` | `trips` | **In use today.** What the two loaders in `models/_data/datasets.py` read, and with them nine of the eleven models |
+| `bakehouse` | `sales_transactions`, `sales_customers`, `sales_franchises`, `sales_suppliers`, `media_customer_reviews`, `media_gold_reviews_chunked` | Retail transactions across franchises. **Also in use today**: `models/ortools_jobshop` builds its job-shop instance from `sales_transactions` |
 | `accuweather` | `historical_hourly_{metric,imperial}`, `forecast_hourly_*`, `historical_daily_calendar_*`, `forecast_daily_calendar_*`, `historical_daynight_*`, `forecast_daynight_*` | Hourly and daily weather, historical **and** forecast |
 | `wanderbricks` | `bookings`, `booking_updates`, `clickstream`, `page_views`, `payments`, `properties`, `property_amenities`, `property_images`, `amenities`, `reviews`, `users`, `hosts`, `employees`, `destinations`, `countries`, `customer_support_logs` | A travel-booking business, end to end |
 | `tpcds_sf1` / `tpcds_sf1000` | 24 tables each — `store_sales`, `catalog_sales`, `web_sales`, `date_dim`, `item`, `customer`, … | TPC-DS at two scale factors |
@@ -55,8 +55,8 @@ one of `accuweather`'s twelve, and nothing whatsoever for `nyctaxi`, `tpch`,
 The pattern is not alphabetical, not a row cap, and not a permissions
 boundary visible from here. It does not matter *why*: what matters is that
 **absence from `columns` is not evidence of absence.** `samples.nyctaxi.trips`
-— the table every model in this repo reads today — returns no rows from
-`columns` and is listed in `tables`.
+— the table nine of this repo's eleven models read today — returns no rows
+from `columns` and is listed in `tables`.
 
 `scripts/probe_sample_data.py` originally treated the two as interchangeable
 and would have reported `nyctaxi.trips` as NOT PRESENT. It now takes existence
@@ -213,6 +213,15 @@ carries them too, per city.
 what a demand curve per franchise per hour needs — and `sales_franchises`
 joins to it on `franchiseID` with a `size` column that plausibly bounds staff.
 
+**And it has since been taken up, by a different model than expected.**
+`models/ortools_jobshop` reads this table now — grouping by franchise,
+product and day, and using `SUM(quantity)` as the size of a job. It is the
+first model in the repo that actually reads a table other than
+`nyctaxi.trips`, and the
+reason it could be written at all is that this listing exists: a loader
+written against a column list rather than a guess. `gurobi_scheduling`'s own
+rework is still open.
+
 One trap in it: `unitPrice`, `totalPrice` and `quantity` are all `LONG`, not
 decimal. Money as an integer is fine to sum but is almost certainly minor
 units or a rounded value; check the magnitudes before dividing by anything.
@@ -237,13 +246,26 @@ So the table below is now a list of *candidates within `samples`*, not a list
 of the only choices. Several of its "worth considering" entries were written
 under the old restriction and may have better answers outside the catalog.
 
+`models/panel_fit` is the first model to take that up, and it is worth being
+precise about what it proves and what it does not. It proves the *code* path:
+its loader validates a caller-supplied three-part table name and reads it
+through `models._data.load()`, no change to that module required. It proves
+nothing about the *data* path, because the table it names has never been
+landed, so the read has never happened. That is exactly the split this
+section describes — the restriction that lifted was the project's own, and
+the platform one (get it into Unity Catalog first) has not.
+
 ## Where the models point today, and where they arguably should
 
-All nine models read `samples.nyctaxi.trips` — through one of the two loaders
-in `models/_data/datasets.py`, `nyc_taxi_hourly()` (hourly volume and average
-fare) or `nyc_taxi_trips()` (individual trips: distance, fare, duration).
-That was chosen when it was the only table known to exist. Now that the
-catalog is visible, some of those choices look weaker than the alternatives:
+Nine of the eleven models read `samples.nyctaxi.trips` — through one of the
+two loaders in `models/_data/datasets.py`, `nyc_taxi_hourly()` (hourly volume
+and average fare) or `nyc_taxi_trips()` (individual trips: distance, fare,
+duration). That was chosen when it was the only table known to exist. Now
+that the catalog is visible, some of those choices look weaker than the
+alternatives — and the two models added most recently did not make it, which
+is the first evidence that this section is a live list rather than a wish:
+`ortools_jobshop` reads `bakehouse` and `panel_fit` points outside the
+catalog entirely.
 
 | Model | Today | Worth considering | Why |
 |---|---|---|---|
@@ -256,6 +278,8 @@ catalog is visible, some of those choices look weaker than the alternatives:
 | `bayesian_ab` | taxi hourly (weekend vs weekday fare) and taxi trips (long-trip speed) | `bakehouse.media_customer_reviews`, `wanderbricks.reviews` | The two comparisons are honest but contrived from a table with no A/B in it. Reviews or bookings carry a real two-arm split |
 | `neural_net` | taxi trips: pace class from distance alone | fine as-is | The three usable columns are near-deterministic in each other (a taxi meter is a formula), so the model deliberately withholds the leaky ones — see `EXCLUDED_COLUMNS` in `models/neural_net/model.py`. A wider table would give it more to learn from, but the current shape is a considered choice, not a default |
 | `annealing` | taxi trips as knapsack items | fine as-is | Fare as value, duration as weight, capacity as a shift length. Arbitrary but legitimate, and the point of this model is the empty dependency extra, not the data |
+| `ortools_jobshop` | `bakehouse.sales_transactions` — **already there** | fine as-is | A job is one franchise's sales of one product on one day; `SUM(quantity)` drives every duration. **Columns verified**, which is why it exists. `unitPrice` and `totalPrice` are deliberately never selected — both `LONG`, and the money trap noted above it is unresolved |
+| `panel_fit` | nothing in this catalog: it asks for `main.dbx_leaning.owid_country_year`, which does not exist, so every default run falls back to its own generator and says so in its provenance | land an OWID country x year CSV in Unity Catalog under any name, then set `{"table": …}` in the model config | The only model whose upgrade is a one-off human step rather than a loader — the code to read a real table is already written and validated. Whether anything already in `samples` is panel-shaped enough to serve instead has not been looked at |
 
 **None of this is worth changing on inference.** Each would need the actual
 columns first, which is one probe run away. The current loaders work and are

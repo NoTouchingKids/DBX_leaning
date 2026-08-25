@@ -134,11 +134,27 @@ fit for `gurobi_scheduling` (transactions per franchise per hour is a staffing
 demand curve, which taxi trips are not). See `sample-data-inventory.md` for
 the full column listing and the `LONG`-money trap.
 
+**It is also the one entry on this page that has stopped being a
+proposal.**
+`models/ortools_jobshop` reads `sales_transactions` today: a job is one
+franchise's sales of one product on one day, and `SUM(quantity)` is what
+drives every duration in the instance. That it was written against a verified
+column listing rather than a guess is the whole reason it could be, and it is
+worth knowing what the verification bought — the model deliberately touches
+neither `unitPrice` nor `totalPrice`, because both are `LONG` and nothing
+confirms whether that is minor units or a rounded figure. Verified columns do
+not make every column usable; they make it possible to say which ones are
+not.
+
 ### `nyctaxi.trips`
 
-What all nine models read today. One table. Its columns are **not** in
+What nine of the eleven models read today, through the two loaders in
+`models/_data/datasets.py`. One table. Its columns are **not** in
 `information_schema.columns` — absence there means nothing, see the inventory
-— and the loaders' three columns have never been confirmed against it.
+— and the loaders' three columns have never been confirmed against it. The
+two exceptions are `ortools_jobshop` (`bakehouse`, above) and `panel_fit`,
+whose table does not exist at all — see the last two rows of the per-model
+table below.
 
 ## Route 2: datasets bundled in a wheel
 
@@ -249,7 +265,7 @@ page's value is as a curated list of sources known to work in CSV form:
 
 | Source | Notes |
 |---|---|
-| [OWID Dataset Collection](https://github.com/owid/owid-datasets) | Our World in Data, on GitHub. Wide, clean, long time series across many domains — the strongest ML candidate on the list |
+| [OWID Dataset Collection](https://github.com/owid/owid-datasets) | Our World in Data, on GitHub. Wide, clean, long time series across many domains — the strongest ML candidate on the list, and the one with a model already waiting for it: `models/panel_fit` defaults to `main.dbx_leaning.owid_country_year`, a name nobody has landed |
 | [Data.gov CSV datasets](https://catalog.data.gov/dataset/?res_format=CSV) | Very large catalogue, quality varies a lot by publisher |
 | [The Squirrel Census](https://www.thesquirrelcensus.com/data) | Small and charming; a classification toy, not a training set |
 | Kaggle: Diamonds | ~54k rows, classic tabular regression. Needs a Kaggle account |
@@ -283,7 +299,12 @@ plus a config field, and the synthetic fallback stays mandatory regardless.
 | `scenario` | taxi baseline | `wanderbricks.bookings` | Booking demand has natural scenario levers |
 | `mcmc` | fare ~ distance | fine as-is | A real regression with a plausible slope |
 | `annealing` | taxi trips as knapsack items | fine as-is | The point of this model is the empty dependency extra, not the data |
+| `ortools_jobshop` | `bakehouse.sales_transactions` — **already** | fine as-is | The only model on this platform reading real data that is not taxi data. Grouping, job size and product mix are read; the stage recipes and every rate are invented and labelled as such in `instance.py` |
+| `panel_fit` | its own synthetic panel, always | an OWID CSV landed in UC under any name, then `{"table": …}` in the model config | The one row here whose upgrade is a *human* step rather than a loader. `DEFAULT_PANEL_TABLE` names a table that does not exist, so every default run falls back and says so in its provenance |
 
-The two `bakehouse` rows are the only ones whose columns are confirmed. Every
-other row needs a `DESCRIBE` first — which is what `scripts/probe_sample_data.py`
-now does for tables `information_schema.columns` skips.
+The three `bakehouse` rows are the only ones whose columns are confirmed.
+Every other row needs a `DESCRIBE` first — which is what
+`scripts/probe_sample_data.py` now does for tables
+`information_schema.columns` skips. The `panel_fit` row is a different kind
+of unknown: not a table whose columns are unverified, but a table that is
+not there, which the model already handles by degrading rather than failing.

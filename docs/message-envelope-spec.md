@@ -98,6 +98,22 @@ that update, not the record of truth.
 | `status` | enum | `QUEUED` \| `RUNNING` \| `SUCCEEDED` \| `FAILED` \| `CANCELLED` \| `INFEASIBLE` (extend per model family only if genuinely needed — prefer reusing these) |
 | `detail` | string, optional | Free text, e.g. `"run complete"`, an error summary |
 
+`INFEASIBLE` has turned out to be less solver-specific than it looks, which
+is worth recording because it is the argument for reusing these six rather
+than growing the enum. `models/panel_fit/` returns it when *every* group in
+a panel failed to fit: not `SUCCEEDED`, because zero fits is not a success
+and `row_count` cannot disambiguate it (failures are recorded as rows, so an
+all-failed run has a healthy-looking count); not `FAILED`, because nothing
+went wrong — the run completed, the results are correct and durable, and a
+retry would produce the same thing deterministically. "It ran, and the answer
+is that there isn't one" is exactly what a MILP means by the word.
+
+The same model is why per-unit outcomes need no envelope change either. A run
+where 9 of 48 units failed is a `SUCCEEDED` run whose `progress.payload`
+carries `groups_fitted` / `groups_failed` / `failure_counts` on every message
+— free-form by design, and a client can tell it apart from a healthy run
+without the envelope having a concept of a unit.
+
 ## `result`
 
 **Not best-effort.** Written whenever the model's code reaches the point of
@@ -120,8 +136,12 @@ nothing.
 A model that produces results in chunks (a rolling-origin backtest, chunked
 batch inference) emits one `result` message **per chunk**, each with its own
 `chunk_index` and its own `row_count` — that chunk's count, never a running
-total. `models/streaming_results/` is the model that exercises this, and its
-tests fail loudly if the harness stops supporting it.
+total. `models/streaming_results/` is the model this was added for, and its
+tests fail loudly if the harness stops supporting it. It is no longer the
+only one: `models/panel_fit/` emits a chunk every `chunk_size` groups, which
+is what keeps a 48-group run from being silent until the end. Two
+independent users of a field is roughly where "a feature one model needed"
+becomes "part of the contract", so treat it as the latter.
 
 The rows themselves never travel on the message. A model calls
 `emit("result", rows=[...])` and the harness writes them to the model's

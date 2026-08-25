@@ -51,6 +51,13 @@ Read `CLAUDE.md`, `docs/message-envelope-spec.md`, and
 
 ## What this model is, and why it's in the lineup
 
+RETRACTED PREMISE — this paragraph was true when written and is not now.
+Every model in the repo reads a real Unity Catalog table through
+`models/_data`, with provenance on every result row; the fallback to a
+deterministic generator is a degraded path that says so, not the design.
+`docs/model-expansion-and-packaging.md`'s status note 1 records the same
+retraction. What follows is preserved as the original argument.
+
 Every one of the first five models deliberately uses synthetic, in-memory
 data — each one's own docstring says so ("no deep-learning stack for a
 platform test," "small on purpose"). None of them reads a real Unity

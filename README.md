@@ -32,7 +32,10 @@ don't, so they go first.
 `docs/parallelization-plan.md` has the worktree-per-track breakdown. Short
 version: build `shared/` (the message envelope) once, sequentially, then
 fan out — one Claude Code session per track (`app/`, `job/`, and one per
-model in `models/`), each briefed from its file in `.claude/agents/`.
+model in `models/`). The first five model tracks were briefed from a file in
+`.claude/agents/`; once `models/README.md` and `/new-model` existed the
+later six needed no brief at all, which is why there are fewer briefs there
+than models.
 
 ## What's here
 
@@ -48,16 +51,16 @@ job/                   The harness: model loader, thread->loop crossing, WS clie
                        with HTTP-push fallback, Delta writer, cancellation
 app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
                        backfill, startup reconciliation, ServiceHub/DI
-models/                Nine model packages. See models/README.md for the
+models/                Eleven model packages. See models/README.md for the
                        duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
 lakebase_ddl/          Postgres DDL (run state) — applied at startup too
-databricks.yml         Asset bundle: nine jobs (one per model) and the app
+databricks.yml         Asset bundle: eleven jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
 entrypoints/           What a Databricks job actually runs
 frontend/              React SPA. Transport spine done; shell in progress
-tests/                 ~585 tests, none needing a Databricks connection
+tests/                 ~790 tests, none needing a Databricks connection
 scripts/               dev_stack.py — the whole platform locally, no workspace
                        dev_launcher.py — its stand-in for the Jobs API
                        check_gurobi_licence.py — the bundled-licence expiry
@@ -116,7 +119,7 @@ uv run python scripts/dev_stack.py      # app + job launcher + registry
 cd frontend && pnpm dev                 # in a second terminal
 ```
 
-Then click Run on any of the nine models. That goes through `POST /api/runs`,
+Then click Run on any of the eleven models. That goes through `POST /api/runs`,
 which launches the real `job/` harness in its own OS process, which attaches
 over the real WebSocket ingress and streams real envelope messages back over
 the real SSE endpoint. It is the shipped code, not a mock server and not
@@ -176,13 +179,13 @@ id), `DATABRICKS_HOST`, and — to be observed rather than merely run —
 
 ## State of play
 
-`shared/`, `job/`, `app/` and all nine models are built and tested, and
+`shared/`, `job/`, `app/` and all eleven models are built and tested, and
 **WebSocket and SSE are both confirmed working through the Databricks Apps
 ingress** — the question that stayed open across all three builds of this
 platform (`docs/spike-results.md`). The transport in `docs/architecture.md` is
 the one being built, not a hopeful guess.
 
-Deployment exists as an Asset Bundle — nine jobs, one per model, each with
+Deployment exists as an Asset Bundle — eleven jobs, one per model, each with
 its own serverless environment and dependency list exported from `uv.lock`.
 See `deploy/README.md`.
 

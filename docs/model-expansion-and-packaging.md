@@ -2,7 +2,7 @@
 
 Two related follow-ups: what the next model should be, and fixing the fact
 that every job currently ships the entire repo instead of just what it needs.
-Written 2026-08-23 against a repo that had five models; it now has nine, and
+Written 2026-08-23 against a repo that had five models; it now has eleven, and
 the status note below says which of this document's premises that broke.
 
 > **Status note.** Four of this document's premises have been overtaken by
@@ -13,22 +13,33 @@ the status note below says which of this document's premises that broke.
 >
 > 1. **"All five existing models deliberately use synthetic, in-memory data …
 >    none of them reads a real Unity Catalog table" is no longer true.** Every
->    model now reads `samples.nyctaxi.trips` through `models/_data`, using the
->    job's Spark session, falling back to deterministic synthetic data off
->    workspace. So the gap this doc gives as the main reason for a 6th model —
->    "nothing currently proves a job can cheaply read real UC data via Spark"
->    — is already closed. `nyctaxi_demand` may still be worth building, but on
->    its *telemetry shape* (Spark stage/task progress, a time × zone matrix
->    result) rather than on that justification. It has an agent brief
->    (`.claude/agents/model-nyctaxi-demand.md`) and no code.
-> 2. **"Five models" is wrong throughout the body: there are nine.**
->    `gurobi_scheduling`, `gurobi_routing`, `scenario`, `forecasting`, `mcmc`,
->    `bayesian_ab`, `neural_net`, `streaming_results`, `annealing` — all
->    registered in `[tool.dbx-leaning.models]` and all with a job file under
->    `resources/`. Four of them (`annealing`, `bayesian_ab`, `gurobi_routing`,
->    `neural_net`) postdate this document, and `neural_net` is the one that
+>    model now reads a real Unity Catalog table through `models/_data`, using
+>    the job's Spark session, falling back to deterministic synthetic data off
+>    workspace. Nine of the eleven read `samples.nyctaxi.trips`;
+>    `ortools_jobshop` reads `samples.bakehouse.sales_transactions`; and
+>    `panel_fit` asks for a panel table nobody has landed, which is the same
+>    code path arriving at the fallback every time. So the gap this doc gives
+>    as the main reason for a 6th model — "nothing currently proves a job can
+>    cheaply read real UC data via Spark" — is closed twice over, since the
+>    read is no longer even single-table. `nyctaxi_demand` may still be worth
+>    building, but on its *telemetry shape* (Spark stage/task progress, a
+>    time × zone matrix result) rather than on that justification. It has an
+>    agent brief (`.claude/agents/model-nyctaxi-demand.md`) and no code.
+> 2. **"Five models" is wrong throughout the body: there are eleven.**
+>    `gurobi_scheduling`, `gurobi_routing`, `ortools_jobshop`, `scenario`,
+>    `forecasting`, `mcmc`, `bayesian_ab`, `neural_net`, `streaming_results`,
+>    `annealing`, `panel_fit` — all registered in `[tool.dbx-leaning.models]`
+>    and all with a job file under `resources/`. Six of them postdate this
+>    document: `annealing`, `bayesian_ab`, `gurobi_routing`, `neural_net`,
+>    then `ortools_jobshop` and `panel_fit`. `neural_net` is the one that
 >    finally makes the per-model dependency split pay for itself: torch
 >    reaches exactly one job environment, which `tests/deploy/` asserts.
+>    `ortools_jobshop` is the second such case, at a smaller scale: `ortools`
+>    installs to ~79 MB against torch's ~1.1 GB (measured in this repo's own
+>    venv), so it is not the argument the split was made for, but it is ten
+>    job environments' worth of a dependency none of them import. It also
+>    removes the ceiling this document was written under, since CP-SAT has no
+>    variable or constraint cap and no licence expiry.
 > 3. **The `samples` inventory here is incomplete.** It was inferred from
 >    Databricks docs; `docs/sample-data-inventory.md` was listed from the
 >    actual workspace and additionally contains `accuweather`, `bakehouse`,
@@ -103,9 +114,9 @@ up.
 ## Per-job packaging: stop shipping the whole repo to every job
 
 **The gap, precisely:** `pyproject.toml`'s per-model *dependency* scoping
-already exists and is correct — the `gurobi`, `forecasting`, `mcmc`,
-`bayesian`, `nn`, `scenario`, `streaming` and (deliberately empty)
-`annealing` extras each pull in only that model's own libraries.
+already exists and is correct — the `gurobi`, `ortools`, `forecasting`,
+`mcmc`, `bayesian`, `nn`, `panel`, `scenario`, `streaming` and (deliberately
+empty) `annealing` extras each pull in only that model's own libraries.
 What's missing is *source* scoping: `[tool.setuptools] packages = ["shared",
 "app", "job", "models"]` means any wheel built from this repo bundles the
 entire `models/` package — every model's source code — regardless of which
@@ -144,9 +155,13 @@ delta-rs real.
 One naming gotcha worth knowing about going in: the `models/` directory
 name and the `pyproject.toml` extra name don't always match
 (`models/gurobi_scheduling` ↔ extra `gurobi`; `models/streaming_results` ↔
-extra `streaming`; `models/neural_net` ↔ extra `nn`), and two models share
-one extra (`gurobi_scheduling` and `gurobi_routing`, deliberately — one
-gurobipy pin, one bundled-licence expiry, two jobs).
+extra `streaming`; `models/neural_net` ↔ extra `nn`;
+`models/ortools_jobshop` ↔ extra `ortools`; `models/panel_fit` ↔ extra
+`panel`), and two models share one extra (`gurobi_scheduling` and
+`gurobi_routing`, deliberately — one gurobipy pin, one bundled-licence
+expiry, two jobs). The mismatch is now the majority case rather than the
+exception, which is the argument for reading it out of the registry instead
+of deriving it.
 
 **Where that map lives has since moved, and this is the correction most
 likely to trip someone grepping.** This document described a
@@ -180,8 +195,8 @@ exported from `uv.lock`. So dependency scoping is solved and source scoping
 is not — every job's synced tree still contains every model's source. That
 is a smaller problem than it was when this was written (a synced tree costs
 workspace storage, not install time, and the per-model requirements already
-stop torch reaching the other eight jobs), which is why it has not been
-urgent.
+stop torch — and `ortools` — reaching the ten jobs that import neither),
+which is why it has not been urgent.
 
 Switching to wheels is therefore a change to a working bundle rather than a
 choice made from scratch, and it needs one thing this document does not

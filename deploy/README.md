@@ -1,8 +1,9 @@
 # Deploying
 
-One Databricks Asset Bundle: **five jobs and one app**. Each model is its own
-job with its own serverless environment and its own dependency list — the MCMC
-job does not carry gurobipy, and a model that later needs GPU compute changes
+One Databricks Asset Bundle: **eleven jobs and one app**. Each model is its
+own job with its own serverless environment and its own dependency list — the
+MCMC job does not carry gurobipy, the ten jobs that need neither torch nor
+ortools carry neither, and a model that later needs GPU compute changes
 its own file and nothing else.
 
 ```

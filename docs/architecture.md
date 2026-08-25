@@ -148,6 +148,15 @@ scheduling model with genuine branch-and-bound behaviour to stream. See
 `docs/free-edition-constraints.md` for the licence-expiry gotcha that comes
 with this choice.
 
+The cap and the expiry are both real costs, and `models/ortools_jobshop` is
+what pays neither: CP-SAT is Apache-2.0, has no licence file, no expiry date,
+nothing to reach over the network, and no size limit. That is not an argument
+for dropping Gurobi — the two solve different problems with different search
+paradigms, and the contrast between a MIP callback and a solution callback is
+itself worth having on a platform whose subject is telemetry. It is the
+answer to "what happens when a model outgrows the restricted licence", which
+until it existed was "nothing good".
+
 ## Why Spark writes Delta, and delta-rs does not
 
 This one changed shape after it was designed, and the change is worth

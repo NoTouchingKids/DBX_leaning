@@ -112,7 +112,8 @@ for it:
 - `models/_data.load()` was never samples-specific. It takes arbitrary SQL
   and a `source` label, so any Unity Catalog table works today with no change
   to this module. Only the two loaders in `datasets.py` hardcode
-  `samples.nyctaxi.trips`; a new loader beside them is the whole job.
+  `samples.nyctaxi.trips`; a new loader is the whole job, and two models have
+  since written one — see the loader paragraph below for where they put it.
 - **A model cannot fetch data over the internet at run time.** Free Edition
   restricts outbound traffic to trusted domains, and that restriction has not
   lifted — it is the same one that rules out Gurobi's WLS licence. "External
@@ -122,10 +123,17 @@ for it:
   laptop and hang or fail on the job. See `docs/free-edition-constraints.md`.
 
 Whatever the source, the three rules below still apply, and the fallback is
-still what keeps a model runnable offline.
+still what keeps a model runnable offline. It can also be the *only* path a
+model ever takes: `panel_fit`'s `DEFAULT_PANEL_TABLE` deliberately names
+`main.dbx_leaning.owid_country_year`, which nobody has landed, so every run
+at the default configuration falls back to its generator and says so in its
+provenance. Naming the table the model actually wants, and reporting the
+fallback loudly, beats pointing at something that exists but is the wrong
+shape — but it does mean a generator built to be worth fitting rather than
+merely present.
 
-There are two loaders today, both over `samples.nyctaxi.trips`, and both
-return a `Dataset`:
+There are two loaders in `models/_data/datasets.py` today, both over
+`samples.nyctaxi.trips`, and both return a `Dataset`:
 
 ```python
 from models._data import epoch_ms, nyc_taxi_hourly, nyc_taxi_trips
@@ -150,6 +158,16 @@ scenario, streaming); `nyc_taxi_trips` picks the row-per-observation shape
 comparison. Nothing stops a new model adding a third loader to
 `models/_data/datasets.py` — one function per *dataset*, not per model, so
 two models asking the same question get the same shape.
+
+Two models read neither loader, and where they put their own is the pattern
+to copy. `ortools_jobshop` builds its shop floor from
+`samples.bakehouse.sales_transactions` (`instance.py`), and `panel_fit` fits
+a country x year panel (`panel_data.py`); both call `models._data.load()`
+directly with their own SQL. They live in their own package because
+`datasets.py`'s rule is one function per *dataset* and each of those datasets
+has exactly one consumer today. The moment a second one appears, the loader
+moves next to the taxi pair unchanged — it already goes through `load()`, so
+there is nothing to rewrite.
 
 Three rules that come out of this, learned the hard way:
 

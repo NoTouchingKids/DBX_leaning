@@ -8,12 +8,13 @@ map, not the territory. If something here conflicts with a file in `docs/`,
 
 A reusable internal platform on **Databricks Free Edition**: a React SPA +
 async FastAPI app triggers and observes long-running analytical models —
-nine of them today: two Gurobi MILPs (scheduling, routing), scenario
-modelling, ML forecasting, MCMC, a conjugate Bayesian A/B comparison, a small
-torch classifier, a chunked rolling backtest and a simulated-annealing
-knapsack — that run as independent Databricks Jobs. Live progress, logs and
-results stream back to the browser. Durable state lands in Unity Catalog via
-Delta.
+eleven of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
+CP-SAT job shop, scenario modelling, ML forecasting, MCMC, a conjugate
+Bayesian A/B comparison, a small torch classifier, a chunked rolling
+backtest, a simulated-annealing knapsack and a bank of per-group curve fits
+over panel data — that run as independent Databricks Jobs. Live progress,
+logs and results stream back to the browser. Durable state lands in Unity
+Catalog via Delta.
 
 This is a **rewrite**, not the first attempt. Two earlier builds exist in
 this project's history (a Flask+Streamlit polling POC, then a FastAPI+
@@ -127,7 +128,9 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **Gurobi: bundled restricted licence only for this build.** No WLS. Cap is
   2000 variables / 2000 constraints (200 quadratic) — size models to fit.
   The bundled licence has **a fixed expiry per gurobipy release**; whatever
-  version is pinned, record its expiry next to the pin.
+  version is pinned, record its expiry next to the pin. A problem that will
+  not fit has somewhere to go: `models/ortools_jobshop` is CP-SAT,
+  Apache-2.0, with no licence file, no expiry and no size cap at all.
 - **Delta writes go through Spark**, behind one `write_batch(table, rows)`
   interface, implementation chosen once at startup. delta-rs remains the
   target but is **not implemented and must not be selected**: it takes a
@@ -151,11 +154,13 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 ```
 app/            FastAPI application (async, SSE, ServiceHub, whoami)
 job/            Job harness (WS client, HTTP push, Delta writer, model loader)
-models/         One package per model — nine of them: gurobi_scheduling/,
-                gurobi_routing/, scenario/, forecasting/, mcmc/,
-                bayesian_ab/, neural_net/, streaming_results/, annealing/
-                (plus _data/, the shared samples-catalog loaders).
-                Registered in [tool.dbx-leaning.models] in pyproject.toml
+models/         One package per model — eleven of them: gurobi_scheduling/,
+                gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
+                mcmc/, bayesian_ab/, neural_net/, streaming_results/,
+                annealing/, panel_fit/ (plus _data/, the shared
+                samples-catalog loaders — ortools_jobshop and panel_fit
+                bring their own). Registered in [tool.dbx-leaning.models]
+                in pyproject.toml
 shared/         The message envelope + protocol helpers, imported by both
                 app/ and job/ (and indirectly by models/ via the callback
                 they're handed — models never import shared/ directly)
