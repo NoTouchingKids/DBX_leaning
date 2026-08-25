@@ -80,13 +80,22 @@ resources:
             permission: WRITE_VOLUME
 
       config:
+        # Mirrors `app/app.yaml`, which is what the runtime reads when the
+        # app is deployed any way OTHER than by this bundle — the Apps UI, or
+        # `databricks apps deploy --source-code-path ...`. Neither file can
+        # see the other, so `tests/deploy/test_app_yaml.py` asserts they
+        # agree; a command that differs between the two ways of deploying is
+        # the kind of thing that is only ever discovered in production.
         command:
           - uvicorn
           - server.main:app
           - --host
           - 0.0.0.0
           - --port
-          - "8000"
+          # NOT a hardcoded 8000. Databricks Apps assigns the port; binding
+          # anything else means its health check never connects and the
+          # deployment is marked failed with the process running fine.
+          - $DATABRICKS_APP_PORT
         env:
           # The built SPA. `app/client/` is the SOURCE and never deploys;
           # `app/client/vite.config.ts` writes `../dist`, so the output lands

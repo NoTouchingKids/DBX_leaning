@@ -50,6 +50,7 @@ DBX_leaning/
 │   │   └── src/
 │   ├── dist/            the built SPA. Committed. server/spa.py serves it.
 │   ├── shared/          a TRACKED COPY of ../shared — see below
+│   ├── app.yaml         command + env, read by the RUNTIME — see below
 │   └── requirements.txt where Databricks Apps looks for it
 ├── job/                 <- the job unit: harness + payload + its own floor
 │   ├── models/          eleven model packages, plus _data/
@@ -111,6 +112,43 @@ If a previous run put `.venv` in the workspace, delete it there once:
 ```bash
 databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
 ```
+
+## Two ways to deploy, two files
+
+`app/app.yaml` and `resources/app.yml` declare the same command and env, and
+which one is read depends on how the app is deployed:
+
+| how | reads |
+| --- | --- |
+| `databricks bundle deploy` | `resources/app.yml` — can interpolate `${var.*}` and job ids |
+| Apps UI, `databricks apps deploy --source-code-path ...` | `app/app.yaml`, out of the source folder |
+
+Deploying the second way without an `app.yaml` fails before the process
+starts:
+
+```
+No command to run and no Python file found.
+Please add a 'command' field to your app.yml file.
+```
+
+`tests/deploy/test_app_yaml.py` compares the two files so they cannot drift
+into behaving differently. Watch the spelling — it differs by file, and both
+are correct in their own:
+
+```
+app/app.yaml       (the runtime reads it)  ->  valueFrom
+resources/app.yml  (the bundle declares)   ->  value_from
+```
+
+**`DBX_JOB_IDS` is only in the bundle.** Job ids do not exist until the bundle
+creates the jobs, so a hand deploy cannot have them: `/healthz` reports "no
+DBX_JOB_IDS configured; no model can be triggered from this app", and
+everything else — observing runs someone else triggered, streaming, history,
+results — works normally. Use `databricks bundle deploy` to get triggering.
+
+**Bind `$DATABRICKS_APP_PORT`, never a literal.** Apps assigns the port. Bind
+anything else and the platform's health check never connects, so the
+deployment is marked FAILED while the app process runs fine.
 
 ## The app's volume
 

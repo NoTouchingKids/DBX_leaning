@@ -163,6 +163,10 @@ app/            THE DEPLOYED APP — everything it needs, nothing else. This
                 UI is silently stale
   shared/       A TRACKED COPY of shared/ — `scripts/sync_shared.py` makes it,
                 `tests/deploy/test_shared_copy.py` fails when it drifts
+  app.yaml      Command + env read by the RUNTIME. `resources/app.yml` says
+                the same to the BUNDLE; only that one can interpolate job ids.
+                A deploy that is not `bundle deploy` reads this and nothing
+                else — without it, "No command to run"
   requirements.txt  App deps, where Databricks Apps looks for them
 job/            THE JOB UNIT — the harness plus its payload, its own floor
   (harness)     WS client, HTTP push, Delta writer, model loader

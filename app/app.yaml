@@ -1,0 +1,72 @@
+# What Databricks Apps runs, and with what.
+#
+# THIS FILE IS WHY A HAND DEPLOY WORKS. `resources/app.yml` declares the same
+# command and env to the bundle, but that only applies when the BUNDLE creates
+# or updates the app. Point the app at this folder any other way — the Apps
+# UI, or `databricks apps deploy --source-code-path ...` — and the bundle is
+# never consulted. The runtime reads this file instead, and without it says:
+#
+#   No command to run and no Python file found.
+#   Please add a 'command' field to your app.yml file.
+#
+# `tests/deploy/test_app_yaml.py` asserts this file and `resources/app.yml`
+# agree, so the two ways of deploying cannot drift into behaving differently.
+#
+# Note the spelling difference, which is real and bites every time:
+#   this file (the runtime reads it)  -> valueFrom   (camelCase)
+#   resources/app.yml (the bundle)    -> value_from  (snake_case)
+
+command:
+  - uvicorn
+  - server.main:app
+  - --host
+  - 0.0.0.0
+  - --port
+  # NOT a hardcoded 8000. Databricks Apps assigns the port and passes it here;
+  # binding anything else means the platform's health check never connects and
+  # the deployment is marked failed with the app process running fine.
+  - $DATABRICKS_APP_PORT
+
+env:
+  # The built SPA. `app/client/` is the source and never deploys;
+  # `app/client/vite.config.ts` writes `../dist`, so the bundle lands beside
+  # `server/`. `server/config.py` resolves this against the app root.
+  - name: DBX_FRONTEND_DIST
+    value: dist
+
+  # These mirror the defaults in `databricks.yml`'s `variables:` block. They
+  # are literals here because this file cannot interpolate — a hand deploy has
+  # no bundle to interpolate from. The test named above fails if a default
+  # changes there and not here.
+  - name: DBX_CATALOG
+    value: main
+  - name: DBX_SCHEMA
+    value: dbx_leaning
+  - name: DBX_WAREHOUSE_ID
+    value: "7474655945367403"
+  - name: DBX_APP_PUBLIC_URL
+    value: https://dbx-leaning-7474655945367403.aws.databricksapps.com
+
+  # The app's durable filesystem — uc_ddl/003_app_volume.sql. Absent or
+  # ungranted, /healthz reports `volume` degraded and nothing on the run path
+  # is affected.
+  - name: DBX_APP_VOLUME
+    value: /Volumes/main/dbx_leaning/app_store
+
+  # The token a job presents on the WS/HTTP ingress, from the secret declared
+  # under `resources:` in resources/app.yml. An EMPTY token is the development
+  # posture that accepts everyone (server/routes/ingest.py::_authorised), so a
+  # typo here is an open ingress rather than a failure.
+  - name: DBX_APP_TOKEN
+    valueFrom: app-token
+
+# DBX_JOB_IDS IS DELIBERATELY ABSENT, and it is the one thing a hand deploy
+# cannot have. It maps model name -> job id, and those ids do not exist until
+# the bundle creates the jobs, so only `resources/app.yml` can fill it in
+# (`${resources.jobs.model_scenario.id}` and friends).
+#
+# The consequence is visible, not silent: /healthz reports
+# "no DBX_JOB_IDS configured; no model can be triggered from this app", the
+# UI shows the app degraded, and every other path — observing a run someone
+# else triggered, streaming, history, results — works normally. Deploy with
+# `databricks bundle deploy` to get triggering.
