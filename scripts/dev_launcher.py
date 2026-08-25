@@ -4,7 +4,7 @@
 Everything else a local run touches is the real thing: the real ``job/``
 harness in its own OS process, the real WebSocket ingress, the real relay, the
 real envelope, the real seq counter, the real SSE stream. What is faked here is
-strictly the two REST endpoints ``app/jobs_api.py`` calls — ``run-now`` and
+strictly the two REST endpoints ``app/server/jobs_api.py`` calls — ``run-now`` and
 ``runs/get`` — because those are the only link in the chain that needs a
 Databricks account.
 
@@ -87,11 +87,12 @@ __all__ = [
     "dev_job_ids",
 ]
 
+
 #: The parameter names, in the order ``resources/*.job.yml`` lists them on the
 #: task. Sourced from the app's own contract rather than retyped, so a name
 #: added there reaches the local loop without anyone remembering to.
 def _declared_parameters() -> tuple[str, ...]:
-    from app.routes.runs import JOB_PARAMETER_NAMES
+    from server.routes.runs import JOB_PARAMETER_NAMES
 
     # DBX_RUN_ID and DBX_MODEL first because that is the order a human reads a
     # `ps` line in; the rest alphabetically, which is all the yml ordering is.
@@ -145,7 +146,7 @@ class LocalRun:
         return self.returncode is None
 
     def state(self) -> dict[str, Any]:
-        """The subset of the Jobs API run shape ``app/jobs_api.py`` reads.
+        """The subset of the Jobs API run shape ``app/server/jobs_api.py`` reads.
 
         Matching the real response *shape* matters more than matching all of
         it: ``JobsApi.terminal_status`` navigates ``status.state`` and
@@ -227,7 +228,7 @@ class LocalJobLauncher:
         self._next_job_run_id = 1
         self._lock = threading.Lock()
 
-    # --- the two endpoints app/jobs_api.py actually calls ------------------
+    # --- the two endpoints app/server/jobs_api.py actually calls ------------------
 
     def run_now(self, job_id: int, parameters: Mapping[str, str]) -> int:
         model = self.models_by_job_id.get(int(job_id))
@@ -466,7 +467,7 @@ class LocalJobLauncher:
 
 
 # --------------------------------------------------------------------------
-# The HTTP surface: exactly the paths app/jobs_api.py builds, and no more.
+# The HTTP surface: exactly the paths app/server/jobs_api.py builds, and no more.
 # --------------------------------------------------------------------------
 
 

@@ -14,9 +14,10 @@ __pycache__/
 # commits that claimed to add it. `git add -A` says nothing when a path is
 # ignored.
 #
-# `dist/` is no longer here at all. It used to be unanchored on purpose, to
-# catch `frontend/dist` as well as sdist output — but `dist/` at the repo root
-# is now the built SPA, and it is COMMITTED. See frontend/.gitignore for why.
+# `dist/` is gone from this list. It used to be unanchored on purpose, to
+# catch `frontend/dist` as well as sdist output — but the built SPA now lives
+# at `app/dist` and is COMMITTED (see app/client/.gitignore for why), and an
+# unanchored `dist/` would silently ignore it.
 # `scripts/build_model_wheel.py` writes to `build/wheels`, which `/build/`
 # above already covers, so nothing else wants this name.
 .Python
@@ -32,10 +33,10 @@ __pycache__/
 /var/
 /wheels/
 
-# The built SPA, at the app root — see frontend/.gitignore for why it is
+# The built SPA, at the app root — see app/client/.gitignore for why it is
 # tracked at all. Sourcemaps are the one part that is not: 5.1 MB against
 # 1.2 MB for the bundle, regenerated on every build.
-/dist/**/*.map
+/app/dist/**/*.map
 /share/python-wheels/
 *.egg-info/
 .installed.cfg

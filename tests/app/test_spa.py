@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.spa import RESERVED_PREFIXES, resolve_dist
+from server.spa import RESERVED_PREFIXES, resolve_dist
 
 
 @pytest.fixture
@@ -171,7 +171,7 @@ def test_a_missing_dist_says_so_instead_of_a_bare_404(app_and_hub, config, tmp_p
 def test_a_missing_dist_is_logged_once_at_startup(app_and_hub, config, tmp_path, caplog):
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="app.spa"):
+    with caplog.at_level(logging.WARNING, logger="server.spa"):
         app_and_hub(config(frontend_dist=str(tmp_path / "never-built")))
     warnings = [r for r in caplog.records if "no frontend bundle" in r.message]
     assert len(warnings) == 1
@@ -191,6 +191,6 @@ def test_the_default_dist_is_repo_relative_not_cwd_relative(config):
     resolved = resolve_dist(config().frontend_dist)
     assert resolved.is_absolute()
     # `dist/` at the repo root, which is also the app root a deploy hands to
-    # Databricks Apps — not `frontend/dist`, which is the client SOURCE tree.
+    # Databricks Apps — not `app/dist`, which is the client SOURCE tree.
     assert resolved.parts[-1] == "dist"
     assert resolved.parts[-2] != "frontend"

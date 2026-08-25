@@ -95,7 +95,7 @@ async def test_restored_rows_keep_their_place_ahead_of_newer_ones():
     writer = FlakyWriter(fail_times=1)
     sink = DurableSink(writer, TableSet(), max_bytes=1, max_age_s=0)
     sink.append_rows("t", [{"i": 1}])
-    await sink.flush_due()          # fails, requeues {'i': 1}
+    await sink.flush_due()  # fails, requeues {'i': 1}
     sink.append_rows("t", [{"i": 2}])
     await sink.flush_due()
     assert [r["i"] for r in writer.rows] == [1, 2]

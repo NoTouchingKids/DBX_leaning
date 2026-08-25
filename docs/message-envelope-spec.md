@@ -175,10 +175,10 @@ retyping either by hand and going stale the first time one gains a member.
 **The frontend does not generate from it, and that was a deliberate call.**
 `json-schema-to-typescript` produced output nobody could read — `RunId1`,
 `Seq1`, `Type1`, one alias per property occurrence — and carrying none of the
-reasoning that makes the contract usable. So `frontend/src/lib/envelope.ts`
+reasoning that makes the contract usable. So `app/client/src/lib/envelope.ts`
 is hand-written, and the cost of that (it can silently fall behind
 `shared/envelope.py`) is paid by a drift test rather than by discipline:
-`frontend/src/lib/envelope.contract.test.ts` checks both directions against
+`app/client/src/lib/envelope.contract.test.ts` checks both directions against
 this generated schema — every property and enum member the server can emit is
 declared in TypeScript, and nothing declared in TypeScript is absent from the
 server or fails to validate against the schema's own

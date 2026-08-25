@@ -145,8 +145,7 @@ def test_rows_the_real_table_left_null_are_dropped_loudly(recorder, taxi_rows, m
 
     assert len(model.series) == len(holed) - 1
     assert any(
-        line["level"] == "WARNING" and "dropped 1 rows" in line["message"]
-        for line in r.of("log")
+        line["level"] == "WARNING" and "dropped 1 rows" in line["message"] for line in r.of("log")
     )
 
 
@@ -275,9 +274,9 @@ def test_the_data_and_the_forecast_are_deterministic(recorder):
         forecasts.append([row["forecast"] for row in model.results()])
     assert forecasts[0] == forecasts[1]
 
-    assert (
-        nyc_taxi_hourly(days=2, seed=1).rows != nyc_taxi_hourly(days=2, seed=2).rows
-    ), "a different seed should give different data"
+    assert nyc_taxi_hourly(days=2, seed=1).rows != nyc_taxi_hourly(days=2, seed=2).rows, (
+        "a different seed should give different data"
+    )
 
 
 def test_the_harness_sees_a_build_step_and_a_results_accessor():

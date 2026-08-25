@@ -1,14 +1,14 @@
 """The committed Postgres DDL must be the schema the app actually applies.
 
 Two copies of a schema is how they drift; this makes the file a rendering of
-app/store.py rather than a second source of truth.
+app/server/store.py rather than a second source of truth.
 """
 
 from __future__ import annotations
 
 import pathlib
 
-from app.store import SCHEMA_SQL
+from server.store import SCHEMA_SQL
 
 DDL = pathlib.Path(__file__).resolve().parents[2] / "lakebase_ddl" / "001_run_status.sql"
 
@@ -16,7 +16,7 @@ DDL = pathlib.Path(__file__).resolve().parents[2] / "lakebase_ddl" / "001_run_st
 def test_the_committed_ddl_matches_what_the_app_applies():
     assert DDL.exists()
     assert SCHEMA_SQL.strip() in DDL.read_text(), (
-        "lakebase_ddl/001_run_status.sql has drifted from app/store.py's SCHEMA_SQL"
+        "lakebase_ddl/001_run_status.sql has drifted from app/server/store.py's SCHEMA_SQL"
     )
 
 

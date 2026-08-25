@@ -32,34 +32,55 @@ databricks secrets put-secret dbx-leaning app-token --string-value "$(openssl ra
 reconciliation). Nothing writes through it — see `docs/architecture.md` on why
 the write path bypasses it entirely.
 
-## Layout: the repo root is the app root
+## Layout: `app/` is the whole app
 
-The shape is the one the AppKit docs describe — a client source tree, a build
-output directory, and the server, all under one root — with FastAPI where
-their Node server would be:
+The shape the [Databricks app template][t] uses — `server/` for the FastAPI
+code, `client/` for the React source, `requirements.txt` at the app root —
+one level down, so the repo can hold the jobs too:
+
+[t]: https://github.com/databricks-solutions/claude-databricks-app-template
 
 ```
-DBX_leaning/            <- source_code_path: this is what Databricks Apps gets
-├── frontend/           the CLIENT source (their client/). Never deployed.
-│   ├── index.html
-│   ├── vite.config.ts  build.outDir: "../dist"
-│   └── src/
-├── dist/               the built SPA. Committed. app/spa.py serves it.
-├── app/                the FastAPI server — main.py, routes/, spa.py
-├── shared/             the message envelope, imported by app/ and job/
-├── requirements.txt    app deps, where Databricks Apps looks for them
-├── job/  models/  entrypoints/     the jobs, which the app never imports
-└── databricks.yml  resources/      the bundle
+DBX_leaning/
+├── app/                 <- source_code_path. Nothing outside it deploys.
+│   ├── server/          the FastAPI package: main.py, routes/, spa.py
+│   ├── client/          the React source. Never deployed.
+│   │   ├── index.html
+│   │   ├── vite.config.ts       build.outDir: "../dist"
+│   │   └── src/
+│   ├── dist/            the built SPA. Committed. server/spa.py serves it.
+│   ├── shared/          a TRACKED COPY of ../shared — see below
+│   └── requirements.txt where Databricks Apps looks for it
+├── shared/              canonical. job/, models/ and tests import this one.
+├── job/  models/  entrypoints/      the jobs. The app never imports them.
+└── databricks.yml  resources/       the bundle
 ```
 
-Two consequences worth stating, because both have bitten this repo:
+Three consequences, all of which have bitten this repo:
 
-**`dist/` is committed.** Build output in git is unusual. It is here because a
-deploy driven from *inside* Databricks — a Git folder, a notebook — has no
-Node runtime and sees only tracked files, so a gitignored bundle would simply
-not be there. The cost is that **the frontend build has to be rebuilt and
-committed whenever the frontend changes**, or the deployed UI is silently
-stale. Sourcemaps stay out of git: 5.1 MB against 1.2 MB for the bundle.
+**`app/shared/` is a copy, and copies drift.** `app/` deploys alone, so
+everything `server/` imports has to be inside it — and `server/` imports
+exactly one first-party package, `shared`. It cannot be a symlink (see below).
+So one directory is canonical and one is a copy:
+
+```bash
+uv run python scripts/sync_shared.py           # refresh it
+uv run python scripts/sync_shared.py --check    # is it current?
+```
+
+`tests/deploy/test_shared_copy.py` fails the moment the two differ, and also
+asserts that tests import the canonical `shared/` rather than the copy —
+because the nasty version of this bug is tests passing against one copy while
+the deployed app runs the other. `pythonpath` in `pyproject.toml` puts the
+repo root ahead of `app/` for exactly that reason. The duplication is scoped
+to this stage; packaging `shared` as a wheel retires it.
+
+**`app/dist/` is committed.** Build output in git is unusual. It is here
+because a deploy driven from *inside* Databricks — a Git folder, a notebook —
+has no Node runtime and sees only tracked files, so a gitignored bundle would
+simply not be there. The cost: **rebuild and commit it whenever the client
+changes**, or the deployed UI is silently stale. Sourcemaps stay out of git —
+5.1 MB against 1.2 MB for the bundle.
 
 **No symlink may reach the workspace.** The App deployment exports its
 `source_code_path` folder and the export rejects symlinks, naming one file:
@@ -69,9 +90,9 @@ Failed to export .../DBX_leaning/.venv/bin/python
 INVALID_PARAMETER_VALUE: Path (...) is not an exportable asset. type=symlink
 ```
 
-`.venv` is what fails first and is not the whole problem — `frontend/node_modules`
-holds thousands, that being how pnpm stores packages. Both are in
-`databricks.yml`'s `sync.exclude`, so neither is ever uploaded, and
+`.venv` is what fails first and is not the whole problem —
+`app/client/node_modules` holds thousands, that being how pnpm stores
+packages. Both are in `databricks.yml`'s `sync.exclude`, and
 `tests/deploy/test_bundle.py` asserts it.
 
 **A sync exclude does not clean up what an earlier deploy already uploaded.**
@@ -81,27 +102,48 @@ If a previous run put `.venv` in the workspace, delete it there once:
 databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
 ```
 
+## The app's volume
+
+The app gets a Unity Catalog volume for durable file storage —
+`uc_ddl/003_app_volume.sql` creates it, `resources/app.yml` grants the app
+`READ_VOLUME` and `WRITE_VOLUME` on it and passes the path as
+`DBX_APP_VOLUME`.
+
+It exists because **a Databricks App's own disk is not storage.** The app runs
+at most 24 hours and then stops, taking its container with it; a redeploy does
+the same. A file written beside the code is downloadable until the next
+restart, which is worse than not offering it at all.
+
+```bash
+databricks sql query --file uc_ddl/003_app_volume.sql
+```
+
+Leaving it out is a supported, degraded deploy: `/healthz` reports `volume`
+degraded and anything that would write a file is unavailable. Nothing on the
+run path touches it — the job writes telemetry to Delta and results to their
+own tables.
+
 ## Deploy
 
 ```bash
-cd frontend && pnpm install && pnpm build && cd ..   # only if the SPA changed
+cd app/client && pnpm install && pnpm build && cd ../..   # only if the SPA changed
 databricks bundle validate                           # schema and references
 databricks bundle deploy -t dev
 ```
 
-The build step is only needed when `frontend/` has changed since `dist/` was
-last committed, because `dist/` is in git — which is also what makes
+The build step is only needed when `app/client/` has changed since `app/dist/`
+was last committed, because `app/dist/` is in git — which is also what makes
 `databricks bundle deploy` work unchanged from inside a Databricks Git folder,
 where there is no Node to run it.
 
 **`pnpm build` runs `tsc -b` first**, so a type error fails the build rather
-than shipping a stale `dist/`. Commit the result: a rebuilt `dist/` that is
+than shipping a stale bundle. Commit the result: a rebuilt `app/dist/` that is
 not committed deploys the previous UI without saying so.
 
 Skip the build when the SPA has not changed and nothing is lost. Skip it when
 it *has* changed and the deploy succeeds, the API works, and every page serves
 the old bundle — or, on a checkout that never built one, answers 503 with the
-message in `app/spa.py::NO_BUNDLE`.
+message in `app/server/spa.py::NO_BUNDLE`.
 
 ## Local development
 
@@ -109,10 +151,10 @@ Both halves run together, and it is the same code that deploys:
 
 ```bash
 uv run python scripts/dev_stack.py     # FastAPI + a real job runner + Postgres
-cd frontend && pnpm dev                # Vite, proxying /api, /ws, /healthz
+cd app/client && pnpm dev              # Vite, proxying /api, /ws, /healthz
 ```
 
-`frontend/vite.config.ts` proxies to `DBX_DEV_API` (default
+`app/client/vite.config.ts` proxies to `DBX_DEV_API` (default
 `http://127.0.0.1:8000`, matching `dev_stack.py::DEFAULT_APP_PORT`), so the
 browser talks to the real FastAPI app — real SSE, real WebSocket ingress, real
 `Last-Event-ID` resume. See `scripts/dev_stack.py`'s docstring for exactly
@@ -122,7 +164,7 @@ To exercise what actually deploys instead — FastAPI serving the built bundle,
 one process, no Vite — build first and open the app's own port:
 
 ```bash
-cd frontend && pnpm build && cd ..
+cd app/client && pnpm build && cd ../..
 uv run python scripts/dev_stack.py
 ```
 
@@ -131,7 +173,7 @@ uv run python scripts/dev_stack.py
 `run_status` lives in Postgres, not Delta — one row per run, point-looked-up,
 and counted against the 5-concurrent-task ceiling. Postgres gives it a primary
 key on `run_id` and a transaction around the count-and-claim, so that ceiling
-is enforced rather than observed (`app/store.py`, `pg_advisory_xact_lock`).
+is enforced rather than observed (`app/server/store.py`, `pg_advisory_xact_lock`).
 
 Point the app at an instance with four variables:
 
@@ -147,7 +189,7 @@ back to the warehouse-backed store, whose `release_slot` is a documented no-op
 that relies on reconciliation to correct it — so the ceiling becomes advisory
 rather than transactional, and every check costs warehouse uptime. Nothing
 fails; it simply stops being the design in `CLAUDE.md`. `GET /healthz` reports
-which store is live and `app/services.py` logs it at startup, which is what
+which store is live and `app/server/services.py` logs it at startup, which is what
 keeps that from being silent.
 
 Apply `lakebase_ddl/001_run_status.sql` before the first run. The app applies
@@ -157,7 +199,7 @@ the schema is there.
 
 **The credential is the one piece unverified against a real workspace.**
 Lakebase authenticates with a short-lived Databricks OAuth token — which is
-why `app/store.py` opens a connection per operation instead of pooling, making
+why `app/server/store.py` opens a connection per operation instead of pooling, making
 rotation a non-issue. No `DBX_LAKEBASE_PASSWORD` is set in `resources/app.yml`,
 so `_lakebase_dsn` falls back to `DATABRICKS_TOKEN`. If that is not present in
 the Apps runtime, add the credential as a **secret**, never as a bundle
@@ -201,12 +243,12 @@ lock, if a model's library leaks into another model's environment, or if two
 environments end up pinning different versions of a shared dependency.
 
 **The frontend is the exception to "the sync mirrors the repo".**
-`databricks.yml` excludes `frontend/**` outright — the client source is
+`databricks.yml` excludes `app/client/**` outright — the client source is
 useless in a workspace with no Node runtime, and `node_modules` alone would
-dwarf the rest of the sync. What deploys is `dist/`, which is not in that
-directory: `frontend/vite.config.ts` writes `../dist`, at the app root, where
-`app/config.py::frontend_dist` looks for it by default and
-`resources/app.yml` names it explicitly as `DBX_FRONTEND_DIST`.
+dwarf the rest of the sync. What deploys is `app/dist/`, which is not in that
+directory: `app/client/vite.config.ts` writes `../dist`, so the bundle lands
+at the app root, where `server/config.py::frontend_dist` looks for it by
+default and `resources/app.yml` names it explicitly as `DBX_FRONTEND_DIST`.
 
 ## Parameters
 
@@ -235,7 +277,7 @@ Databricks has no per-account setting for that, so:
 - each job bounds only itself (`max_concurrent_runs`: 1, except `scenario`,
   which exists to exercise fan-out),
 - the **app** enforces the account-wide ceiling before triggering and returns
-  429 naming the limit (`app/routes/runs.py`),
+  429 naming the limit (`app/server/routes/runs.py`),
 - jobs `queue` rather than failing if the limit is hit another way.
 
 ## Running a job without the app

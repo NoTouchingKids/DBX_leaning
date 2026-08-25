@@ -60,7 +60,7 @@ lifetimes)
 This isn't a failure requiring a different transport — SSE with
 `EventSource`'s built-in reconnect already handles periodic cuts
 transparently, per `docs/architecture.md`. What it does change: confirm the
-reconnect-counter design in `frontend/` (see `.claude/agents/frontend.md`)
+reconnect-counter design in `app/client/` (see `.claude/agents/frontend.md`)
 actually needs to tolerate reconnects at that specific interval — i.e. if
 cuts happen every ~120s, a "stop after 3 consecutive failures" counter that
 doesn't reset on success would kill a healthy stream in ~6 minutes, and this

@@ -38,7 +38,7 @@ CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
 --
 -- NOTE: this table is the FALLBACK home for run state. When Lakebase is
 -- configured (DBX_LAKEBASE_*), run_status lives in Postgres instead — see
--- lakebase_ddl/001_run_status.sql and app/store.py. It is OLTP-shaped
+-- lakebase_ddl/001_run_status.sql and app/server/store.py. It is OLTP-shaped
 -- (one row per run, updated constantly, point-looked-up, counted against a
 -- ceiling), which Delta is poor at and which costs warehouse uptime to read.
 -- This definition stays so a deployment works before Lakebase is provisioned,
@@ -49,15 +49,15 @@ CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
 -- `started_ts` are NOT NULL there and deliberately nullable here, because the
 -- two stores reach this table by different routes: Postgres always inserts
 -- through claim_slot, which has both values, while the warehouse path also
--- upserts through app/repository.py's MERGE, whose NOT MATCHED branch supplies
+-- upserts through app/server/repository.py's MERGE, whose NOT MATCHED branch supplies
 -- only (run_id, job_run_id, status, detail, updated_ts). Adding NOT NULL to
 -- either column would turn that branch into a hard failure.
 --
 -- `job_run_id` is populated only on the Postgres path. The MERGE's MATCHED
 -- branch does not assign it and the row always exists by the time
 -- attach_job_run runs, so on the warehouse store this column stays NULL and
--- startup reconciliation loses its Jobs-API route (app/reconcile.py falls back
--- to the latest run_events row). That is an app/repository.py bug, recorded
+-- startup reconciliation loses its Jobs-API route (app/server/reconcile.py falls back
+-- to the latest run_events row). That is an app/server/repository.py bug, recorded
 -- here because this is where someone reading the schema will wonder why the
 -- column is always empty.
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_status (

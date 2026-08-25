@@ -7,10 +7,10 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app.jobs_api import JobsApi
-from app.reconcile import reconcile_once
-from app.repository import RunRepository
-from app.sql import SqlClient
+from server.jobs_api import JobsApi
+from server.reconcile import reconcile_once
+from server.repository import RunRepository
+from server.sql import SqlClient
 from shared.envelope import RunStatus
 from shared.tables import TableSet
 
@@ -45,7 +45,7 @@ def repo_for(answers) -> tuple[RunRepository, ScriptedSql]:
 
 def store_for(repo):
     """Reconciliation reads run state through the store now, not the repo."""
-    from app.store import WarehouseRunStore
+    from server.store import WarehouseRunStore
 
     return WarehouseRunStore(repo)
 
@@ -73,9 +73,7 @@ async def test_the_jobs_api_answers_only_when_the_job_never_recorded_an_ending()
             "ORDER BY seq DESC": [],  # the job never recorded a terminal event
         }
     )
-    http = FakeHttp(
-        {"status": {"state": "TERMINATED", "termination_details": {"code": "SUCCESS"}}}
-    )
+    http = FakeHttp({"status": {"state": "TERMINATED", "termination_details": {"code": "SUCCESS"}}})
     jobs = JobsApi("https://ws.example.com", "tok", client=http)
 
     report = await reconcile_once(repo, jobs, store_for(repo))

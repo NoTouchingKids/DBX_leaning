@@ -12,8 +12,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.repository import RunRepository, UnsafeTableName, validate_table_name
-from app.sql import SqlClient
+from server.repository import RunRepository, UnsafeTableName, validate_table_name
+from server.sql import SqlClient
 
 from .conftest import FakeHttp, statement_response
 
@@ -124,9 +124,7 @@ def test_results_are_ordered_by_chunk_so_a_streaming_model_reads_back_in_order(a
 
 
 def test_a_valid_name_passes():
-    assert validate_table_name(
-        "main.dbx_leaning.results_x", catalog="main", schema="dbx_leaning"
-    )
+    assert validate_table_name("main.dbx_leaning.results_x", catalog="main", schema="dbx_leaning")
 
 
 @pytest.mark.parametrize(

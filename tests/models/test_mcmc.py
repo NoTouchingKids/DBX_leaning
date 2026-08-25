@@ -120,8 +120,9 @@ def test_result_rows_have_one_shape_whichever_data_path_ran(recorder):
         recorder,
         draws=100,
         burn_in=20,
-        data=[{"trip_distance": 1.0 + i * 0.1, "fare_amount": 3.0 + 2.5 * i * 0.1}
-              for i in range(50)],
+        data=[
+            {"trip_distance": 1.0 + i * 0.1, "fare_amount": 3.0 + 2.5 * i * 0.1} for i in range(50)
+        ],
     )
 
     assert set(fallback.results()[0]) == set(supplied.results()[0])
@@ -145,9 +146,7 @@ def test_walkers_start_inside_the_prior_even_on_a_near_perfect_fit(recorder):
 
 def test_a_caller_can_bring_its_own_columns(recorder):
     rows = [{"x": float(i), "y": 10.0 - 0.5 * i} for i in range(60)]
-    _, model = fitted(
-        recorder, data=rows, x_column="x", y_column="y", draws=400, burn_in=150
-    )
+    _, model = fitted(recorder, data=rows, x_column="x", y_column="y", draws=400, burn_in=150)
     by_name = {row["parameter"]: row for row in model.results()}
 
     assert by_name["slope"]["mean"] == pytest.approx(-0.5, abs=0.2)
@@ -188,9 +187,7 @@ def test_progress_does_not_fire_on_every_draw(recorder):
 
 def test_cancelling_mid_sampling_keeps_a_partial_posterior(recorder):
     r = recorder(cancel_after=3)
-    model = r.attach(
-        build_model({"draws": 5000, "burn_in": 50, "progress_every": 20, "rows": 400})
-    )
+    model = r.attach(build_model({"draws": 5000, "burn_in": 50, "progress_every": 20, "rows": 400}))
     model.build()
     model.run()
 
@@ -358,18 +355,13 @@ def test_the_thinning_is_systematic_so_the_trace_stays_ordered(recorder):
     sample = json.loads(model.results()[0]["draws_sample"])
 
     usable = model._sampler.get_chain()[model.burn_in :]
-    expected = [
-        round(float(usable[d, 0, 0]), 6)
-        for d in range(0, usable.shape[0], sample["thin"])
-    ]
+    expected = [round(float(usable[d, 0, 0]), 6) for d in range(0, usable.shape[0], sample["thin"])]
     assert sample["chains"][0] == expected
 
 
 def test_a_cancelled_run_still_carries_a_sample(recorder):
     r = recorder(cancel_after=3)
-    model = r.attach(
-        build_model({"draws": 5000, "burn_in": 50, "progress_every": 20, "rows": 400})
-    )
+    model = r.attach(build_model({"draws": 5000, "burn_in": 50, "progress_every": 20, "rows": 400}))
     model.build()
     model.run()
 

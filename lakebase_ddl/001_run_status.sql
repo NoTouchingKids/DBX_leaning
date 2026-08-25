@@ -1,12 +1,12 @@
 -- Lakebase (managed Postgres) schema: run state only.
 --
--- Applied automatically by app/store.py's ensure_schema() at startup, which
+-- Applied automatically by app/server/store.py's ensure_schema() at startup, which
 -- is idempotent — this file exists so the schema is reviewable in the repo
 -- rather than only readable as a Python string, and so a DBA can apply it by
 -- hand if startup DDL is ever disallowed.
 --
 -- Only run_status lives here. Everything append-only and high-volume — logs,
--- progress, events, results — stays in Delta (uc_ddl/). See app/store.py for
+-- progress, events, results — stays in Delta (uc_ddl/). See app/server/store.py for
 -- why this one table is different.
 --
 -- Lakebase runs PostgreSQL 18. This was developed and tested against 16,

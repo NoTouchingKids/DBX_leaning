@@ -11,7 +11,7 @@ import json
 
 from starlette.requests import Request
 
-from app.routes.stream import stream_run
+from server.routes.stream import stream_run
 from shared.envelope import make_message
 
 

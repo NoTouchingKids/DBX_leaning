@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import AppConfig
-from app.main import create_app
-from app.services import ServiceHub
+from server.config import AppConfig
+from server.main import create_app
+from server.services import ServiceHub
 
 
 @pytest.fixture

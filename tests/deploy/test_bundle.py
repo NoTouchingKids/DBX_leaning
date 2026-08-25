@@ -78,7 +78,7 @@ def test_each_job_runs_its_own_model(jobs):
 def test_jobs_declare_exactly_the_parameters_the_app_sends(jobs):
     """Databricks rejects a run-now parameter a job has not declared, so this
     drift would surface as every trigger failing."""
-    from app.routes.runs import JOB_PARAMETER_NAMES
+    from server.routes.runs import JOB_PARAMETER_NAMES
 
     for model in MODELS:
         declared = {p["name"] for p in jobs[f"model_{model}"]["parameters"]}
@@ -180,18 +180,28 @@ def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
     assert secret["permission"] == "READ"
 
 
-def test_the_app_is_deployed_from_the_repo_root(bundle):
-    """The repo root is the app root — `app/`, `shared/`, `requirements.txt`
-    and `dist/` together, the way AppKit's `my-app/` holds its server,
-    `client/` and `dist/`.
+def test_the_app_is_deployed_from_the_app_folder(bundle):
+    """`app/` holds everything the app needs and nothing else — `server/`,
+    `client/`, `dist/`, a copy of `shared/`, and its own requirements.txt.
 
-    Anything else needs a staging step to assemble, and a staged directory is
-    build output: gitignored, absent from a fresh checkout, and absent from a
-    Databricks Git folder, where the deploy may be driven from inside the
-    workspace and only tracked files exist.
+    It is a real tracked directory, not something a staging step assembles:
+    a staged directory is build output, so it is gitignored, absent from a
+    fresh checkout, and absent from a Databricks Git folder — where the deploy
+    may be driven from inside the workspace and only tracked files exist.
     """
     app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
-    assert app["source_code_path"] == "../"
+    assert app["source_code_path"] == "../app"
+
+    # The command names the package INSIDE that folder, not the folder.
+    assert app["config"]["command"][:2] == ["uvicorn", "server.main:app"]
+
+
+def test_the_app_folder_carries_everything_it_needs():
+    """Nothing outside `app/` travels, so everything `server/` imports has to
+    be in there. `server/` imports exactly one first-party package: `shared`.
+    """
+    for rel in ("server/main.py", "shared/envelope.py", "requirements.txt", "dist/index.html"):
+        assert (ROOT / "app" / rel).exists(), f"app/{rel} is missing from the deployed folder"
 
 
 def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
@@ -203,7 +213,7 @@ def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
     excluded = set(bundle["sync"]["exclude"])
     for pattern in (
         ".venv/**",
-        "frontend/**",
+        "app/client/**",
         ".git/**",
         "**/__pycache__/**",
     ):
@@ -211,20 +221,20 @@ def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
 
 
 def test_the_built_frontend_is_not_excluded(bundle):
-    """`app/spa.py` serves `dist/`, and nothing in the workspace can build it.
+    """`app/server/spa.py` serves `dist/`, and nothing in the workspace can build it.
 
     This used to need a `sync.include` and a rule that no exclude contradict
-    it, because dist lived under `frontend/` — so `frontend/**` could not be
+    it, because dist lived inside the client tree — so `app/client/**` could not be
     excluded wholesale and every build-time config had to be named one at a
     time. `vite.config.ts` now writes `../dist`, at the app root, and the
     conflict is gone: assert it stays gone.
     """
     for pattern in bundle["sync"]["exclude"]:
-        assert not fnmatch("dist/index.html", pattern), (
+        assert not fnmatch("app/dist/index.html", pattern), (
             f"exclude {pattern!r} drops the built SPA; the app would answer "
             "503 on every page while the API worked"
         )
-        assert not fnmatch("dist/assets/index.js", pattern), (
+        assert not fnmatch("app/dist/assets/index.js", pattern), (
             f"exclude {pattern!r} drops the SPA assets"
         )
 
@@ -238,7 +248,7 @@ def test_the_app_is_told_where_the_built_frontend_landed(bundle):
     env = {e["name"]: e.get("value") for e in app["config"]["env"]}
     assert env.get("DBX_FRONTEND_DIST") == "dist"
 
-    vite = (ROOT / "frontend" / "vite.config.ts").read_text()
+    vite = (ROOT / "app" / "client" / "vite.config.ts").read_text()
     assert 'outDir: "../dist"' in vite, (
         "vite must write the app root's dist/; DBX_FRONTEND_DIST points there"
     )
@@ -252,14 +262,14 @@ def test_the_built_frontend_is_tracked_by_git():
     not be there, and every page would answer 503 while the API worked fine.
     """
     tracked = subprocess.run(
-        ["git", "ls-files", "dist"],
+        ["git", "ls-files", "app/dist"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout.split()
-    assert "dist/index.html" in tracked, (
-        "the built SPA must be committed; run `pnpm build` in frontend/"
+    assert "app/dist/index.html" in tracked, (
+        "the built SPA must be committed; run `pnpm build` in app/client/"
     )
     assert not [f for f in tracked if f.endswith(".map")], (
         "sourcemaps are 4x the bundle and regenerate on every build"
@@ -376,7 +386,7 @@ def test_the_ddl_creates_no_results_table_no_model_claims():
     assert not orphans, f"results tables no model declares: {orphans}"
 
 
-#: The parts `app/config.py::_lakebase_dsn` assembles a connection string from.
+#: The parts `app/server/config.py::_lakebase_dsn` assembles a connection string from.
 #: `DBX_LAKEBASE_DSN` is the alternative whole-string form and is not used here.
 LAKEBASE_ENV = (
     "DBX_LAKEBASE_HOST",
@@ -442,7 +452,7 @@ def test_no_lakebase_credential_is_carried_as_a_bundle_variable(bundle):
     """A password in a variable lands in the deployment state.
 
     Lakebase authenticates with a short-lived OAuth token, which is why
-    `app/store.py` connects per operation rather than pooling. If an explicit
+    `app/server/store.py` connects per operation rather than pooling. If an explicit
     credential is ever needed it belongs in a secret, the way `app-token`
     already is — never here.
     """

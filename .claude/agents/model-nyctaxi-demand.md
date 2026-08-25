@@ -129,7 +129,7 @@ grouping is) — a time × zone matrix, not a single time series. This is
 deliberately a new result shape for the platform — none of the existing five
 produces anything like it, and it wants a heatmap/calendar view rather than a
 line chart. The frontend design for that is not written yet; that track is on
-hold (`frontend/README.md`).
+hold (`app/client/README.md`).
 Whether `preview_axes` (the two-column LTTB downsampling every other model
 uses) makes sense for a 2D grouping like this is worth a real look — it may
 not fit cleanly, in which case falling back to the even-sample preview

@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.repository import RunRepository
-from app.sql import SqlClient
-from app.store import WarehouseRunStore
+from server.repository import RunRepository
+from server.sql import SqlClient
+from server.store import WarehouseRunStore
 from shared.tables import TableSet
 
 from .conftest import FakeHttp, statement_response

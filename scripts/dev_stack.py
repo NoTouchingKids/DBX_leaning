@@ -2,7 +2,7 @@
 
     uv run python scripts/dev_stack.py
 
-Then, in another terminal, ``cd frontend && pnpm dev`` and open the Vite URL.
+Then, in another terminal, ``cd app/client && pnpm dev`` and open the Vite URL.
 Clicking Run on any model triggers the real ``POST /api/runs``, which launches
 the real ``job/`` harness in its own process, which attaches to the real
 WebSocket ingress and streams real envelope messages to the browser over the
@@ -78,7 +78,7 @@ from scripts._registry import REPO_ROOT, model_names  # noqa: E402
 
 __all__ = ["DevStack", "build_parser", "default_state_dir", "main", "preflight"]
 
-#: Vite's dev proxy targets 127.0.0.1:8000 for /api and /ws (frontend/vite.config.ts).
+#: Vite's dev proxy targets 127.0.0.1:8000 for /api and /ws (app/client/vite.config.ts).
 #: Changing this means changing that, so it is a default rather than a constant.
 DEFAULT_APP_PORT = 8000
 DEFAULT_LAUNCHER_PORT = 8787
@@ -226,13 +226,13 @@ class DevStack:
 
         Locally this is not a guess: the launcher owns every job process, so
         nothing from a previous session can still be running. A deploy learns
-        the same thing from the Jobs API in ``app/reconcile.py`` — which cannot
+        the same thing from the Jobs API in ``app/server/reconcile.py`` — which cannot
         run here, because it needs the warehouse read path.
 
         Without this, five crashed runs from yesterday hold the whole
         concurrency ceiling and every trigger answers 429.
         """
-        from app.store import PostgresRunStore
+        from server.store import PostgresRunStore
         from shared.envelope import RunStatus
 
         async def run() -> int:
@@ -281,7 +281,7 @@ class DevStack:
             sys.executable,
             "-m",
             "uvicorn",
-            "app.main:app",
+            "server.main:app",
             "--host",
             "127.0.0.1",
             "--port",
@@ -431,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dev_stack",
         description="Run app + job launcher + registry locally, with no Databricks workspace.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Then: cd frontend && pnpm dev",
+        epilog="Then: cd app/client && pnpm dev",
     )
     parser.add_argument("--app-port", type=int, default=DEFAULT_APP_PORT)
     parser.add_argument("--launcher-port", type=int, default=DEFAULT_LAUNCHER_PORT)
@@ -485,7 +485,7 @@ def _banner(stack: DevStack) -> str:
   triggerable    {models}
   start with     {fast or "(none of the fast models are enabled)"}
 
-  Next:   cd frontend && pnpm dev        (its proxy targets 127.0.0.1:8000)
+  Next:   cd app/client && pnpm dev        (its proxy targets 127.0.0.1:8000)
   Or:     curl -sS -X POST {stack.app_url}/api/runs \\
             -H 'content-type: application/json' \\
             -d '{{"model":"bayesian_ab"}}'
@@ -509,8 +509,7 @@ def main(argv: list[str] | None = None) -> int:
         unknown = sorted(set(models) - set(model_names()))
         if unknown:
             print(
-                f"error: unknown model(s) {unknown}; registered models are "
-                f"{model_names()}",
+                f"error: unknown model(s) {unknown}; registered models are {model_names()}",
                 file=sys.stderr,
             )
             return 2
@@ -572,6 +571,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _supervise(stack: DevStack) -> int:
     """Sit until Ctrl-C, or until a child dies — whichever comes first."""
+
     # SIGTERM (a supervisor, a container stop) has to unwind the same way
     # Ctrl-C does, or the job processes outlive everything. SIGINT is set
     # explicitly rather than left to Python's default handler because a shell

@@ -109,9 +109,7 @@ def test_the_union_is_discriminated_on_type_so_a_client_can_narrow():
 # --- enums reach the client as enums, not as bare strings ------------------
 
 
-@pytest.mark.parametrize(
-    "name,enum", [("LogLevel", LogLevel), ("RunStatus", RunStatus)]
-)
+@pytest.mark.parametrize("name,enum", [("LogLevel", LogLevel), ("RunStatus", RunStatus)])
 def test_every_enum_member_is_in_the_schema(name, enum):
     """So the frontend gets string-literal unions instead of retyping these
     by hand and going stale the first time one is added."""
@@ -121,7 +119,7 @@ def test_every_enum_member_is_in_the_schema(name, enum):
 
 
 def test_the_status_enum_covers_what_the_run_store_can_produce():
-    from app.store import TERMINAL_SQL_LIST
+    from server.store import TERMINAL_SQL_LIST
 
     published = set(envelope_schema()["$defs"]["RunStatus"]["enum"])
     for value in TERMINAL_SQL_LIST.replace("'", "").split(", "):

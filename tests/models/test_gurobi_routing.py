@@ -51,8 +51,7 @@ def trip_rows(n=40, *, distance=2.0, fare=6.0, duration=10.0, overrides=None):
     """`nyc_taxi_trips`-shaped rows, so a test can state the trips it expects
     the geometry to be derived from."""
     rows = [
-        {"trip_distance": distance, "fare_amount": fare, "duration_min": duration}
-        for _ in range(n)
+        {"trip_distance": distance, "fare_amount": fare, "duration_min": duration} for _ in range(n)
     ]
     for index, patch in (overrides or {}).items():
         rows[index].update(patch)

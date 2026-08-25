@@ -20,7 +20,7 @@ Every other track depends on its shape. Building several things against a
 contract that's still moving means rework, not speed.
 
 The same rule has since been applied a second time, on the frontend:
-`frontend/src/components/models/contract.ts` was frozen before the per-model
+`app/client/src/components/models/contract.ts` was frozen before the per-model
 views were fanned out, for exactly this reason. When a fan-out is coming, find
 the contract it shares and freeze that first.
 
@@ -49,7 +49,7 @@ branch = one Claude Code session.
 | `models/annealing/`, `models/bayesian_ab/`, `models/gurobi_routing/`, `models/neural_net/` | none — built after the pattern was established, from `models/README.md` and `/new-model` | `shared/` |
 | `models/ortools_jobshop/` — CP-SAT job shop, the open-source counterweight to the two Gurobi models: no licence file, no expiry, no size cap | none — same route, and later still | `shared/` |
 | `models/panel_fit/` — many small per-group fits, and the one model whose individual units may FAIL while the run SUCCEEDS | none — same route, and later still | `shared/` |
-| `frontend/` | `.claude/agents/frontend.md` | Explicitly low priority — start after `app/` + `job/` + one model work end to end |
+| `app/client/` | `.claude/agents/frontend.md` | Explicitly low priority — start after `app/` + `job/` + one model work end to end |
 
 There are **eleven** models on disk, not the five that got their own brief.
 `models/` on disk, `[tool.dbx-leaning.models]` in `pyproject.toml`, and
@@ -153,8 +153,8 @@ subagent tool's own scheduling.
    contract is supposed to buy. Neither model touched `job/`, `app/` or
    `shared/` at all; what they touched outside their own package is exactly
    the registration list in `models/README.md`, one entry each.
-5. `frontend/` starts once step 3 is done, not before. That gate is met and
-   the track has started — see `frontend/README.md` for where it is.
+5. `app/client/` starts once step 3 is done, not before. That gate is met and
+   the track has started — see `app/client/README.md` for where it is.
 
 ## What "done" means per track, before merging
 
@@ -171,7 +171,7 @@ subagent tool's own scheduling.
 
 ## A note on what NOT to parallelise prematurely
 
-Don't fan out on `frontend/` pages-per-model until there's at least one
+Don't fan out on `app/client/` pages-per-model until there's at least one
 model's real envelope traffic to build the page against — a UI built
 against an imagined message shape is exactly the kind of rework this plan is
 trying to avoid by freezing `shared/` first.
@@ -179,11 +179,11 @@ trying to avoid by freezing `shared/` first.
 Worth being straight about how this was actually resolved, since the
 per-model views are being fanned out now. The message *shape* is no longer
 imagined: `shared/envelope.py` is real, the JSON Schema is generated from it,
-and `frontend/src/lib/envelope.contract.test.ts` fails if the TypeScript
+and `app/client/src/lib/envelope.contract.test.ts` fails if the TypeScript
 drifts from it. Each model's `payload` — the free-form part the envelope
 deliberately does not constrain — is hand-derived from that model's own
 `emit("progress", ...)` calls, which is why `payloadOf` in
-`frontend/src/components/models/contract.ts` returns a `Partial`: a
+`app/client/src/components/models/contract.ts` returns a `Partial`: a
 hand-derived interface can go stale, and some fields are genuinely absent
 until a run reaches a given stage. What is still missing is envelope traffic
 from a **deployed** run — `databricks bundle deploy` has never been run

@@ -89,7 +89,7 @@ def rows_by_key(model) -> dict[str, dict]:
 
 
 def test_a_group_that_cannot_be_fitted_gets_a_row_rather_than_disappearing(recorder):
-    """"We could not fit Chad" and "Chad was never in the data" are different
+    """ "We could not fit Chad" and "Chad was never in the data" are different
     answers. Dropping the group would make them the same one."""
     _, model, _ = run({"rows": panel(trend("Fine", 20), ("Chad", [(2001, 55.0)]))}, recorder)
 
@@ -555,8 +555,12 @@ def test_the_group_label_survives_being_null_on_some_rows(recorder):
         for i in range(8)
     ]
     rows += [
-        {"entity": "Kenya", "code": None if i else "KEN", "year": 2000 + i,
-         "life_expectancy": 55.0 + i}
+        {
+            "entity": "Kenya",
+            "code": None if i else "KEN",
+            "year": 2000 + i,
+            "life_expectancy": 55.0 + i,
+        }
         for i in range(8)
     ]
     _, model, _ = run({"rows": rows}, recorder)
@@ -649,7 +653,7 @@ def test_identifiers_are_rejected_rather_than_interpolated_into_sql(config):
 
 
 def test_a_predictor_other_than_the_period_is_honoured(recorder):
-    """"Response against a covariate" is the other natural question on a
+    """ "Response against a covariate" is the other natural question on a
     panel, and the fallback has to generate that column too."""
     _, model, _ = run({"predictor_column": "gdp_per_capita"}, recorder)
 
@@ -705,11 +709,7 @@ def test_a_degree_below_one_is_rejected_at_construction():
 def test_failure_logging_is_capped_but_the_rows_are_not(recorder):
     """The results table already has every failure with its reason; past a
     couple of dozen the log is chatter a live channel would drop anyway."""
-    rows = [
-        row
-        for index in range(40)
-        for row in panel((f"Tiny{index:02d}", [(2000, 50.0)]))
-    ]
+    rows = [row for index in range(40) for row in panel((f"Tiny{index:02d}", [(2000, 50.0)]))]
     rows += panel(trend("Long", 20))
     r, model, _ = run({"failure_log_limit": 5, "rows": rows}, recorder)
 

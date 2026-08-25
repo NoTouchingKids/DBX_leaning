@@ -92,7 +92,7 @@ def test_cancel_never_reads_or_writes_run_status(app_and_hub):
 
         async def close(self): ...
 
-    from app.repository import RunRepository
+    from server.repository import RunRepository
     from shared.tables import TableSet
 
     app, hub = app_and_hub()

@@ -92,9 +92,7 @@ def test_finite_sentinels_are_not_this_layers_job():
 
 
 def test_percent_complete_is_bounded_and_nullable():
-    assert make_message(
-        "progress", run_id="r", seq=0, elapsed_seconds=1.0
-    ).percent_complete is None
+    assert make_message("progress", run_id="r", seq=0, elapsed_seconds=1.0).percent_complete is None
     with pytest.raises(ValidationError):
         make_message("progress", run_id="r", seq=0, elapsed_seconds=1.0, percent_complete=101)
 

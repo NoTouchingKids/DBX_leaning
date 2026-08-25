@@ -127,9 +127,9 @@ gap is not only "records that have not arrived yet": the live path never
 sends `client_visible=false` logs and the backfill endpoint filters them out
 too, so some holes are **permanent by design**, and a client that loops
 "backfill until contiguous" spins forever. So gaps are reported and never
-acted on automatically. `frontend/src/transport/hub.ts` owns the
+acted on automatically. `app/client/src/transport/hub.ts` owns the
 consecutive-failure counter (capped at 10, reset on every successful open)
-and the gap detection; `frontend/src/hooks/useApi.ts` has the two fetch
+and the gap detection; `app/client/src/hooks/useApi.ts` has the two fetch
 shapes the argument above asks for — `useTerminalHistory`, the one automatic
 fetch a finished run gets, cached for the session because a finished run is
 immutable, and `useFetchGap`, the user-triggered one. Neither is on a timer,

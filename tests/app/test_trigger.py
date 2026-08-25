@@ -11,8 +11,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.jobs_api import JobsApi
-from app.repository import RunRepository
+from server.jobs_api import JobsApi
+from server.repository import RunRepository
 
 from .conftest import FakeHttp
 
@@ -44,7 +44,7 @@ class RecordingSql:
 
 
 def wire(hub, *, job_http=None, sql=None, active=0):
-    from app.store import WarehouseRunStore
+    from server.store import WarehouseRunStore
 
     sql = sql or RecordingSql({"COUNT(*)": [{"active": active}]})
     hub.sql = sql
@@ -235,10 +235,26 @@ def test_a_job_url_is_not_sent_when_the_app_has_no_public_url(app_and_hub, confi
 def test_listing_runs_marks_which_are_live(triggerable):
     app, hub = triggerable()
     rows = [
-        {"run_id": "r1", "job_run_id": "1", "model": "scenario", "status": "RUNNING",
-         "detail": None, "started_ts": 1, "updated_ts": 2, "requested_by": "kp"},
-        {"run_id": "r2", "job_run_id": "2", "model": "mcmc", "status": "SUCCEEDED",
-         "detail": None, "started_ts": 1, "updated_ts": 3, "requested_by": "kp"},
+        {
+            "run_id": "r1",
+            "job_run_id": "1",
+            "model": "scenario",
+            "status": "RUNNING",
+            "detail": None,
+            "started_ts": 1,
+            "updated_ts": 2,
+            "requested_by": "kp",
+        },
+        {
+            "run_id": "r2",
+            "job_run_id": "2",
+            "model": "mcmc",
+            "status": "SUCCEEDED",
+            "detail": None,
+            "started_ts": 1,
+            "updated_ts": 3,
+            "requested_by": "kp",
+        },
     ]
     hub.sql = RecordingSql({"ORDER BY updated_ts DESC": rows})
     hub.repo = RunRepository(hub.sql, hub.tables)
@@ -272,7 +288,7 @@ async def test_a_status_message_updates_the_registry(app_and_hub, config):
     truth. This is what keeps them in step while the app is up."""
     import asyncio
 
-    from app.store import WarehouseRunStore
+    from server.store import WarehouseRunStore
     from shared.envelope import make_message
 
     app, hub = app_and_hub()
@@ -295,7 +311,7 @@ async def test_a_status_message_updates_the_registry(app_and_hub, config):
 
 
 async def test_non_status_messages_do_not_touch_the_warehouse(app_and_hub):
-    from app.store import WarehouseRunStore
+    from server.store import WarehouseRunStore
     from shared.envelope import make_message
 
     app, hub = app_and_hub()
@@ -320,7 +336,7 @@ async def test_a_failed_status_write_does_not_break_ingest(app_and_hub):
         async def query(self, sql, params=None):
             raise RuntimeError("warehouse asleep")
 
-    from app.store import WarehouseRunStore
+    from server.store import WarehouseRunStore
 
     app, hub = app_and_hub()
     hub.sql = Broken()

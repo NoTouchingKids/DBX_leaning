@@ -150,11 +150,21 @@ ortools_jobshop = "ortools"
 panel_fit = "panel"
 
 [tool.setuptools]
-packages = ["shared", "app", "job", "models"]
+packages = ["shared", "server", "job", "models"]
+# `server/` lives inside `app/`, the deployable app folder — see the layout
+# note in CLAUDE.md. Everything else is at the repo root.
+package-dir = { server = "app/server" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# The repo root FIRST, then the app folder. Order is load-bearing: `app/`
+# carries a tracked copy of `shared/` (it is deployed on its own and must be
+# self-contained), and with `app` ahead of `.` every test would import the
+# COPY. Root first means `shared` is always the canonical one and the copy is
+# only ever what the deployed app uses — which is also what
+# `tests/deploy/test_shared_copy.py` is there to keep true.
+pythonpath = [".", "app"]
 filterwarnings = ["error::DeprecationWarning:shared.*"]
 markers = [
     "requires_gurobi: needs gurobipy installed (bundled restricted licence)",
@@ -174,7 +184,9 @@ target-version = "py311"
 # one of which a static checker objects to and none of which is a defect.
 # Contorting them to satisfy the checker would cost readability and buy
 # nothing. Scoped this way, `uv run ty check` is a signal that sits at zero.
-include = ["app", "job", "models", "shared", "scripts"]
+# `app/server`, not `app` — `app/client` is TypeScript and `app/shared` is a
+# generated copy of `shared`, which would be checked twice and reported twice.
+include = ["app/server", "job", "models", "shared", "scripts"]
 
 [tool.ty.rules]
 # ty is pre-1.0, so it runs advisory (`uv run ty check`) rather than as a CI
@@ -192,3 +204,9 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # are serialised by Pydantic, msgpack and JSON, and the explicit str mixin is
 # the form every one of those handles identically across versions.
 ignore = ["UP042"]
+
+[tool.ruff.lint.isort]
+# `server` lives at `app/server`, not at the repo root, so ruff's automatic
+# first-party detection misses it and sorts it in with third-party imports.
+# Everything here is ours; say so rather than let the import blocks churn.
+known-first-party = ["server", "shared", "job", "models", "scripts", "entrypoints"]

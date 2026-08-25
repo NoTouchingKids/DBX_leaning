@@ -29,6 +29,13 @@ variables:
       SQL warehouse for the app's READ path only (backfill, reconciliation).
       Free Edition allows one, 2X-Small. Nothing writes through it.
     default: "7474655945367403"
+  app_volume:
+    description: >-
+      Unity Catalog volume giving the app a durable filesystem — exports,
+      uploads, cached artefacts. An App's own disk is not storage: it stops
+      after at most 24h and a redeploy replaces the container. Created by
+      uc_ddl/003_app_volume.sql.
+    default: app_store
   app_secret_scope:
     description: Secret scope holding the token a job presents to the app.
     default: dbx-leaning
@@ -47,7 +54,7 @@ variables:
   # the 5-concurrent-task ceiling. Postgres gives it what Delta structurally
   # cannot: a primary key on run_id, and a transaction around the
   # count-and-claim so that ceiling is enforced rather than merely observed
-  # (app/store.py, `pg_advisory_xact_lock`).
+  # (app/server/store.py, `pg_advisory_xact_lock`).
   #
   # Leaving `lakebase_host` empty is a SUPPORTED but DEGRADED deploy: the app
   # falls back to WarehouseRunStore, whose `release_slot` is a no-op that
@@ -72,22 +79,19 @@ variables:
       id, which is what Databricks provisions the Lakebase role for.
     default: ""
 
-# The workspace sync is the deployment mechanism, and `resources/app.yml`
-# hands the App the synced root as its source folder — so what is excluded
-# here is exactly what the App's export never sees.
+# The workspace sync is what puts the tree in the workspace;
+# `resources/app.yml` then hands Databricks Apps the `app/` subfolder of it,
+# and each job task runs `entrypoints/run_model.py` out of the same tree.
 #
-# The export rejects symlinks, naming one file. `.venv/bin/python` is what
-# fails first and is not the real problem: `frontend/node_modules` holds
-# thousands, that being how pnpm stores packages. Neither is excluded as an
-# optimisation — either one present in the workspace fails the whole deploy.
+# Two of these excludes are not tidiness. The App export rejects symlinks,
+# naming one file — `.venv/bin/python` is only the first, with
+# `app/client/node_modules` holding thousands because that is how pnpm stores
+# packages. Either one reaching the workspace fails the whole deploy.
 #
-# `frontend/**` goes wholesale. The client source has no business in the
-# workspace: there is no Node runtime there, nothing would ever build it, and
-# the built bundle is not in that directory anyway — `vite.config.ts` writes
-# `../dist`, at the app root, which is committed and syncs like any other
-# tracked file. That is what makes this list short: dist used to live under
-# `frontend/`, so every build-time config file had to be named one at a time
-# to avoid a glob swallowing the one directory that must travel.
+# `app/client/**` goes wholesale: the React source has no business in a
+# workspace with no Node runtime, and the build output is not in that
+# directory anyway — `vite.config.ts` writes `../dist`, i.e. `app/dist`, which
+# is committed and syncs like any other tracked file.
 sync:
   exclude:
     - .venv/**
@@ -96,7 +100,7 @@ sync:
     - "**/.pytest_cache/**"
     - .ruff_cache/**
     - .delta-local/**
-    - frontend/**
+    - app/client/**
     - tests/**
 
 targets:

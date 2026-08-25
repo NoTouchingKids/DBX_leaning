@@ -148,7 +148,8 @@ async def test_row_count_of_zero_is_reported_honestly(cfg, writer):
         results_table = "results_empty"
 
         def run(self): ...
-        def results(self): return []
+        def results(self):
+            return []
 
     conf = cfg(model_spec="x:Empty")
     outcome = await JobHarness(conf, writer=writer, handle=describe_object(Empty(), "e")).run()
@@ -210,7 +211,8 @@ async def test_results_table_resolution_order(cfg, writer):
 async def test_a_model_with_no_results_table_gets_one_from_its_module_name(cfg, writer):
     class Bare:
         def run(self): ...
-        def results(self): return [{"a": 1}]
+        def results(self):
+            return [{"a": 1}]
 
     conf = cfg(model_spec="models.scenario", results_table=None)
     await JobHarness(conf, writer=writer, handle=describe_object(Bare(), "bare")).run()

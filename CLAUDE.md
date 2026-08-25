@@ -115,7 +115,7 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   also buys what Delta structurally cannot: a primary key on `run_id`, and a
   transaction around the count-and-claim so the 5-task ceiling is real rather
   than advisory. Everything append-only — logs, progress, events, results —
-  stays in Delta. See `app/store.py`; the warehouse-backed store remains as
+  stays in Delta. See `app/server/store.py`; the warehouse-backed store remains as
   the unconfigured default so a deploy is never blocked on provisioning.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
@@ -152,7 +152,18 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 ## Repo layout (target)
 
 ```
-app/            FastAPI application (async, SSE, ServiceHub, whoami)
+app/            THE DEPLOYED APP — everything it needs, nothing else. This
+                whole folder is `source_code_path`; see the note below
+  server/       FastAPI application (async, SSE, ServiceHub, whoami)
+  client/       React SPA source. Never deployed — `vite.config.ts` writes
+                `../dist` and the bundle excludes `app/client/**` wholesale
+  dist/         The built SPA. COMMITTED, because a deploy driven from inside
+                Databricks has no Node runtime and sees only tracked files.
+                Rebuild and commit it when the client changes, or the deployed
+                UI is silently stale
+  shared/       A TRACKED COPY of shared/ — `scripts/sync_shared.py` makes it,
+                `tests/deploy/test_shared_copy.py` fails when it drifts
+  requirements.txt  App deps, where Databricks Apps looks for them
 job/            Job harness (WS client, HTTP push, Delta writer, model loader)
 models/         One package per model — eleven of them: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
@@ -164,13 +175,6 @@ models/         One package per model — eleven of them: gurobi_scheduling/,
 shared/         The message envelope + protocol helpers, imported by both
                 app/ and job/ (and indirectly by models/ via the callback
                 they're handed — models never import shared/ directly)
-frontend/       React SPA source — the AppKit `client/`. Never deployed:
-                `vite.config.ts` writes `../dist`, and the bundle excludes
-                `frontend/**` wholesale
-dist/           The built SPA, at the app root. COMMITTED, because a deploy
-                driven from inside Databricks has no Node runtime and sees
-                only tracked files. Rebuild and commit it when the frontend
-                changes, or the deployed UI is silently stale
 uc_ddl/         Unity Catalog DDL (telemetry + per-model results tables)
 lakebase_ddl/   Postgres DDL (run_status), applied at app startup
 schema/         Generated JSON Schema for the wire protocol
@@ -183,14 +187,19 @@ docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
 
-**The repo root is the app root.** `resources/app.yml` gives Databricks Apps
-this directory as its `source_code_path`, so `app/`, `shared/`,
-`requirements.txt` and `dist/` sit together the way AppKit's `my-app/` holds
-its server, `client/` and `dist/` — with FastAPI where their Node server
-would be. Nothing is staged or assembled first. The one hard rule is that no
-symlink may reach the workspace: the App export rejects them, and `.venv` and
-`frontend/node_modules` are excluded in `databricks.yml` for that reason, not
-for tidiness.
+**`app/` is the whole app and nothing else**, the shape the Databricks app
+template uses (`server/` + `client/`, `requirements.txt` at the app root), one
+level down so the repo can also hold the jobs. `resources/app.yml` gives
+Databricks Apps that folder as its `source_code_path` and nothing outside it
+travels — which is why `shared/` has a tracked copy at `app/shared/`, and why
+that copy is a copy: **the workspace export rejects symlinks**, and it is the
+same rule that keeps `.venv` and `app/client/node_modules` out of the sync.
+Nothing is staged or assembled at deploy time; `app/` is a real directory.
+
+The duplication is a known compromise, scoped to this stage — packaging
+`shared` as a wheel retires it. `tests/deploy/test_shared_copy.py` is what
+makes it safe in the meantime: it fails the moment the two differ, and it
+asserts that tests import the canonical `shared/`, never the copy.
 
 ## Deployment shape: a model is a microservice
 
@@ -205,7 +214,7 @@ duplication is what lets them diverge.
 - **Dependencies are exported from `uv.lock`** by
   `scripts/export_requirements.py`, never re-resolved — what deploys is what
   the tests ran against, and `tests/deploy/` fails if that stops being true.
-- **Job parameters are a contract with `app/routes/runs.py`.** Databricks
+- **Job parameters are a contract with `app/server/routes/runs.py`.** Databricks
   rejects a `run-now` parameter a job has not declared, so both sides are
   pinned to `JOB_PARAMETER_NAMES` and tested against each other.
 
@@ -229,7 +238,7 @@ Full procedure: `deploy/README.md`.
    frontend did this again for its per-model views.
 4. Frontend was explicitly low-priority until `app/`, `job/` and one model
    worked end to end. That gate is met and the track has started — see
-   `frontend/README.md`.
+   `app/client/README.md`.
 5. **Not done:** `databricks bundle deploy` has never been run against a
    workspace, `scripts/probe_sample_data.py` has never been run end to end on
    one, and there is no CI. Do not read "built and tested" as "deployed".

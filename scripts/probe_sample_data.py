@@ -53,7 +53,6 @@ CANDIDATES = [
 ]
 
 
-
 #: The Unity Catalog **volume** of file-based sample datasets, documented at
 #: https://docs.databricks.com/aws/en/discover/databricks-datasets (retrieved
 #: 2026-08-24). This is the UC-native, governed, egress-free source of files —
@@ -257,8 +256,7 @@ def main() -> int:
             described.append(table)
 
     print(
-        f"{len(present)} tables in samples; {len(by_table)} with columns; "
-        f"reporting {len(wanted)}"
+        f"{len(present)} tables in samples; {len(by_table)} with columns; reporting {len(wanted)}"
     )
     if described:
         print(

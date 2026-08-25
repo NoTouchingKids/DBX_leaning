@@ -9,7 +9,8 @@ class Complete:
 
     def build(self): ...
     def run(self): ...
-    def results(self): return []
+    def results(self):
+        return []
 
 
 def test_discovers_the_conventional_surface():
@@ -24,7 +25,8 @@ def test_discovers_the_conventional_surface():
 def test_aliases_are_accepted():
     class Alias:
         def fit(self): ...
-        def get_results(self): return []
+        def get_results(self):
+            return []
 
     h = describe_object(Alias(), "alias")
     assert h.found["run"] == "fit"
@@ -55,7 +57,8 @@ def test_a_gurobi_style_model_needs_no_run_method():
     class Grb:
         grb_model = object()
 
-        def results(self): return []
+        def results(self):
+            return []
 
     h = describe_object(Grb(), "grb")
     assert h.run is None and h.gurobi_model is not None
@@ -132,7 +135,8 @@ def test_a_gurobi_model_is_discovered_before_build_has_created_it():
         def build(self):
             self.grb_model = object()
 
-        def results(self): return []
+        def results(self):
+            return []
 
     obj = LateGrb()
     handle = describe_object(obj, "late")

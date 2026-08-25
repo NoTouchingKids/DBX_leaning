@@ -2,7 +2,7 @@
 
 ADR-001 action item 3. The browser now subscribes per named event
 (``addEventListener('progress', ...)``) instead of one ``onmessage``, and
-``app/routes/stream.py`` is written on the assumption that ``Last-Event-ID``
+``app/server/routes/stream.py`` is written on the assumption that ``Last-Event-ID``
 resume works unchanged across named events. That assumption is correct *per
 the SSE spec*. "Correct per spec" is not "verified against this server", and
 this repo has three bugs in its history that were right in every offline test
@@ -34,8 +34,8 @@ from dataclasses import dataclass, field
 import pytest
 import uvicorn
 
-from app.main import create_app
-from app.repository import RunRepository
+from server.main import create_app
+from server.repository import RunRepository
 from shared.envelope import make_message
 
 from .test_results import ScriptedSql
@@ -327,7 +327,7 @@ async def test_a_log_line_containing_newlines_cannot_break_the_frame(live):
     *event*. A model that logs a stack trace, or a solver that logs a line
     beginning "data:", would otherwise inject frames into the stream.
     """
-    nasty = "traceback:\nline two\n\nid: 999\nevent: status\ndata: {\"injected\": true}\n"
+    nasty = 'traceback:\nline two\n\nid: 999\nevent: status\ndata: {"injected": true}\n'
     async with live() as (port, hub):
         conn = await open_stream(port)
         try:
@@ -612,7 +612,7 @@ async def test_the_seq_stream_a_browser_sees_legitimately_has_gaps(live):
     a browser watching a Gurobi run sees 0, 1, 3, 4 with no 2, and that is
     correct rather than a dropped message.
 
-    These gaps can never be closed. `app/repository.py::messages_since` — the
+    These gaps can never be closed. `app/server/repository.py::messages_since` — the
     backfill query — carries `AND client_visible` on its log branch, so seq 2
     is not in the live stream *and* not in the backfill. A client that retries
     backfill until its seq range is contiguous will retry forever.

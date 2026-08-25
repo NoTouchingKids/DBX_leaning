@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true", help="build every model under models/")
     parser.add_argument(
         # NOT `dist`: that name at the repo root is the built SPA now, and it
-        # is tracked (see frontend/.gitignore). Wheels go under `build/`,
+        # is tracked (see app/client/.gitignore). Wheels go under `build/`,
         # which .gitignore already covers.
         "-o",
         "--out-dir",

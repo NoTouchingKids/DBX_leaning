@@ -13,6 +13,9 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REQUIREMENTS = ROOT / "deploy" / "requirements"
+#: The app installs from its own SOURCE directory — `app/`, which is what
+#: `resources/app.yml` gives Databricks Apps — not from the repo root.
+APP_REQUIREMENTS = ROOT / "app" / "requirements.txt"
 
 #: library -> the pyproject extra that provides it. Two models sharing an
 #: extra legitimately share its libraries, so the property to assert is not
@@ -51,9 +54,7 @@ def test_a_library_reaches_exactly_the_models_entitled_to_it(library):
     environment whose extra does."""
     owning_extra = LIBRARY_OWNER[library]
     entitled = {m for m, extra in registry().items() if extra == owning_extra}
-    carrying = {
-        path.stem for path in REQUIREMENTS.glob("*.txt") if library in pins(path)
-    }
+    carrying = {path.stem for path in REQUIREMENTS.glob("*.txt") if library in pins(path)}
     assert carrying == entitled, (
         f"{library} is in {sorted(carrying)} but entitled: {sorted(entitled)}"
     )
@@ -73,7 +74,7 @@ def test_every_model_has_an_environment_file():
 
 
 def test_the_app_carries_no_model_libraries_at_all():
-    installed = pins(ROOT / "requirements.txt")
+    installed = pins(APP_REQUIREMENTS)
     for library in LIBRARY_OWNER:
         assert library not in installed, f"the app should not install {library}"
     assert "deltalake" not in installed, "the app never writes Delta"
@@ -84,7 +85,7 @@ def test_every_environment_pins_the_same_version_of_a_shared_dependency():
     """One resolution, many subsets. Two environments disagreeing about
     pydantic would mean the lock was bypassed somewhere."""
     versions: dict[str, set[str]] = {}
-    for path in [*REQUIREMENTS.glob("*.txt"), ROOT / "requirements.txt"]:
+    for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS]:
         for package, version in pins(path).items():
             versions.setdefault(package, set()).add(version)
     conflicts = {p: v for p, v in versions.items() if len(v) > 1}
@@ -92,7 +93,7 @@ def test_every_environment_pins_the_same_version_of_a_shared_dependency():
 
 
 def test_nothing_is_left_unpinned():
-    for path in [*REQUIREMENTS.glob("*.txt"), ROOT / "requirements.txt"]:
+    for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS]:
         for line in path.read_text().splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -132,4 +133,4 @@ def test_torch_reaches_exactly_one_job_environment():
     """The claim the whole microservice split rests on."""
     carrying = [p.name for p in REQUIREMENTS.glob("*.txt") if "torch" in pins(p)]
     assert carrying == ["neural_net.txt"], carrying
-    assert "torch" not in pins(ROOT / "requirements.txt"), "the app must not install torch"
+    assert "torch" not in pins(APP_REQUIREMENTS), "the app must not install torch"

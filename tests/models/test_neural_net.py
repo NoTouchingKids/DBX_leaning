@@ -177,9 +177,7 @@ def test_the_excluded_column_really_would_have_leaked():
     # And the honest feature set does *not* determine the label: trips at the
     # same distance land in different classes.
     bucket = np.round(distance, 1)
-    ambiguous = sum(
-        len(set(labels[bucket == b].tolist())) > 1 for b in set(bucket.tolist())
-    )
+    ambiguous = sum(len(set(labels[bucket == b].tolist())) > 1 for b in set(bucket.tolist()))
     assert ambiguous > 0, "distance alone determines the label — the target is trivial"
 
 
@@ -287,6 +285,7 @@ def test_the_same_seed_gives_the_same_run(recorder):
     second = train(recorder, {"epochs": 3})
 
     assert first[1].history == second[1].history
+
     # Everything but the wall clock, which is not a property of the model.
     def comparable(rows):
         return [{k: v for k, v in row.items() if k != "train_time_seconds"} for row in rows]
@@ -307,9 +306,7 @@ def test_a_different_seed_gives_a_different_run(recorder):
 
 def test_cancelling_mid_training_still_produces_a_usable_report(recorder):
     """Cancellation is a clean outcome: the best checkpoint is kept."""
-    r, model, rows, status = train(
-        recorder, {"epochs": 200, "limit": 1200}, cancel_after=10
-    )
+    r, model, rows, status = train(recorder, {"epochs": 200, "limit": 1200}, cancel_after=10)
 
     assert len(model.history) < 200, "cancellation was ignored"
     assert model.cancelled is True
@@ -402,9 +399,10 @@ def test_rows_the_real_table_left_null_are_dropped_loudly(recorder, monkeypatch)
     model = r.attach(build_model({**FAST, "epochs": 1}))
     model.build()
 
-    assert int(model._tensors["X_train"].shape[0]) + int(
-        model._tensors["X_val"].shape[0]
-    ) == len(holed) - 2
+    assert (
+        int(model._tensors["X_train"].shape[0]) + int(model._tensors["X_val"].shape[0])
+        == len(holed) - 2
+    )
 
 
 # --- the platform contract -------------------------------------------------

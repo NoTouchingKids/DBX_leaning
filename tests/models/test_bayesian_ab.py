@@ -480,10 +480,16 @@ def test_cancelling_mid_run_keeps_the_arms_it_already_fitted(recorder):
     """Cancelled after the posteriors exist but before the comparison: two arm
     rows, no comparison row, and `complete` False on both."""
     r = recorder()
-    model = r.attach(build_model({"arms": [
-        {"label": "control", "successes": 30, "trials": 100},
-        {"label": "variant", "successes": 45, "trials": 100},
-    ]}))
+    model = r.attach(
+        build_model(
+            {
+                "arms": [
+                    {"label": "control", "successes": 30, "trials": 100},
+                    {"label": "variant", "successes": 45, "trials": 100},
+                ]
+            }
+        )
+    )
     model.build()
     original = model._stage_posteriors
 
@@ -521,10 +527,16 @@ def test_cancelling_before_anything_ran_writes_nothing(recorder):
 
 def test_a_run_cancelled_late_keeps_its_comparison(recorder):
     r = recorder()
-    model = r.attach(build_model({"arms": [
-        {"label": "control", "successes": 30, "trials": 100},
-        {"label": "variant", "successes": 60, "trials": 100},
-    ]}))
+    model = r.attach(
+        build_model(
+            {
+                "arms": [
+                    {"label": "control", "successes": 30, "trials": 100},
+                    {"label": "variant", "successes": 60, "trials": 100},
+                ]
+            }
+        )
+    )
     model.build()
     original = model._stage_expected_loss
 
@@ -586,10 +598,14 @@ def test_the_results_table_ddl_matches_the_rows_the_model_writes():
     assert {"run_id", "chunk_index"} <= columns
     assert re.search(r"COMMENT '.*'", sql)
 
-    model = build_model({"arms": [
-        {"label": "control", "successes": 1, "trials": 4},
-        {"label": "variant", "successes": 3, "trials": 4},
-    ]})
+    model = build_model(
+        {
+            "arms": [
+                {"label": "control", "successes": 1, "trials": 4},
+                {"label": "variant", "successes": 3, "trials": 4},
+            ]
+        }
+    )
     model.emit = lambda *_, **__: None
     model.should_cancel = lambda: False
     model.build()

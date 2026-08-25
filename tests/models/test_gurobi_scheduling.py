@@ -323,8 +323,9 @@ def test_a_real_run_and_a_fallback_run_are_distinguishable_afterwards(recorder):
     rows = hourly_curve(trips=900)
     real = build_instance(demand_data=dataset(rows))
     fell_back = build_instance(
-        demand_data=dataset(rows, synthetic=True, source="synthetic:hourly-demand",
-                            reason="no Spark session")
+        demand_data=dataset(
+            rows, synthetic=True, source="synthetic:hourly-demand", reason="no Spark session"
+        )
     )
 
     _, real_model = solved(recorder, instance=real)

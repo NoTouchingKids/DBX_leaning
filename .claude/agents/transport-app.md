@@ -58,7 +58,7 @@ one round trip rather than polling for completion.
 
 **Run state is in Lakebase (Postgres), not the warehouse.** This brief
 predates that decision and reads in places as if `run_status` were warehouse
-SQL; it is not. `app/store.py` has two implementations behind one interface:
+SQL; it is not. `app/server/store.py` has two implementations behind one interface:
 
 - `PostgresRunStore` — the design. A primary key on `run_id`, and an advisory
   lock wrapping the count-and-claim, which is what makes the account-wide
@@ -151,10 +151,10 @@ Edition) is a drop-in, not a rewrite that touches every call site.
 - No `databricks-sdk`, no `databricks-sql-connector`, no Spark. Plain REST
   over `httpx`.
 - No polling of any kind for status or cancel.
-- No frontend code — this agent is API-only. (`app/spa.py` serving `dist/` is
+- No frontend code — this agent is API-only. (`app/server/spa.py` serving `dist/` is
   the one exception, and it serves a bundle it does not build: Databricks Apps
   has no Node runtime, so `pnpm build` — which writes the repo root's `dist/`
-  from `frontend/` — has to happen, and be committed, before a deploy, or
+  from `app/client/` — has to happen, and be committed, before a deploy, or
   every page serves the previous bundle or answers 503.)
 
 ## Tests

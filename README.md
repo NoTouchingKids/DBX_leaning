@@ -59,7 +59,8 @@ databricks.yml         Asset bundle: eleven jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
 entrypoints/           What a Databricks job actually runs
-frontend/              React SPA. Transport spine done; shell in progress
+app/                   The deployed app: server/ (FastAPI), client/ (React
+                       source), dist/ (built SPA), shared/ (a tracked copy)
 tests/                 ~790 tests, none needing a Databricks connection
 scripts/               dev_stack.py — the whole platform locally, no workspace
                        dev_launcher.py — its stand-in for the Jobs API
@@ -83,7 +84,7 @@ uv run ty check                         # types (advisory — see below)
 DBX_MODEL=models.scenario DBX_WRITER=jsonl DBX_ALLOW_LOCAL_WRITER=1 \
   uv run python -m job.main
 
-uv run uvicorn app.main:app --reload    # the observer, on :8000
+uv run uvicorn server.main:app --reload    # the observer, on :8000
 ```
 
 Extras are separable, and the lockfile covers all of them from one

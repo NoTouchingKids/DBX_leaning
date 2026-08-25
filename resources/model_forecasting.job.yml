@@ -14,7 +14,7 @@ resources:
 
       # The account ceiling is 5 concurrent job TASKS across ALL models
       # combined, which Databricks has no way to express per-job — so the app
-      # enforces it globally before triggering (app/routes/runs.py) and this
+      # enforces it globally before triggering (app/server/routes/runs.py) and this
       # only bounds this one model.
       max_concurrent_runs: 1
       timeout_seconds: 3600

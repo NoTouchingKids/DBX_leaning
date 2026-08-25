@@ -26,12 +26,8 @@ def test_the_fallback_is_deterministic():
 
 def test_the_fallback_has_the_same_columns_as_the_real_table():
     """A model must behave identically on either, which starts with shape."""
-    assert set(nyc_taxi_hourly(days=1).rows[0]) == {
-        "hour_ts", "trips", "avg_fare", "avg_distance"
-    }
-    assert set(nyc_taxi_trips(limit=10).rows[0]) == {
-        "trip_distance", "fare_amount", "duration_min"
-    }
+    assert set(nyc_taxi_hourly(days=1).rows[0]) == {"hour_ts", "trips", "avg_fare", "avg_distance"}
+    assert set(nyc_taxi_trips(limit=10).rows[0]) == {"trip_distance", "fare_amount", "duration_min"}
 
 
 def test_provenance_is_carried_not_hidden():
@@ -58,9 +54,7 @@ def test_real_data_reports_itself_as_real():
 
 def test_a_query_failure_falls_back_rather_than_raising(monkeypatch):
     monkeypatch.setattr(sd, "query", lambda sql, limit=None: (None, "TABLE_OR_VIEW_NOT_FOUND"))
-    data = sd.load(
-        "SELECT 1", source="samples.nope", fallback=lambda: [{"x": 1}], minimum_rows=1
-    )
+    data = sd.load("SELECT 1", source="samples.nope", fallback=lambda: [{"x": 1}], minimum_rows=1)
     assert data.synthetic and data.reason == "TABLE_OR_VIEW_NOT_FOUND"
 
 
@@ -80,9 +74,7 @@ def test_a_table_that_exists_but_is_nearly_empty_falls_back(monkeypatch):
 
 def test_rows_are_used_when_there_are_enough_of_them(monkeypatch):
     monkeypatch.setattr(sd, "query", lambda sql, limit=None: ([{"x": i} for i in range(50)], None))
-    data = sd.load(
-        "SELECT 1", source="samples.t", fallback=lambda: [], minimum_rows=48
-    )
+    data = sd.load("SELECT 1", source="samples.t", fallback=lambda: [], minimum_rows=48)
     assert not data.synthetic and len(data) == 50
 
 

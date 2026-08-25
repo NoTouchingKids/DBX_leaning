@@ -15,7 +15,7 @@ import tempfile
 
 import pytest
 
-from app.store import DuplicateRun, PostgresRunStore, RunRecord, SlotDenied
+from server.store import DuplicateRun, PostgresRunStore, RunRecord, SlotDenied
 from shared.envelope import RunStatus
 from shared.tables import TableSet
 
@@ -35,6 +35,7 @@ class RecordingSql:
         return []
 
     async def close(self): ...
+
 
 pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
 
@@ -111,10 +112,7 @@ async def test_simultaneous_claims_cannot_both_pass_the_ceiling(store):
     with no transaction around the pair. Ten at once against a ceiling of
     three must yield exactly three."""
     await asyncio.gather(
-        *(
-            store.claim_slot(f"race-{i}", model="scenario", ceiling=3)
-            for i in range(10)
-        ),
+        *(store.claim_slot(f"race-{i}", model="scenario", ceiling=3) for i in range(10)),
         return_exceptions=True,
     )
     assert await store.active_count() == 3
@@ -243,7 +241,7 @@ async def test_the_warehouse_store_actually_stores_the_job_run_id():
     `claim_slot` inserts the row before the Jobs API is called, so by the time
     a job run id exists the row does too — and `set_run_status`'s MERGE set
     `job_run_id` only on its NOT MATCHED branch. The column stayed NULL
-    forever, and `app/reconcile.py::_resolve` needs it to ask the Jobs API how
+    forever, and `app/server/reconcile.py::_resolve` needs it to ask the Jobs API how
     a run ended. Without it that route is dead and reconciliation degrades to
     the last `run_events` row, which is precisely what a job that crashed
     before emitting anything never wrote.
@@ -251,8 +249,8 @@ async def test_the_warehouse_store_actually_stores_the_job_run_id():
     Nothing failed, and nothing said so. Same quiet class as the Lakebase
     wiring gap.
     """
-    from app.repository import RunRepository
-    from app.store import WarehouseRunStore
+    from server.repository import RunRepository
+    from server.store import WarehouseRunStore
 
     sql = RecordingSql()
     store = WarehouseRunStore(RunRepository(sql, TableSet()))
@@ -275,7 +273,7 @@ async def test_a_status_update_does_not_wipe_the_job_run_id():
     bug above and immediately introduce a worse one: the id would be nulled on
     the first RUNNING write, one message after it was stored. Hence COALESCE.
     """
-    from app.repository import RunRepository
+    from server.repository import RunRepository
 
     sql = RecordingSql()
     repo = RunRepository(sql, TableSet())

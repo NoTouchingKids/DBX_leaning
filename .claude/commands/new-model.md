@@ -90,7 +90,7 @@ file fails loudly rather than deploying wrong:
 
 - `resources.jobs.model_<name>` — the key must match the file name.
 - `parameters:` must declare **exactly** `JOB_PARAMETER_NAMES` from
-  `app/routes/runs.py`, no more and no less. Databricks rejects a `run-now`
+  `app/server/routes/runs.py`, no more and no less. Databricks rejects a `run-now`
   parameter a job has not declared, so drift here breaks every trigger.
 - Each declared parameter must also be forwarded to the task as
   `KEY={{job.parameters.KEY}}` — serverless tasks have no `spark_env_vars`,
@@ -129,7 +129,7 @@ needs an `ALTER TABLE ... ADD COLUMNS` by hand — see `uc_ddl/README.md`.
 
 ### Not enforced anywhere, and still needed
 
-`frontend/src/lib/models.ts` carries a hand-derived `ModelSpec` per model —
+`app/client/src/lib/models.ts` carries a hand-derived `ModelSpec` per model —
 its config fields and its progress-payload shape — and `MODEL_SPECS` is what
 the SPA renders a trigger form from. Its own header says there is no test that
 will tell you when it drifts. A model missing from it is triggerable by API

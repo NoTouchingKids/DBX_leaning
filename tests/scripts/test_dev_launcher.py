@@ -3,7 +3,7 @@
 The tests that matter here are the ones about *fidelity*: the launcher exists
 so a developer exercises the real trigger path, and a launcher that quietly
 accepted something Databricks refuses (or produced a response shape
-``app/jobs_api.py`` does not actually read) would hide exactly the bugs the
+``app/server/jobs_api.py`` does not actually read) would hide exactly the bugs the
 local loop is meant to surface.
 """
 
@@ -15,8 +15,6 @@ import pathlib
 import pytest
 from fastapi.testclient import TestClient
 
-from app.jobs_api import JobsApi
-from app.routes.runs import JOB_PARAMETER_NAMES, build_job_parameters
 from entrypoints.run_model import parse_settings
 from scripts._registry import model_names
 from scripts.dev_launcher import (
@@ -28,6 +26,8 @@ from scripts.dev_launcher import (
     create_launcher_app,
     dev_job_ids,
 )
+from server.jobs_api import JobsApi
+from server.routes.runs import JOB_PARAMETER_NAMES, build_job_parameters
 from shared.envelope import MessageAdapter, RunStatus, StatusMessage
 
 
@@ -186,7 +186,7 @@ def test_the_spawned_job_writes_locally_and_says_so(tmp_path):
     assert env["DATABRICKS_JOB_RUN_ID"] == "17"
 
 
-# --- the response shape app/jobs_api.py actually reads ---------------------
+# --- the response shape app/server/jobs_api.py actually reads ---------------------
 
 
 @pytest.mark.parametrize(

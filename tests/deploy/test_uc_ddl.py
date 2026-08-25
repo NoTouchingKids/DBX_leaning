@@ -142,14 +142,14 @@ def test_run_status_carries_what_the_run_store_reads(columns):
     says nothing about it. The warehouse-backed store reads it by name, and
     those names are what must line up.
     """
-    from app.store import _COLUMN_NAMES
+    from server.store import _COLUMN_NAMES
 
     missing = sorted(set(_COLUMN_NAMES) - set(columns["run_status"]))
     assert not missing, f"WarehouseRunStore selects {missing}, which run_status lacks"
 
 
 def test_run_status_stays_nullable_where_the_merge_leaves_it_empty(columns):
-    """`app/repository.py::set_run_status` upserts with only
+    """`app/server/repository.py::set_run_status` upserts with only
     (run_id, job_run_id, status, detail, updated_ts).
 
     The Postgres copy of this table declares `model` and `started_ts` NOT NULL

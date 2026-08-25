@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.repository import RunRepository
-from app.sql import P, SqlClient, SqlUnavailable
+from server.repository import RunRepository
+from server.sql import P, SqlClient, SqlUnavailable
 from shared.tables import TableSet
 
 from .conftest import FakeHttp, statement_response
@@ -95,5 +95,7 @@ def test_a_string_parameter_stores_a_string_not_whatever_it_was_given():
     assert P.str("job_run_id", 987654).value == "987654"
     assert P.str("detail", None).value is None
     assert P.str("job_run_id", 987654).as_api() == {
-        "name": "job_run_id", "value": "987654", "type": "STRING"
+        "name": "job_run_id",
+        "value": "987654",
+        "type": "STRING",
     }

@@ -4,8 +4,8 @@ What this drives, end to end:
 
     POST /api/runs  ->  PostgresRunStore.claim_slot  ->  the launcher
       ->  entrypoints/run_model.py in its own OS process  ->  job/ harness
-      ->  a real model  ->  WebSocket (or HTTP push) into app/routes/ingest
-      ->  hub.ingest  ->  SSE out of app/routes/stream
+      ->  a real model  ->  WebSocket (or HTTP push) into app/server/routes/ingest
+      ->  hub.ingest  ->  SSE out of app/server/routes/stream
 
 Only the Jobs API is substituted, and the durable writer is the local JSONL
 one. Everything between the HTTP request and the browser's event stream is the
@@ -26,10 +26,10 @@ import threading
 
 import pytest
 
-from app.config import AppConfig
-from app.main import create_app
 from scripts.dev_launcher import LocalJobLauncher, create_launcher_app
 from scripts.dev_stack import DEV_JOB_TOKEN, DevStack
+from server.config import AppConfig
+from server.main import create_app
 
 pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
 pytest.importorskip("websockets", reason="needs the job extra")
@@ -121,8 +121,9 @@ def running(stack):
         },
     )
     app = create_app(AppConfig.from_env(stack.app_env()))
-    with ThreadedServer(app, stack.app_port), ThreadedServer(
-        create_launcher_app(launcher), stack.launcher_port
+    with (
+        ThreadedServer(app, stack.app_port),
+        ThreadedServer(create_launcher_app(launcher), stack.launcher_port),
     ):
         yield stack, launcher
     launcher.shutdown()
@@ -177,9 +178,7 @@ async def test_a_model_triggered_from_the_api_streams_back_over_sse(running):
         # Subscribe first, using a run_id we choose, so nothing is missed on a
         # model that finishes in half a second.
         run_id = "e2e-stream"
-        stream = asyncio.create_task(
-            read_stream(client, f"/api/runs/{run_id}/stream")
-        )
+        stream = asyncio.create_task(read_stream(client, f"/api/runs/{run_id}/stream"))
         await asyncio.sleep(0.2)
 
         response = await client.post("/api/runs", json={"model": MODEL, "run_id": run_id})
@@ -275,7 +274,7 @@ async def test_the_concurrency_ceiling_answers_429_rather_than_launching(running
     async with httpx.AsyncClient(base_url=stack.app_url, timeout=30.0) as client:
         # Occupy every slot with runs that are registered but never launched,
         # so the test does not depend on five real processes staying alive.
-        from app.store import PostgresRunStore
+        from server.store import PostgresRunStore
 
         store = PostgresRunStore(stack.dsn or "")
         for i in range(5):

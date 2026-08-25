@@ -11,7 +11,7 @@ from job.main import _install_loop_error_handler
 
 
 async def test_a_dead_live_channel_does_not_log_at_error(caplog):
-    """"Nothing listening" is the normal case. A stack trace at ERROR on a
+    """ "Nothing listening" is the normal case. A stack trace at ERROR on a
     run that succeeded reads like a failure."""
     loop = asyncio.get_running_loop()
     _install_loop_error_handler(loop)

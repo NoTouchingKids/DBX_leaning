@@ -2,7 +2,7 @@
 
 Two things are worth testing here and the rest is plumbing:
 
-- the environment it hands the app must be one ``app/config.py`` actually
+- the environment it hands the app must be one ``app/server/config.py`` actually
   accepts, because the whole design depends on ``app/`` not knowing it is
   running locally;
 - the preflight must name a fix for every prerequisite, because the failure
@@ -17,10 +17,10 @@ import re
 
 import pytest
 
-from app.config import AppConfig
 from scripts import dev_stack
 from scripts._registry import model_names
 from scripts.dev_stack import DEV_JOB_TOKEN, DevStack, build_parser, preflight
+from server.config import AppConfig
 
 REPO_ROOT = pathlib.Path(dev_stack.__file__).resolve().parent.parent
 
@@ -90,7 +90,7 @@ def test_the_job_reconnect_interval_reaches_the_spawned_job(tmp_path):
 def test_the_app_is_served_by_uvicorn_on_the_configured_port(stack):
     command = stack.app_command()
 
-    assert "app.main:app" in command
+    assert "server.main:app" in command
     assert command[command.index("--port") + 1] == "8123"
     assert "--reload" not in command
 
@@ -103,7 +103,7 @@ def test_reload_is_opt_in(tmp_path):
 
 
 def test_the_default_port_is_the_one_vite_proxies_to():
-    """``frontend/vite.config.ts`` hard-codes the dev proxy target.
+    """``app/client/vite.config.ts`` hard-codes the dev proxy target.
 
     Two files have to agree on a port number and nothing else connects them,
     so this is the thing that notices when one of them moves.
@@ -115,7 +115,7 @@ def test_the_default_port_is_the_one_vite_proxies_to():
     targets = set(re.findall(r"(?:http|ws)://127\.0\.0\.1:(\d+)", config.read_text()))
 
     assert targets == {str(dev_stack.DEFAULT_APP_PORT)}, (
-        "frontend/vite.config.ts proxies somewhere the dev stack does not serve; "
+        "app/client/vite.config.ts proxies somewhere the dev stack does not serve; "
         "change DEFAULT_APP_PORT to match, or pass --app-port"
     )
 
@@ -205,7 +205,7 @@ def test_stale_runs_from_a_previous_session_are_failed(tmp_path):
     pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
     import asyncio
 
-    from app.store import PostgresRunStore
+    from server.store import PostgresRunStore
     from shared.envelope import RunStatus
 
     server = pgserver.get_server(tmp_path / "pg")

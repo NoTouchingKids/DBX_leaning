@@ -1,16 +1,16 @@
 ---
 name: frontend
-description: Works on frontend/ — the React SPA. The transport spine is built and tested; the app shell is in progress. Read frontend/README.md first — it is ahead of this brief.
+description: Works on app/client/ — the React SPA. The transport spine is built and tested; the app shell is in progress. Read app/client/README.md first — it is ahead of this brief.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 ## Status: this track has started, and this brief is behind the code
 
-This file was written before any of `frontend/` existed. It is kept because
+This file was written before any of `app/client/` existed. It is kept because
 the *reasoning* in it is still the settled architecture and is not recorded
 anywhere else. It is not a description of what is left to do.
 
-**Read `frontend/README.md` first.** It is maintained alongside the code and
+**Read `app/client/README.md` first.** It is maintained alongside the code and
 is the authority on what exists; this brief is the authority on why. Where
 they disagree, the README and the source win. Concretely, since this was
 written: the transport spine under `src/transport/` is finished and tested
@@ -56,11 +56,11 @@ Read `CLAUDE.md`, `docs/message-envelope-spec.md`, and
 The ADR this section originally cited (`claude/frontend-stack-adr.md`) is not
 in this repo and never was — every reference to "the ADR" below is a dead
 link. What survived of it is this list, plus the three constraints in
-`frontend/README.md` ("The stack, and the one thing to know about each
+`app/client/README.md` ("The stack, and the one thing to know about each
 choice"), which is the current record.
 
 Three items below did not survive contact with the build, and
-`frontend/package.json` is the authority on all of them:
+`app/client/package.json` is the authority on all of them:
 
 - **No headless component library.** Radix/shadcn was never installed; the
   component layer is plain Tailwind v4. Adding one now is a real decision,
@@ -108,7 +108,7 @@ Three items below did not survive contact with the build, and
 The SSE connection is owned by a `SharedWorker`, not by individual
 tabs/pages. This is the one section of this brief that was built exactly as
 written — `src/transport/` is the implementation and
-`frontend/README.md` ("The transport spine") is the map of it:
+`app/client/README.md` ("The transport spine") is the map of it:
 
 - The worker holds the single `EventSource` connection per browser session
   (this is also what solves the HTTP/1.1 6-connections-per-origin problem —
@@ -255,7 +255,7 @@ API and absent from the UI.
 ## Tests
 
 These were written as a wishlist and are now mostly real — `src/**/*.test.ts`
-in jsdom, plus six Playwright specs in `e2e/`. Check `frontend/README.md`
+in jsdom, plus six Playwright specs in `e2e/`. Check `app/client/README.md`
 ("Browser tests") before adding another: the jsdom transport tests run against
 a fake `EventSource` and by construction cannot reproduce a real socket, a
 real `SharedWorker`, an IndexedDB surviving navigation, or a reconnect —

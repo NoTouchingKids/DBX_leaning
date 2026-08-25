@@ -183,7 +183,7 @@ none resolved) are still the only figures anyone has:
 Three independent, consistent reports across two different apps in this
 project's own history is enough to design against, which is what
 `DBX_WS_PING_S` (20s, `job/config.py`) and `DBX_SSE_KEEPALIVE_S` (10s,
-`app/config.py`) are set from. They are conservative guesses that work, not
+`app/server/config.py`) are set from. They are conservative guesses that work, not
 tuned values. `docs/spike-results.md` lists the three measurements that would
 change specific code, and none of them is recorded yet.
 

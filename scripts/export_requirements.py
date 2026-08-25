@@ -66,11 +66,13 @@ def export(extras: list[str]) -> str:
     still exact — the pinning comes from the lock, not from the hashes.
     """
     cmd = [
-        "uv", "export",
+        "uv",
+        "export",
         "--no-dev",
         "--no-hashes",
         "--no-emit-project",  # the code arrives by workspace sync, not pip
-        "--format", "requirements-txt",
+        "--format",
+        "requirements-txt",
     ]
     for extra in extras:
         cmd += ["--extra", extra]
@@ -90,9 +92,10 @@ def render(name: str, extras: list[str]) -> str:
 
 def targets() -> dict[pathlib.Path, str]:
     out = {OUT_DIR / f"{name}.txt": render(name, extras) for name, extras in ENVIRONMENTS.items()}
-    # The app's list lives at the repo root: Databricks Apps installs
-    # requirements.txt from the app's source directory, which is the root.
-    out[ROOT / "requirements.txt"] = render("databricks-app", APP_EXTRAS)
+    # The app's list lives in `app/`, not at the repo root: Databricks Apps
+    # installs requirements.txt from the app's SOURCE directory, and
+    # `resources/app.yml` points that at `../app`.
+    out[ROOT / "app" / "requirements.txt"] = render("databricks-app", APP_EXTRAS)
     return out
 
 
