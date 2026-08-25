@@ -21,6 +21,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from .oauth import bearer_headers
+
 log = logging.getLogger(__name__)
 
 __all__ = ["Param", "P", "SqlClient", "SqlUnavailable", "StatementError"]
@@ -94,6 +96,7 @@ class SqlClient:
         warehouse_id: str | None,
         token: str | None,
         *,
+        token_provider=None,
         wait_timeout_s: int = 30,
         timeout_s: float = 60.0,
         client: Any = None,
@@ -101,6 +104,8 @@ class SqlClient:
         self.host = host.rstrip("/") if host else None
         self.warehouse_id = warehouse_id
         self.token = token
+        #: Awaited per request when set — see `oauth.bearer_headers`.
+        self.token_provider = token_provider
         self.wait_timeout_s = max(5, min(50, wait_timeout_s))
         self.timeout_s = timeout_s
         self._client = client
@@ -135,7 +140,7 @@ class SqlClient:
             body["parameters"] = [p.as_api() for p in params]
 
         http = await self._http()
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = await bearer_headers(self.token, self.token_provider)
         resp = await http.post(f"{self.host}/api/2.0/sql/statements", json=body, headers=headers)
         self.statements += 1
         if resp.status_code >= 400:

@@ -150,21 +150,25 @@ def _config(**env) -> AppConfig:
     return AppConfig.from_env({"DBX_LAKEBASE_HOST": "pg.example.com", **env})
 
 
-def test_client_credentials_produce_a_provider():
+def test_client_credentials_produce_one_shared_provider():
+    """One service principal, one exchange, one cache — Postgres, Unity
+    Catalog and the Jobs API all await the same token rather than each
+    keeping a copy on its own refresh schedule."""
     cfg = _config(
         DATABRICKS_HOST=HOST,
         DATABRICKS_CLIENT_ID="id",
         DATABRICKS_CLIENT_SECRET="secret",
     )
     assert cfg.has_client_credentials
-    assert ServiceHub._lakebase_password(cfg) is not None
+    hub = ServiceHub(cfg)
+    assert hub._token_source(cfg) is not None
 
 
-def test_without_them_the_dsn_is_used_as_is():
+def test_without_them_every_client_keeps_its_static_token():
     """The local dev stack, and an instance with native login enabled."""
     cfg = _config(DBX_LAKEBASE_PASSWORD="static")
     assert not cfg.has_client_credentials
-    assert ServiceHub._lakebase_password(cfg) is None
+    assert ServiceHub(cfg)._token_source(cfg) is None
 
 
 def test_a_client_id_with_no_host_is_not_enough():
@@ -185,3 +189,76 @@ def test_the_env_names_can_be_overridden():
     )
     assert cfg.oauth_client_id == "explicit-id"
     assert cfg.oauth_client_secret == "explicit-secret"
+
+
+# --- every authenticated path uses it -------------------------------------
+
+
+async def test_the_sql_client_asks_for_a_token_per_request():
+    """`DATABRICKS_TOKEN` read once into a header works through the morning
+    and returns 401 for the rest of the day."""
+    from server.sql import SqlClient
+
+    seen: list[str] = []
+    tokens = iter(["t1", "t2"])
+
+    async def provider() -> str:
+        value = next(tokens)
+        seen.append(value)
+        return value
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return httpx.Response(
+            200, json={"status": {"state": "SUCCEEDED"}, "manifest": {}, "result": {}}
+        )
+
+    client = SqlClient(
+        HOST,
+        "wh",
+        None,
+        token_provider=provider,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await client.query("SELECT 1")
+    await client.query("SELECT 1")
+    assert seen == ["t1", "Bearer t1", "t2", "Bearer t2"]
+
+
+async def test_the_jobs_api_asks_for_a_token_per_request():
+    from server.jobs_api import JobsApi
+
+    headers: list[str] = []
+
+    async def provider() -> str:
+        return "jobs-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers.append(request.headers["authorization"])
+        return httpx.Response(200, json={"run_id": 7})
+
+    api = JobsApi(
+        HOST,
+        None,
+        token_provider=provider,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    assert await api.run_now(1, {}) == 7
+    assert headers == ["Bearer jobs-token"]
+
+
+async def test_a_provider_wins_over_a_static_token():
+    """Both set is a deployment mid-migration; the fresh one should win."""
+    from server.oauth import bearer_headers
+
+    async def provider() -> str:
+        return "fresh"
+
+    assert await bearer_headers("stale", provider) == {"Authorization": "Bearer fresh"}
+
+
+async def test_no_credential_at_all_sends_no_header():
+    """How the local dev stack talks to its own substitute Jobs API."""
+    from server.oauth import bearer_headers
+
+    assert await bearer_headers(None, None) == {}

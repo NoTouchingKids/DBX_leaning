@@ -478,3 +478,40 @@ def test_each_job_names_its_environment_after_its_model(jobs):
         for task in job["tasks"]:
             used = task["environment_key"]
             assert used == model, f"{name}: task uses environment {used!r}"
+
+
+def test_the_service_principal_secret_is_a_secret_not_a_variable(bundle):
+    """The app authenticates as one service principal against Postgres, Unity
+    Catalog and the Jobs API. Its id is not a credential; its secret is.
+
+    A bundle variable lands in the deployment state, so a credential there is
+    readable by anyone who can read the bundle's state — which is not the same
+    set of people as those who can read the secret scope.
+    """
+    app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+    env = {e["name"]: e for e in app["config"]["env"]}
+
+    assert "value" not in env["DBX_OAUTH_CLIENT_SECRET"], "never a literal"
+    assert env["DBX_OAUTH_CLIENT_SECRET"]["value_from"] == "oauth-client-secret"
+    secret = next(r for r in app["resources"] if r["name"] == "oauth-client-secret")["secret"]
+    assert secret["permission"] == "READ"
+
+    # The id may be a variable — it is an identifier, not a credential.
+    assert env["DBX_OAUTH_CLIENT_ID"]["value"] == "${var.oauth_client_id}"
+
+
+def test_no_variable_holds_a_credential(bundle):
+    """Belt and braces over the test above: nothing declared in `variables:`
+    may look like a secret, whatever it is called.
+
+    `app_secret_scope` is exempt and is the reason this reads by suffix rather
+    than by substring — the NAME of a secret scope is not itself a secret, and
+    has to be a variable so a target can point at a different one.
+    """
+    for name in bundle["variables"]:
+        if name.endswith("_scope"):
+            continue
+        assert not any(word in name for word in ("secret", "password", "token", "credential")), (
+            f"variable {name!r} looks like a credential; variables land in the "
+            "deployment state — declare it under `resources:` as a secret"
+        )

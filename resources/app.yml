@@ -66,6 +66,22 @@ resources:
         # READ and WRITE are DECLARED SEPARATELY because Unity Catalog treats
         # them as separate privileges — `WRITE VOLUME` does not imply
         # `READ VOLUME`, and `permission` here takes one value.
+        # The service principal the app authenticates AS — against Postgres,
+        # Unity Catalog and the Jobs API alike. Its client id is not a
+        # credential and is set as a plain env var below; the SECRET is one,
+        # so it lives here and never in a bundle variable, which would land in
+        # the deployment state.
+        #
+        # Leave the scope key unset and the app falls back to the app's own
+        # service principal (DATABRICKS_CLIENT_ID/SECRET, injected by Apps) or
+        # to a static DATABRICKS_TOKEN. `/healthz` reports what it got.
+        - name: oauth-client-secret
+          description: Secret for the service principal the app runs as.
+          secret:
+            scope: ${var.app_secret_scope}
+            key: oauth-client-secret
+            permission: READ
+
         - name: app-store-read
           description: Read the app's own volume.
           uc_securable:
@@ -151,6 +167,25 @@ resources:
             value: ${var.lakebase_port}
           - name: DBX_LAKEBASE_USER
             value: ${var.lakebase_user}
+
+          # --- who the app authenticates as ------------------------------
+          #
+          # One service principal for all three: the Postgres password (an
+          # OAuth token — Lakebase takes nothing else unless
+          # `enable_pg_native_login` was turned on), the Statement Execution
+          # API, and the Jobs API. `server/oauth.py` exchanges these at
+          # `/oidc/v1/token` and caches the result until just before it
+          # expires, per `server/services.py::_token_source`.
+          #
+          # Empty is supported: the app then uses the service principal
+          # Databricks Apps injects for it, and failing that a static
+          # DATABRICKS_TOKEN. Naming one here is for when the app should run
+          # as a principal you granted explicitly — which is also what
+          # `lakebase_user` above should be set to.
+          - name: DBX_OAUTH_CLIENT_ID
+            value: ${var.oauth_client_id}
+          - name: DBX_OAUTH_CLIENT_SECRET
+            value_from: oauth-client-secret
 
           # Which job runs which model. This map is also the app's allow-list:
           # a model with no job here cannot be triggered, so the app never

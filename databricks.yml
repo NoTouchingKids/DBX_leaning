@@ -36,6 +36,14 @@ variables:
       after at most 24h and a redeploy replaces the container. Created by
       uc_ddl/003_app_volume.sql.
     default: app_store
+  oauth_client_id:
+    description: >-
+      Application id of the service principal the app authenticates as —
+      against Postgres, Unity Catalog and the Jobs API alike. An id, not a
+      credential; the matching secret is a SECRET (`oauth-client-secret` in
+      the scope below), never a variable. Empty falls back to the service
+      principal Databricks Apps injects for the app itself.
+    default: ""
   app_secret_scope:
     description: Secret scope holding the token a job presents to the app.
     default: dbx-leaning

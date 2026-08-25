@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .oauth import bearer_headers
+
 log = logging.getLogger(__name__)
 
 __all__ = ["JobsApi", "JobsApiError", "JobsApiUnavailable", "TERMINAL_LIFE_CYCLE"]
@@ -49,9 +51,18 @@ _RESULT_STATE = {
 
 
 class JobsApi:
-    def __init__(self, host: str | None, token: str | None, *, client: Any = None) -> None:
+    def __init__(
+        self,
+        host: str | None,
+        token: str | None,
+        *,
+        token_provider=None,
+        client: Any = None,
+    ) -> None:
         self.host = host.rstrip("/") if host else None
         self.token = token
+        #: Awaited per request when set — see `oauth.bearer_headers`.
+        self.token_provider = token_provider
         self._client = client
         self._owns_client = client is None
 
@@ -77,7 +88,7 @@ class JobsApi:
             raise JobsApiUnavailable("no workspace host configured (DATABRICKS_HOST)")
 
         http = await self._http()
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = await bearer_headers(self.token, self.token_provider)
         resp = await http.post(
             f"{self.host}/api/2.2/jobs/run-now",
             json={"job_id": job_id, "job_parameters": parameters},
@@ -97,7 +108,7 @@ class JobsApi:
         if not self.available:
             return None
         http = await self._http()
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = await bearer_headers(self.token, self.token_provider)
         try:
             resp = await http.get(
                 f"{self.host}/api/2.2/jobs/runs/get",

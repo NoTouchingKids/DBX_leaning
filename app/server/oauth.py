@@ -39,7 +39,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-__all__ = ["OAuthTokenProvider", "TokenUnavailable"]
+__all__ = ["OAuthTokenProvider", "TokenUnavailable", "bearer_headers"]
 
 #: Refresh this long before the token actually expires. A request that starts
 #: with four minutes left and reaches Postgres with none is the kind of
@@ -128,3 +128,23 @@ class OAuthTokenProvider:
             ttl = DEFAULT_TTL_S
         log.debug("obtained an OAuth token, expires_in=%s", ttl)
         return access, ttl
+
+
+async def bearer_headers(token: str | None, provider) -> dict[str, str]:
+    """`Authorization`, from whichever credential this deployment has.
+
+    A `token` is static — a PAT, or whatever `DATABRICKS_TOKEN` held at
+    startup. A `provider` is awaited per request, because an OAuth token for a
+    service principal lasts about an hour and this app runs for up to 24: read
+    once and cached in a header, it works through the morning and returns 401
+    for the rest of the day, with nothing pointing at the cause.
+
+    The provider wins when both are set, and neither is an error: an
+    unauthenticated call is how the local dev stack talks to its own
+    substitute Jobs API.
+    """
+    if provider is not None:
+        return {"Authorization": f"Bearer {await provider()}"}
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}

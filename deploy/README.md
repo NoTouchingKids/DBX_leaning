@@ -319,6 +319,38 @@ it at startup too, but a deploy that cannot reach the instance reports
 `degraded: lakebase` rather than failing, so do not rely on that to tell you
 the schema is there.
 
+### Running as a service principal you granted yourself
+
+By default the app authenticates as the service principal Databricks Apps
+creates for it. To use one you made and granted explicitly — Postgres, Unity
+Catalog and the Jobs API — name it:
+
+```bash
+databricks secrets put-secret dbx-leaning oauth-client-secret \
+  --string-value "<the SP's OAuth secret>"
+
+databricks bundle deploy -t dev \
+  --var="oauth_client_id=<the SP's application id>" \
+  --var="lakebase_host=<read_write_dns>" \
+  --var="lakebase_user=<the SP's application id>"
+```
+
+`lakebase_user` is the same application id: the Postgres role Databricks
+provisions for a principal is named after it, so the app must connect as the
+principal whose token it presents.
+
+**The id is a variable, the secret is a secret.** A bundle variable ends up in
+the deployment state, which is readable by a different set of people than the
+secret scope; `tests/deploy/test_bundle.py` fails if any variable's name looks
+like a credential. Grant the principal `READ_VOLUME`/`WRITE_VOLUME` on the
+volume, whatever your models need on the results tables, `CAN_MANAGE_RUN` on
+the jobs, and a Postgres role on the Lakebase instance.
+
+**One token, three uses.** `server/services.py::_token_source` builds a single
+`OAuthTokenProvider` and hands it to the run store, the SQL client and the
+Jobs API, so there is one exchange and one cache rather than three on
+independent refresh schedules.
+
 ### The credential is a token, not a setting
 
 An instance created with `enable_pg_native_login: false` — **the default** —

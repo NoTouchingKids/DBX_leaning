@@ -87,16 +87,23 @@ class ServiceHub:
         #: unreachable. A route needing it should 503 rather than fall back
         #: to local disk, which disappears with the container.
         self.volume: Path | None = None
+        #: One OAuth token for Postgres, Unity Catalog and the Jobs API — the
+        #: whole app authenticates as one service principal. None when there
+        #: are no client credentials, which leaves each client on whatever
+        #: static token it was given.
+        self.token_provider = None
         self.messages_ingested = 0
         self.status_writes = 0
         self._status_tasks: set[asyncio.Task] = set()
 
     async def startup(self) -> None:
         cfg = self.config
+        self.token_provider = self._token_source(cfg)
         sql = SqlClient(
             cfg.workspace_host,
             cfg.warehouse_id,
             cfg.token,
+            token_provider=self.token_provider,
             wait_timeout_s=cfg.sql_wait_timeout_s,
             timeout_s=cfg.sql_timeout_s,
         )
@@ -114,7 +121,7 @@ class ServiceHub:
 
         await self._start_store(cfg)
 
-        jobs_api = JobsApi(cfg.workspace_host, cfg.token)
+        jobs_api = JobsApi(cfg.workspace_host, cfg.token, token_provider=self.token_provider)
         if jobs_api.available:
             self.jobs_api = jobs_api
         else:
@@ -158,14 +165,17 @@ class ServiceHub:
 
         self.volume = path
 
-    @staticmethod
-    def _lakebase_password(cfg: AppConfig):
-        """How the store gets a password, or None to use whatever is in the DSN.
+    def _token_source(self, cfg: AppConfig):
+        """One OAuth token, awaited by all three things that need a credential.
 
-        Lakebase takes a short-lived OAuth token and, with
-        `enable_pg_native_login` off — the default — takes nothing else. So
-        the normal deployment resolves one per connection. A static password
-        is the local-stack and native-login case.
+        A deployment authenticates as a single service principal against
+        Postgres, Unity Catalog and the Jobs API, so there is one exchange and
+        one cache — `oauth.py` holds the token until shortly before it
+        expires. Built once here rather than per client so those three do not
+        each keep their own copy on their own refresh schedule.
+
+        Returns None when there are no client credentials, which is the local
+        dev stack and any deployment still using a static `DATABRICKS_TOKEN`.
         """
         if not cfg.has_client_credentials:
             return None
@@ -175,7 +185,7 @@ class ServiceHub:
             cfg.oauth_client_id,  # type: ignore[arg-type]
             cfg.oauth_client_secret,  # type: ignore[arg-type]
         )
-        log.info("Lakebase credential: OAuth token from %s", provider.url)
+        log.info("credential: OAuth token for %s from %s", cfg.oauth_client_id, provider.url)
         return provider.token
 
     async def _start_store(self, cfg: AppConfig) -> None:
@@ -187,7 +197,7 @@ class ServiceHub:
         """
         if cfg.lakebase_dsn:
             store: RunStore = PostgresRunStore(
-                cfg.lakebase_dsn, password_provider=self._lakebase_password(cfg)
+                cfg.lakebase_dsn, password_provider=self.token_provider
             )
             try:
                 await store.ensure_schema()

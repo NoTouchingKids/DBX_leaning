@@ -60,6 +60,25 @@ env:
   - name: DBX_APP_TOKEN
     valueFrom: app-token
 
+  # Who the app authenticates AS — one service principal for the Postgres
+  # password (an OAuth token; Lakebase takes nothing else unless
+  # `enable_pg_native_login` was turned on), the Statement Execution API and
+  # the Jobs API. `server/oauth.py` exchanges these at `/oidc/v1/token`.
+  #
+  # The id is not a credential. The secret is, so it comes from the secret
+  # scope like the ingress token does.
+  #
+  # Both are commented out because a hand deploy has no bundle to fill the id
+  # in from, and an empty client id with a real secret is worse than neither:
+  # the app would fall back to its own injected principal while looking as
+  # though it were configured. Set them together, or leave both unset and let
+  # Apps inject the app's own service principal.
+  #
+  # - name: DBX_OAUTH_CLIENT_ID
+  #   value: <the service principal's application id>
+  # - name: DBX_OAUTH_CLIENT_SECRET
+  #   valueFrom: oauth-client-secret
+
 # DBX_JOB_IDS IS DELIBERATELY ABSENT, and it is the one thing a hand deploy
 # cannot have. It maps model name -> job id, and those ids do not exist until
 # the bundle creates the jobs, so only `resources/app.yml` can fill it in
