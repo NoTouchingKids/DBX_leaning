@@ -8,7 +8,7 @@ libraries does not impose them on the other four.
 
 Everything here is *exported from the lock*, never re-resolved. A generated
 file that disagrees with ``uv.lock`` would mean the thing deployed is not the
-thing tested; ``tests/deploy/test_requirements_in_sync.py`` fails if that
+thing tested; ``tests/deploy/test_requirements.py`` fails if that
 happens.
 
     uv run python scripts/export_requirements.py          # write

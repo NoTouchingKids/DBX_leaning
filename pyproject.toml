@@ -31,9 +31,19 @@ job = [
     "websockets>=12",
     "httpx>=0.27",
 ]
-# delta-rs is the *preferred* write_batch implementation; Spark is the
-# fallback and needs no pin — on Databricks serverless a session already
-# exists (docs/free-edition-constraints.md).
+# INVERTED since this was written, and this comment was the last place in the
+# repo still asserting the old design. Spark is THE write path, not a
+# fallback: it needs no pin because a session already exists on Databricks
+# serverless. delta-rs is unimplemented and `job/delta.py::DeltaRsWriter`
+# raises `NotImplementedError` rather than doing what it used to — handed a
+# three-part Unity Catalog name it wrote to a LOCAL DIRECTORY without
+# erroring, so a run reported SUCCEEDED with its telemetry in a container
+# about to be discarded. `select_writer("auto")` never picks it.
+#
+# The extra is kept for the day it is built (it needs credential vending
+# first, see job/delta.py). Nothing installs it today:
+# `scripts/export_requirements.py` excludes it from every model environment,
+# and `scripts/build_model_wheel.py` excludes it unless asked.
 delta = [
     "deltalake>=0.18",
     "pyarrow>=15",

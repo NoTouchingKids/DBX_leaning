@@ -51,7 +51,7 @@ resources:
           default: ""
 
       environments:
-        - environment_key: ortools
+        - environment_key: ortools_jobshop
           spec:
             client: "3"
             # Exported from uv.lock — what deploys is what the tests ran
@@ -61,7 +61,7 @@ resources:
 
       tasks:
         - task_key: run
-          environment_key: ortools
+          environment_key: ortools_jobshop
           spark_python_task:
             python_file: ${workspace.file_path}/entrypoints/run_model.py
             source: WORKSPACE

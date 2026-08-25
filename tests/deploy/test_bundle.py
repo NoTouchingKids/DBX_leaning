@@ -393,3 +393,20 @@ def test_no_lakebase_credential_is_carried_as_a_bundle_variable(bundle):
             continue
         assert "password" not in name, f"variable {name!r} looks like a credential"
         assert "secret" not in str(spec.get("default", "")).lower()
+
+
+def test_each_job_names_its_environment_after_its_model(jobs):
+    """A cosmetic convention, and worth pinning because it drifted once.
+
+    `environment_key` only has to be self-consistent within a file, so naming
+    one after the dependency EXTRA instead of the model works and nothing
+    catches it. Two of eleven had drifted that way, which leaves someone
+    scanning the directory wondering whether the difference means something.
+    """
+    for name, job in jobs.items():
+        model = name.removeprefix("model_")
+        declared = job["environments"][0]["environment_key"]
+        assert declared == model, f"{name}: environment named {declared!r}, expected {model!r}"
+        for task in job["tasks"]:
+            used = task["environment_key"]
+            assert used == model, f"{name}: task uses environment {used!r}"

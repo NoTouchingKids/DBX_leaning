@@ -50,7 +50,7 @@ resources:
           default: ""
 
       environments:
-        - environment_key: panel
+        - environment_key: panel_fit
           spec:
             client: "3"
             # Exported from uv.lock — what deploys is what the tests ran
@@ -60,7 +60,7 @@ resources:
 
       tasks:
         - task_key: run
-          environment_key: panel
+          environment_key: panel_fit
           spark_python_task:
             python_file: ${workspace.file_path}/entrypoints/run_model.py
             source: WORKSPACE
