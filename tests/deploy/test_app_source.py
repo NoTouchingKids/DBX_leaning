@@ -115,3 +115,39 @@ def test_the_app_is_told_where_the_built_frontend_landed():
     spec = app["resources"]["apps"]["dbx_leaning"]
     env = {e["name"]: e.get("value") for e in spec["config"]["env"]}
     assert env.get("DBX_FRONTEND_DIST") == "static"
+
+
+def test_every_gitignored_path_the_bundle_needs_is_produced_by_the_deploy_script():
+    """The failure this guards is a bare `stat` error with no remedy in it.
+
+    Two of the things the bundle deploys are build output and gitignored:
+    `build/app_source` (the staged app) and `frontend/dist` (the SPA). A fresh
+    clone has neither, and `databricks bundle deploy` then fails with
+
+        Error: stat build/app_source: no such file or directory
+
+    `scripts/deploy.sh` produces both and then deploys. If someone renames a
+    generated path in the bundle and not in the script, the next fresh clone
+    hits that error again — so assert the script still names what the bundle
+    now asks for.
+    """
+    script = (ROOT / "scripts" / "deploy.sh").read_text()
+    app = yaml.safe_load((ROOT / "resources" / "app.yml").read_text())
+    staged = app["resources"]["apps"]["dbx_leaning"]["source_code_path"].removeprefix("../")
+
+    assert "scripts/stage_app.py" in script, (
+        f"scripts/deploy.sh must build {staged}; it is gitignored and the bundle fails without it"
+    )
+    assert "pnpm build" in script, (
+        "scripts/deploy.sh must build frontend/dist; it is gitignored and the "
+        "app answers 503 on every page without it"
+    )
+    assert "bundle deploy" in script
+
+
+def test_the_deploy_script_is_executable():
+    """It is documented as `scripts/deploy.sh`, not `bash scripts/deploy.sh`."""
+    import stat as stat_module
+
+    mode = (ROOT / "scripts" / "deploy.sh").stat().st_mode
+    assert mode & stat_module.S_IXUSR, "chmod +x scripts/deploy.sh"

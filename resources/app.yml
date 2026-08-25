@@ -31,9 +31,14 @@ resources:
       #
       # `scripts/stage_app.py` assembles exactly what the app needs — app/,
       # shared/, requirements.txt and the built frontend — and asserts the
-      # result is symlink-free. Run it before `databricks bundle deploy`;
-      # `tests/deploy/test_app_source.py` walks the import graph so the staged
-      # set cannot silently go stale.
+      # result is symlink-free. `tests/deploy/test_app_source.py` walks the
+      # import graph so the staged set cannot silently go stale.
+      #
+      # It is BUILD OUTPUT and gitignored, so this path does not exist in a
+      # fresh clone and `bundle deploy` fails with a bare
+      # `stat build/app_source: no such file or directory`. Deploy with
+      # `scripts/deploy.sh -t dev`, which builds the frontend, stages, and
+      # deploys in one go.
       source_code_path: ../build/app_source
 
       # The token a job presents on the WS/HTTP ingress. Held as a secret and

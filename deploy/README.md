@@ -35,11 +35,38 @@ the write path bypasses it entirely.
 ## Deploy
 
 ```bash
+scripts/deploy.sh -t dev
+```
+
+That is the whole thing. Anything after the script name goes straight through
+to `databricks bundle deploy`, so `--var=...` works exactly as it would there.
+
+It exists because two of the things this bundle deploys are **build output**,
+and both are gitignored — correctly, they are generated:
+
+| generated | by | what it is |
+| --- | --- | --- |
+| `frontend/dist/` | `pnpm build` | the SPA `app/spa.py` serves |
+| `build/app_source/` | `scripts/stage_app.py` | the symlink-free folder the App export can accept |
+
+A fresh clone has neither, so `databricks bundle deploy` on its own fails with
+
+```
+Error: stat build/app_source: no such file or directory
+```
+
+which is accurate and says nothing about what to do. The long way, if you want
+the steps separately:
+
+```bash
 cd frontend && pnpm install && pnpm build && cd ..   # see below — required
 uv run python scripts/stage_app.py                   # see below — required
 databricks bundle validate                           # schema and references
 databricks bundle deploy -t dev
 ```
+
+`uv run python scripts/stage_app.py --check` answers "is there a deployable
+staged app right now" without rebuilding one.
 
 **Staging the app is a required step.** The App deployment exports its
 `source_code_path` folder, and that export **rejects symlinks**:
