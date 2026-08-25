@@ -2,7 +2,7 @@
  * Per-model config surface and progress payload shapes.
  *
  * Hand-derived by reading every `cfg.get(...)` call in each
- * `models/<name>/model.py`
+ * `job/models/<name>/model.py`
  * and every `emit("progress", ...)` payload. Five models at commit 114f4bb;
  * re-derived across all nine at commit 0fbde20.
  *
@@ -13,7 +13,7 @@
  * generate from — this file IS the schema, and it is a frontend invention
  * grounded in what each model actually reads. It can drift. When a model
  * changes its `cfg.get` calls, this file must be updated by hand, and there
- * is no test that will tell you. Re-derive it whenever `models/` changes.
+ * is no test that will tell you. Re-derive it whenever `job/models/` changes.
  *
  * Corollary: do not build a generic schema-driven form generator yet. Nine
  * hand-written forms first; generalise once the shape is proven, not before.
@@ -44,7 +44,7 @@ export interface ConfigField {
 }
 
 /**
- * What `models/_data`'s `Dataset.describe()` puts on a payload or a result
+ * What `job/models/_data`'s `Dataset.describe()` puts on a payload or a result
  * row, for any model that carries provenance.
  *
  * Load-bearing, not bookkeeping: it is the only thing distinguishing a chart
@@ -123,7 +123,7 @@ export interface GurobiProgressPayload {
  * gurobi_routing
  * ================================================================== */
 
-/** `models/gurobi_routing/instance.py::MAX_STOPS`. Not a taste limit: the
+/** `job/models/gurobi_routing/instance.py::MAX_STOPS`. Not a taste limit: the
  *  formulation is edge-based, so n stops cost n(n-1)/2 + n variables, and 55
  *  is where that still clears the bundled restricted licence's 2000-variable
  *  cap with headroom (62 would already be 1953). `build_instance` RAISES
@@ -250,7 +250,7 @@ export interface McmcProgressPayload {
    * Each chain's current position, as one list of parameter values per chain
    * in `parameters` order. This is what the live trace chart is drawn from.
    *
-   * Capped at `models/mcmc/model.py::MAX_TRACE_CHAINS` (32) so a
+   * Capped at `job/models/mcmc/model.py::MAX_TRACE_CHAINS` (32) so a
    * high-walker configuration cannot turn every progress message into a
    * large payload; `chain_positions_truncated` says whether that happened,
    * and a view must report it rather than quietly plotting a subset.
@@ -268,7 +268,7 @@ export interface McmcProgressPayload {
  * scenario
  * ================================================================== */
 
-/** `models/scenario/model.py::DEFAULT_GRID` — 6 x 4 x 3 = 72 scenarios. */
+/** `job/models/scenario/model.py::DEFAULT_GRID` — 6 x 4 x 3 = 72 scenarios. */
 export const DEFAULT_GRID = {
   demand: [0.8, 1.0, 1.2, 1.5, 1.8, 2.1],
   capacity: [0.9, 1.0, 1.1, 1.2],
@@ -412,14 +412,14 @@ export interface AnnealingProgressPayload {
  * bayesian_ab
  * ================================================================== */
 
-/** `models/bayesian_ab/model.py::COMPARISONS`. The constructor RAISES on
+/** `job/models/bayesian_ab/model.py::COMPARISONS`. The constructor RAISES on
  *  anything else — the only model here that validates its own config, so a
  *  typo is a FAILED run rather than a surprising default. Render as a choice,
  *  never a free-text field. */
 export const BAYESIAN_AB_COMPARISONS = ["weekend_fare", "long_trip_speed"] as const;
 export type BayesianAbComparison = (typeof BAYESIAN_AB_COMPARISONS)[number];
 
-/** `models/bayesian_ab/model.py::STAGES`, in order. Five named steps, not a
+/** `job/models/bayesian_ab/model.py::STAGES`, in order. Five named steps, not a
  *  curve — the progress bar for this model is a stepper. */
 export const BAYESIAN_AB_STAGES = [
   "posteriors",
@@ -517,7 +517,7 @@ export interface BayesianAbProgressPayload {
   stage: string;
   /**
    * ONE-BASED, and a count of COMPLETED stages rather than an array index.
-   * `models/bayesian_ab/model.py` iterates `enumerate(STAGES, start=1)` and
+   * `job/models/bayesian_ab/model.py` iterates `enumerate(STAGES, start=1)` and
    * emits after the stage body has run, so the first message carries 1 and
    * the last carries 5.
    *
@@ -579,12 +579,12 @@ export interface BayesianAbProgressPayload {
  * neural_net
  * ================================================================== */
 
-/** `models/neural_net/model.py::CLASS_LABELS`, in the network's own class-index
+/** `job/models/neural_net/model.py::CLASS_LABELS`, in the network's own class-index
  *  order, so a result row's `class_index` joins to this without a lookup. */
 export const NEURAL_NET_CLASS_LABELS = ["fast", "typical", "congested"] as const;
 
 /**
- * `models/neural_net/model.py::FEATURE_NAMES` — the network's input layer, in
+ * `job/models/neural_net/model.py::FEATURE_NAMES` — the network's input layer, in
  * order. Four basis transforms of ONE column, `trip_distance`; the width of
  * the input layer is therefore a fixed property of the model, unlike the
  * hidden widths, which are config and never reach the payload.
@@ -696,7 +696,7 @@ export interface NeuralNetProgressPayload {
  * ortools_jobshop
  * ================================================================== */
 
-/** `models/ortools_jobshop/instance.py::MAX_JOBS`. `build_instance` RAISES
+/** `job/models/ortools_jobshop/instance.py::MAX_JOBS`. `build_instance` RAISES
  *  above this, so a form should refuse rather than let a run fail. The cap is
  *  the job task's hour, not a solver limit — CP-SAT has no size cap, which is
  *  the whole point of this model against the two Gurobi ones. */
@@ -758,7 +758,7 @@ export const ORTOOLS_JOBSHOP: ModelSpec = {
 };
 
 /**
- * From `models/ortools_jobshop/model.py::_emit_progress`.
+ * From `job/models/ortools_jobshop/model.py::_emit_progress`.
  *
  * `incumbent` and `best_bound` are nullable for the same reason as the Gurobi
  * models', though by a different mechanism — CP-SAT's pre-search bound is a
@@ -793,7 +793,7 @@ export interface JobshopProgressPayload {
  * panel_fit
  * ================================================================== */
 
-/** `models/panel_fit/model.py`. A closed set on purpose — a UI groups by
+/** `job/models/panel_fit/model.py`. A closed set on purpose — a UI groups by
  *  these, so they are not free text. */
 export const PANEL_FIT_FAILURE_REASONS = [
   "too_few_observations",
@@ -846,7 +846,7 @@ export const PANEL_FIT: ModelSpec = {
 };
 
 /**
- * From `models/panel_fit/model.py`.
+ * From `job/models/panel_fit/model.py`.
  *
  * The interesting field is the fitted/failed split, on EVERY progress message.
  * No other model on this platform reports per-unit outcomes, and a client has
@@ -903,6 +903,6 @@ export const MODEL_SPECS: readonly ModelSpec[] = [
 export type ModelName = (typeof MODEL_SPECS)[number]["name"];
 
 /** Which models are ACTUALLY triggerable comes from `GET /api/models`, which
- *  derives it from the configured job map — a model can exist in `models/`
+ *  derives it from the configured job map — a model can exist in `job/models/`
  *  with no job behind it, and cannot be run. Cross-reference this static list
  *  against that response; render the difference rather than hiding it. */

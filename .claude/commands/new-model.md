@@ -1,4 +1,4 @@
-Add a model to `models/` and register it everywhere the deploy needs it.
+Add a model to `job/models/` and register it everywhere the deploy needs it.
 There are eleven today; this is the checklist for the twelfth.
 
 A model that only imports cleanly is not done. Six other files know about a
@@ -23,7 +23,7 @@ Ask the user for:
 
 ## Before writing code
 
-Read `models/README.md` first — it is the duck-typed contract in prose, and
+Read `job/models/README.md` first — it is the duck-typed contract in prose, and
 `CONVENTIONS` in `job/loader.py` is the same contract in code. If they
 disagree, the code is right. Re-read `docs/message-envelope-spec.md` rather
 than working from memory; the envelope is frozen and the model has to fit it,
@@ -33,7 +33,7 @@ not the other way round.
 models have one and the last six deliberately do not — see
 `docs/parallelization-plan.md`, which records that a brief per model was worth
 writing only while the contract was still being discovered, and that once
-`models/README.md` and this command existed the later models needed none. Add
+`job/models/README.md` and this command existed the later models needed none. Add
 one only if this model introduces something genuinely unlike the others (a new
 dependency class, a new progress mechanism); otherwise the brief is one more
 document that can go stale and be obeyed anyway.
@@ -41,7 +41,7 @@ document that can go stale and be obeyed anyway.
 ## 1. The package
 
 ```
-models/<name>/
+job/models/<name>/
     __init__.py     exports build_model
     model.py        the class, with results_table as a class-level literal
     <data>.py       instance building / loading, if it needs any
@@ -53,7 +53,7 @@ prefer:
 - A module-level factory on the package: `build_model` (or `create_model` /
   `make_model` / `Model` — first match wins, see `job/loader.py`).
 - `results_table = "results_<name>"` as a **plain string literal at class
-  level in `models/<name>/model.py`**. `tests/deploy/test_bundle.py` reads it
+  level in `job/models/<name>/model.py`**. `tests/deploy/test_bundle.py` reads it
   with a regex rather than importing the model — importing would pull
   gurobipy, torch and ortools into the test process for a string constant. A
   computed or `__init__`-assigned value is invisible to that test and the
@@ -62,7 +62,7 @@ prefer:
   loader introspects packages (`job.loader.describe_object`) and tests collect
   them in environments that do not have every model's libraries.
 
-Provenance is not optional. Use `models/_data` and put
+Provenance is not optional. Use `job/models/_data` and put
 `Dataset.describe()`'s four keys (`data_source`, `data_synthetic`,
 `data_rows`, `data_fallback_reason`) on **every result row**. A run against
 real `samples` rows and one that fell back to the deterministic generator must

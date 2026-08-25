@@ -1,12 +1,12 @@
 ---
 name: model-gurobi-scheduling
-description: Design record for models/gurobi_scheduling/ (BUILT) — a staff shift-scheduling MILP using Gurobi's bundled restricted license. The original driving use case; the first model to reach an end-to-end vertical slice.
+description: Design record for job/models/gurobi_scheduling/ (BUILT) — a staff shift-scheduling MILP using Gurobi's bundled restricted license. The original driving use case; the first model to reach an end-to-end vertical slice.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 ## Status: built. This is the design record, not a to-do list.
 
-`models/gurobi_scheduling/` exists, is tested under `tests/models/`, and is registered in
+`job/models/gurobi_scheduling/` exists, is tested under `tests/models/`, and is registered in
 `pyproject.toml`, `deploy/requirements/`, `resources/model_gurobi_scheduling.job.yml`,
 `resources/app.yml` and `uc_ddl/002_model_results.sql`. Read the source and
 its tests before this file — the module docstring is maintained, this brief
@@ -16,17 +16,17 @@ which is the thing the code cannot say about itself.
 Two facts this brief predates and every one of these briefs got wrong:
 
 - **This model reads real data.** All eleven models load
-  `samples.nyctaxi.trips` through `models/_data`, falling back to a
+  `samples.nyctaxi.trips` through `job/models/_data`, falling back to a
   deterministic generator when there is no workspace, and carry
   `data_source` / `data_synthetic` / `data_rows` / `data_fallback_reason` on
   every result row so the two runs stay distinguishable afterwards. Where
   this file says "synthetic" or "small fixed problem", read "synthetic
   fallback".
 - **There are eleven models, not five.** Any count below is stale. The other
-  six were built from `models/README.md` and `/new-model` with no brief at
+  six were built from `job/models/README.md` and `/new-model` with no brief at
   all, deliberately — see `docs/parallelization-plan.md`.
 
-This brief was written to build `models/gurobi_scheduling/`. Read `CLAUDE.md`,
+This brief was written to build `job/models/gurobi_scheduling/`. Read `CLAUDE.md`,
 `docs/message-envelope-spec.md`, and `docs/architecture.md` ("Why models are
 duck-typed") before writing anything.
 
@@ -61,7 +61,7 @@ The harness in `job/` discovers your model by convention. Expose:
   optional if construction happens in `__init__`)
 - The `gurobipy.Model` itself, under one of the conventional attribute names
   the harness looks for (check `job/`'s adapter/discovery code once it
-  exists, or `models/README.md` if one gets added — don't invent your own
+  exists, or `job/models/README.md` if one gets added — don't invent your own
   name in isolation)
 - A results accessor returning a list of dicts, one per output row
 - Your own callback, if you use `cbLazy`/`cbCut`/`cbSetSolution` — expose it

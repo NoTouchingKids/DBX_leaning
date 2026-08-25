@@ -38,7 +38,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.ortools_jobshop
+          default: job.models.ortools_jobshop
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG

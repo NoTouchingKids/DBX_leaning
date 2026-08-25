@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from models.panel_fit import (
+from job.models.panel_fit import (
     FAILURE_REASONS,
     REASON_NON_FINITE_RESULT,
     REASON_SINGULAR_DESIGN,
@@ -144,7 +144,7 @@ def test_too_few_observations_from_a_group_that_is_simply_short(recorder):
 
 def test_too_few_observations_after_null_responses_are_dropped(recorder):
     """The route that matters. The group has nine rows and looks perfectly
-    healthy right up until the nulls go — which is why `models/README.md` says
+    healthy right up until the nulls go — which is why `job/models/README.md` says
     never to assume a column is non-null."""
     gappy = ("Gappy", [(1990 + i, 61.0 if i == 0 else None) for i in range(9)])
     _, model, _ = run({"rows": panel(trend("Long", 12), gappy)}, recorder)
@@ -263,7 +263,7 @@ def test_a_run_where_every_group_fails_reports_infeasible_not_success(recorder):
 
 
 def test_the_all_failed_status_is_a_real_run_status_member():
-    """The trap in `models/README.md`: a returned string that is not a
+    """The trap in `job/models/README.md`: a returned string that is not a
     `RunStatus` member silently becomes a *detail* on a SUCCEEDED run, so a
     typo would degrade into the exact ambiguity this status exists to remove."""
     from shared.envelope import RunStatus
@@ -586,7 +586,7 @@ def test_group_order_does_not_depend_on_the_order_rows_came_back(recorder):
 def test_the_harness_finds_a_factory_a_build_and_a_run():
     from job.loader import describe_object
 
-    handle = describe_object(build_model(), "models.panel_fit")
+    handle = describe_object(build_model(), "job.models.panel_fit")
     assert handle.run is not None
     assert handle.build is not None
     assert handle.results_table == "results_panel_fit"
@@ -597,7 +597,7 @@ def test_this_model_deliberately_exposes_no_results_accessor():
     called would double-write the whole table."""
     from job.loader import describe_object
 
-    assert describe_object(build_model(), "models.panel_fit").results is None
+    assert describe_object(build_model(), "job.models.panel_fit").results is None
     assert not hasattr(build_model(), "results")
 
 

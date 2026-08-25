@@ -13,7 +13,7 @@ the status note below says which of this document's premises that broke.
 >
 > 1. **"All five existing models deliberately use synthetic, in-memory data …
 >    none of them reads a real Unity Catalog table" is no longer true.** Every
->    model now reads a real Unity Catalog table through `models/_data`, using
+>    model now reads a real Unity Catalog table through `job/models/_data`, using
 >    the job's Spark session, falling back to deterministic synthetic data off
 >    workspace. Nine of the eleven read `samples.nyctaxi.trips`;
 >    `ortools_jobshop` reads `samples.bakehouse.sales_transactions`; and
@@ -56,7 +56,7 @@ the status note below says which of this document's premises that broke.
 
 ## New models, using real Databricks sample data
 
-*Superseded — see status note 1. `models/_data` closed this gap; every model
+*Superseded — see status note 1. `job/models/_data` closed this gap; every model
 now reads `samples.nyctaxi.trips` on a workspace and falls back to
 deterministic synthetic data off one. Kept because the argument for what
 makes a model worth adding still holds.*
@@ -119,7 +119,7 @@ already exists and is correct — the `gurobi`, `ortools`, `forecasting`,
 empty) `annealing` extras each pull in only that model's own libraries.
 What's missing is *source* scoping: `[tool.setuptools] packages = ["shared",
 "app", "job", "models"]` means any wheel built from this repo bundles the
-entire `models/` package — every model's source code — regardless of which
+entire `job/models/` package — every model's source code — regardless of which
 one a given job actually runs. `job/loader.py` only *imports* the one model
 named by `DBX_MODEL` at runtime, but the sibling models' source is still
 physically present in the deployed artifact.
@@ -134,17 +134,17 @@ bundling of your entire source tree."* That's exactly this situation.
 
 **Implemented and verified**, not just proposed: `scripts/build_model_wheel.py`
 (new, in this delivery). It stages `shared/` + `job/` + exactly one
-`models/<name>/` into a throwaway directory with a generated
+`job/models/<name>/` into a throwaway directory with a generated
 `pyproject.toml` — dependencies are the existing core deps plus that
 model's existing extra, reused as-is, nothing about dependency scoping
 changes — and builds a wheel from there with `uv build`. Test-built against
 the actual repo for every registered model (`uv run python
 scripts/build_model_wheel.py --all`): every wheel contains exactly
-`shared/`, `job/` (including `job/drivers/`), and its one `models/<name>/`
+`shared/`, `job/` (including `job/drivers/`), and its one `job/models/<name>/`
 — confirmed by inspecting each wheel's file listing — with dependency
 metadata scoped to that model's own extra. An unregistered model name fails
 loudly rather than silently shipping with no dependencies — confirmed with a
-throwaway `models/fake_model/`.
+throwaway `job/models/fake_model/`.
 
 It also excludes `deltalake`/`pyarrow` by default. That is not an oversight:
 `job/delta.py`'s `DeltaRsWriter` raises `NotImplementedError`, so Spark is
@@ -152,11 +152,11 @@ the write path and those two would otherwise ship to every job to satisfy an
 import that never runs. `--with-delta` exists for the change that makes
 delta-rs real.
 
-One naming gotcha worth knowing about going in: the `models/` directory
+One naming gotcha worth knowing about going in: the `job/models/` directory
 name and the `pyproject.toml` extra name don't always match
-(`models/gurobi_scheduling` ↔ extra `gurobi`; `models/streaming_results` ↔
-extra `streaming`; `models/neural_net` ↔ extra `nn`;
-`models/ortools_jobshop` ↔ extra `ortools`; `models/panel_fit` ↔ extra
+(`job/models/gurobi_scheduling` ↔ extra `gurobi`; `job/models/streaming_results` ↔
+extra `streaming`; `job/models/neural_net` ↔ extra `nn`;
+`job/models/ortools_jobshop` ↔ extra `ortools`; `job/models/panel_fit` ↔ extra
 `panel`), and two models share one extra (`gurobi_scheduling` and
 `gurobi_routing`, deliberately — one gurobipy pin, one bundled-licence
 expiry, two jobs). The mismatch is now the majority case rather than the
@@ -175,7 +175,7 @@ through `scripts/_registry.py` (`model_extras()`, `extra_for()`,
 `model_names()`, and `discovered_packages()` for what is actually on disk).
 An unregistered model raises `UnregisteredModel` naming the models that *are*
 registered. `tests/deploy/test_bundle.py::test_every_model_on_disk_is_in_the_registry`
-asserts the registry and `models/` cannot drift apart. Adding a model is
+asserts the registry and `job/models/` cannot drift apart. Adding a model is
 still a one-line entry; it is just a one-line entry in `pyproject.toml`.
 
 **Proposed shape for `databricks.yml`:** one job per model (matching
@@ -184,7 +184,7 @@ still a one-line entry; it is just a one-line entry in `pyproject.toml`.
 for that model — built as a deploy step before the bundle deploy, output
 into `dist/<model>/`. The `app/` deployment is unaffected — it already only
 needs `shared/` + `app/` + the `app` extra, and never imports anything from
-`models/`.
+`job/models/`.
 
 **This is no longer greenfield advice.** The bundle exists (`databricks.yml`
 plus one `resources/model_<name>.job.yml` per model), and it took the *other*

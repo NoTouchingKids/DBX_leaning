@@ -2,7 +2,7 @@
  * Live trace — every walker's position in one parameter, against draws.
  *
  * This chart was blocked when the design was written: the payload carried no
- * per-chain coordinates. It does now — `models/mcmc/model.py::_progress` emits
+ * per-chain coordinates. It does now — `job/models/mcmc/model.py::_progress` emits
  * `chain_positions` (and `chain_positions_truncated`), one point per chain per
  * progress sample, capped at `MAX_TRACE_CHAINS`. So the chart is built here,
  * against the field that exists, not the field the design imagined.

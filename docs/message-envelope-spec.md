@@ -9,7 +9,7 @@ frontend — builds against this shape.
 **Do not let a model-building track invent its own message shape.** If this
 spec is ambiguous or missing something a model needs, that is a reason to
 update this file (and flag it), not to improvise locally — a shape invented
-inside `models/gurobi_scheduling/` and copied nowhere else is exactly how v1
+inside `job/models/gurobi_scheduling/` and copied nowhere else is exactly how v1
 ended up with drift between what the socket sent and what the table stored.
 
 ## Why one envelope
@@ -100,7 +100,7 @@ that update, not the record of truth.
 
 `INFEASIBLE` has turned out to be less solver-specific than it looks, which
 is worth recording because it is the argument for reusing these six rather
-than growing the enum. `models/panel_fit/` returns it when *every* group in
+than growing the enum. `job/models/panel_fit/` returns it when *every* group in
 a panel failed to fit: not `SUCCEEDED`, because zero fits is not a success
 and `row_count` cannot disambiguate it (failures are recorded as rows, so an
 all-failed run has a healthy-looking count); not `FAILED`, because nothing
@@ -136,9 +136,9 @@ nothing.
 A model that produces results in chunks (a rolling-origin backtest, chunked
 batch inference) emits one `result` message **per chunk**, each with its own
 `chunk_index` and its own `row_count` — that chunk's count, never a running
-total. `models/streaming_results/` is the model this was added for, and its
+total. `job/models/streaming_results/` is the model this was added for, and its
 tests fail loudly if the harness stops supporting it. It is no longer the
-only one: `models/panel_fit/` emits a chunk every `chunk_size` groups, which
+only one: `job/models/panel_fit/` emits a chunk every `chunk_size` groups, which
 is what keeps a 48-group run from being silent until the end. Two
 independent users of a field is roughly where "a feature one model needed"
 becomes "part of the contract", so treat it as the latter.
@@ -146,7 +146,7 @@ becomes "part of the contract", so treat it as the latter.
 The rows themselves never travel on the message. A model calls
 `emit("result", rows=[...])` and the harness writes them to the model's
 results table, counts what it wrote into `row_count`, and builds the bounded
-`preview`. See `models/README.md`.
+`preview`. See `job/models/README.md`.
 
 Per-model result **tables** are separate from this envelope — each model
 family has its own results schema in Unity Catalog, governed by its own UC
@@ -228,7 +228,7 @@ it — do not improvise locally.
 
 ### 2026-08-22 — `result.chunk_index` and `result.final`
 
-Added while implementing `shared/`. `models/streaming_results/` needs to emit
+Added while implementing `shared/`. `job/models/streaming_results/` needs to emit
 results repeatedly during one run, and the spec had no way to say which chunk
 a message was, or whether more were coming. `seq` cannot serve: it counts
 every message of every type, so consecutive chunks are not consecutive seqs.

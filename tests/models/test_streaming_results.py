@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from models._data import nyc_taxi_hourly
-from models.streaming_results import build_model
+from job.models._data import nyc_taxi_hourly
+from job.models.streaming_results import build_model
 
 PROVENANCE_FIELDS = {
     "data_source",
@@ -94,7 +94,7 @@ def test_this_model_deliberately_exposes_no_results_accessor():
     would double-write."""
     from job.loader import describe_object
 
-    handle = describe_object(build_model(), "models.streaming_results")
+    handle = describe_object(build_model(), "job.models.streaming_results")
     assert handle.results is None
     assert handle.run is not None
 

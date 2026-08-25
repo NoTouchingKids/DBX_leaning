@@ -46,6 +46,16 @@ ENVIRONMENTS: dict[str, list[str]] = {
 #: library — it observes, it does not compute.
 APP_EXTRAS = ["app"]
 
+#: The job unit's own baseline: the harness transport, no model library.
+#:
+#: Nothing installs this today — each job task installs
+#: `deploy/requirements/<model>.txt`, which is this plus exactly one model
+#: extra, because the whole point of the split is that the MCMC job does not
+#: carry gurobipy. It is written into `job/` so that folder states its own
+#: floor the way `app/` does, and so `job/` is a complete unit the moment it
+#: is packaged as a wheel.
+JOB_EXTRAS = ["job"]
+
 HEADER = """\
 # GENERATED — do not edit.
 #
@@ -96,6 +106,9 @@ def targets() -> dict[pathlib.Path, str]:
     # installs requirements.txt from the app's SOURCE directory, and
     # `resources/app.yml` points that at `../app`.
     out[ROOT / "app" / "requirements.txt"] = render("databricks-app", APP_EXTRAS)
+    # The job unit's baseline — see JOB_EXTRAS. Every file under
+    # deploy/requirements/ is this plus one model extra.
+    out[ROOT / "job" / "requirements.txt"] = render("job-harness", JOB_EXTRAS)
     return out
 
 

@@ -743,7 +743,7 @@ const ANNEALING_SCRIPT: ModelScript = {
  *  - `decision` is an arm LABEL or the literal "inconclusive". Never "A"/"B",
  *    never a boolean. An arm can lead without being conclusive.
  *
- * `stage_index` is ONE-BASED. `models/bayesian_ab/model.py` iterates
+ * `stage_index` is ONE-BASED. `job/models/bayesian_ab/model.py` iterates
  * `enumerate(STAGES, start=1)` and emits after the stage body has run, so the
  * field is a COUNT OF COMPLETED STAGES, not an array index — the first
  * message carries 1, the last carries 5, and `percent_complete` is

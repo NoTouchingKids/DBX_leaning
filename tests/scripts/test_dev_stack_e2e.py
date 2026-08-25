@@ -308,7 +308,7 @@ async def test_a_run_that_starts_while_the_app_is_down_still_completes(stack, tm
         stack.job_ids[MODEL],
         {
             "DBX_RUN_ID": "unobserved",
-            "DBX_MODEL": f"models.{MODEL}",
+            "DBX_MODEL": f"job.models.{MODEL}",
             "DBX_MODEL_CONFIG": "{}",
             # Pointing at nothing on purpose: an app that is down, not absent.
             "DBX_APP_URL": f"http://127.0.0.1:{free_port()}",

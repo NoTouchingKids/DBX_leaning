@@ -1,7 +1,7 @@
 /**
  * Everything this model's view knows, read from wherever it actually is.
  *
- * This file exists because of one fact about `models/bayesian_ab`: it is
+ * This file exists because of one fact about `job/models/bayesian_ab`: it is
  * closed-form and the whole run takes milliseconds. A client will routinely
  * see a terminal status having observed NONE of the five progress messages —
  * the run was over before the SSE stream delivered anything. So no view here

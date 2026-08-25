@@ -148,7 +148,7 @@ scheduling model with genuine branch-and-bound behaviour to stream. See
 `docs/free-edition-constraints.md` for the licence-expiry gotcha that comes
 with this choice.
 
-The cap and the expiry are both real costs, and `models/ortools_jobshop` is
+The cap and the expiry are both real costs, and `job/models/ortools_jobshop` is
 what pays neither: CP-SAT is Apache-2.0, has no licence file, no expiry date,
 nothing to reach over the network, and no size limit. That is not an argument
 for dropping Gurobi — the two solve different problems with different search

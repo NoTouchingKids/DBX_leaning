@@ -6,8 +6,8 @@ import pytest
 
 pytest.importorskip("gurobipy", reason="needs the [gurobi] extra")
 
-from models._data import Dataset  # noqa: E402
-from models.gurobi_scheduling import (  # noqa: E402
+from job.models._data import Dataset  # noqa: E402
+from job.models.gurobi_scheduling import (  # noqa: E402
     SHIFTS,
     build_instance,
     build_model,
@@ -162,7 +162,7 @@ def test_the_model_never_calls_optimize_itself():
     solved itself would silently lose cancellation and progress."""
     import inspect
 
-    from models.gurobi_scheduling import model as module
+    from job.models.gurobi_scheduling import model as module
 
     source = inspect.getsource(module)
     assert ".optimize(" not in source
@@ -174,7 +174,7 @@ def test_the_harness_selects_the_gurobi_driver_for_this_model():
 
     model = build_model()
     model.build()
-    handle = describe_object(model, "models.gurobi_scheduling")
+    handle = describe_object(model, "job.models.gurobi_scheduling")
 
     assert handle.gurobi_model is not None
     assert handle.run is None, "a Gurobi model must not expose a blocking run()"
@@ -253,7 +253,7 @@ def test_a_curve_that_cannot_be_bucketed_falls_back_to_flat_demand():
 
 
 def test_build_instance_runs_fully_synthetically_without_reading_anything(monkeypatch):
-    from models.gurobi_scheduling import instance as instance_module
+    from job.models.gurobi_scheduling import instance as instance_module
 
     def explode(**_):  # pragma: no cover - the point is that it is not called
         raise AssertionError("build_instance read sample data when told not to")

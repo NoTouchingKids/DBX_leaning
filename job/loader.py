@@ -4,7 +4,7 @@ A model is a plain Python object. No base class, no registration, no
 inheritance — the harness looks for a small set of conventional names on
 whatever object the model package hands back. See ``docs/architecture.md``
 ("Why models are duck-typed") for why this is the shape, and
-``models/README.md`` for the contract as a model author sees it.
+``job/models/README.md`` for the contract as a model author sees it.
 
 When something required is missing, the failure names every alternative that
 was tried. A model author should never have to read this file to find out
@@ -105,8 +105,8 @@ class ModelHandle:
 def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
     """Import ``spec`` and discover the model object it produces.
 
-    ``spec`` is ``"models.scenario"`` (a factory is looked for by convention)
-    or ``"models.scenario:build_model"`` (an explicit attribute).
+    ``spec`` is ``"job.models.scenario"`` (a factory is looked for by convention)
+    or ``"job.models.scenario:build_model"`` (an explicit attribute).
     """
     config = dict(config or {})
     module_name, _, attr = spec.partition(":")
@@ -117,7 +117,7 @@ def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
         raise ModelLoadError(
             f"could not import model module {module_name!r}: {exc}\n"
             f"  spec given: {spec!r}\n"
-            f"  expected an importable package under models/, e.g. 'models.scenario'"
+            f"  expected an importable package under job/models/, e.g. 'job.models.scenario'"
         ) from exc
 
     factory = _resolve_factory(module, module_name, attr)
@@ -142,7 +142,7 @@ def _resolve_factory(module: Any, module_name: str, attr: str) -> Any:
         f"{module_name} exposes no model factory.\n"
         f"  tried, in order: {', '.join(CONVENTIONS['factory'])}\n"
         f"  a model package needs one module-level callable taking an optional\n"
-        f"  config dict and returning the model object (see models/README.md)"
+        f"  config dict and returning the model object (see job/models/README.md)"
     )
 
 
@@ -211,7 +211,7 @@ def describe_object(obj: Any, spec: str = "<object>") -> ModelHandle:
             f"{', '.join(CONVENTIONS['gurobi_model'])}\n"
             f"  object was {type(obj).__name__} with public attributes: "
             f"{', '.join(sorted(n for n in dir(obj) if not n.startswith('_'))) or '(none)'}\n"
-            f"  see models/README.md for the contract"
+            f"  see job/models/README.md for the contract"
         )
 
     return handle

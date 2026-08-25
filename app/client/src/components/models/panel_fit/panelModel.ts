@@ -41,8 +41,8 @@ import {
 /**
  * The provenance fields, which `PanelFitProgressPayload` does not declare.
  *
- * `models/panel_fit/model.py::_progress` spreads `**self._provenance` into
- * every payload, and `Dataset.describe()` (`models/_data/sample_data.py`) is
+ * `job/models/panel_fit/model.py::_progress` spreads `**self._provenance` into
+ * every payload, and `Dataset.describe()` (`job/models/_data/sample_data.py`) is
  * where these four keys come from. `@/lib/models` is hand-derived and missed
  * them; declaring the gap locally is cheaper than editing a file this track
  * does not own, and it is load-bearing rather than cosmetic —

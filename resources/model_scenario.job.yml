@@ -31,7 +31,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.scenario
+          default: job.models.scenario
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG

@@ -9,9 +9,9 @@ from entrypoints.run_model import ROOT, parse_settings
 
 
 def test_key_value_arguments_become_settings():
-    assert parse_settings(["DBX_RUN_ID=abc", "DBX_MODEL=models.scenario"]) == {
+    assert parse_settings(["DBX_RUN_ID=abc", "DBX_MODEL=job.models.scenario"]) == {
         "DBX_RUN_ID": "abc",
-        "DBX_MODEL": "models.scenario",
+        "DBX_MODEL": "job.models.scenario",
     }
 
 

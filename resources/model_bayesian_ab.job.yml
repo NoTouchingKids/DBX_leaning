@@ -37,7 +37,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.bayesian_ab
+          default: job.models.bayesian_ab
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG

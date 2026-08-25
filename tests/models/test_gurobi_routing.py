@@ -18,8 +18,8 @@ import pytest
 
 pytest.importorskip("gurobipy", reason="needs the [gurobi] extra")
 
-from models._data import Dataset  # noqa: E402
-from models.gurobi_routing import (  # noqa: E402
+from job.models._data import Dataset  # noqa: E402
+from job.models.gurobi_routing import (  # noqa: E402
     MAX_STOPS,
     Instance,
     Stop,
@@ -27,13 +27,13 @@ from models.gurobi_routing import (  # noqa: E402
     build_model,
     variable_count_for,
 )
-from models.gurobi_routing.instance import (  # noqa: E402
+from job.models.gurobi_routing.instance import (  # noqa: E402
     MAX_RADIUS,
     MAX_SERVICE_MINUTES,
 )
 
 #: The bundled restricted licence. Not a style preference — past it, the solve
-#: fails outright. See models/gurobi_scheduling/LICENCE_EXPIRY.md.
+#: fails outright. See job/models/gurobi_scheduling/LICENCE_EXPIRY.md.
 LICENCE_VARS = 2000
 LICENCE_CONSTRS = 2000
 
@@ -129,7 +129,7 @@ def driven():
     r = recorder_class()()
     model = r.attach(build_model({}))
     model.build()
-    handle = describe_object(model, "models.gurobi_routing")
+    handle = describe_object(model, "job.models.gurobi_routing")
     handle.refresh()
     # progress_every_s is deliberately small: the default 2s cadence is right
     # for a real run and would sample nothing at all from a one-second solve.
@@ -299,8 +299,8 @@ def test_the_model_never_calls_optimize_itself():
     would also take the callback slot its own cuts need."""
     import inspect
 
-    from models.gurobi_routing import instance as instance_module
-    from models.gurobi_routing import model as model_module
+    from job.models.gurobi_routing import instance as instance_module
+    from job.models.gurobi_routing import model as model_module
 
     for module in (model_module, instance_module):
         assert ".optimize(" not in inspect.getsource(module)
@@ -312,7 +312,7 @@ def test_the_harness_discovers_our_callback_and_selects_the_gurobi_driver():
 
     model = build_model({"use_sample_data": False, "stop_count": 8, "vehicles": 2})
     model.build()
-    handle = describe_object(model, "models.gurobi_routing")
+    handle = describe_object(model, "job.models.gurobi_routing")
 
     assert handle.gurobi_model is not None
     assert handle.run is None, "a Gurobi model must not expose a blocking run()"
@@ -405,7 +405,7 @@ def test_results_are_produced_from_an_incumbent_after_a_cancellation():
     def cancel_once_an_incumbent_exists():
         return any(m["payload"]["incumbent"] is not None for m in r.of("progress"))
 
-    handle = describe_object(model, "models.gurobi_routing")
+    handle = describe_object(model, "job.models.gurobi_routing")
     handle.refresh()
     result = GurobiDriver(
         handle, r.emit, cancel_once_an_incumbent_exists, progress_every_s=0.05
@@ -490,7 +490,7 @@ def test_too_few_usable_trips_falls_back_to_generated_stops():
 
 
 def test_build_instance_runs_fully_synthetically_without_reading_anything(monkeypatch):
-    from models.gurobi_routing import instance as instance_module
+    from job.models.gurobi_routing import instance as instance_module
 
     def explode(**_):  # pragma: no cover - the point is that it is not called
         raise AssertionError("build_instance read sample data when told not to")

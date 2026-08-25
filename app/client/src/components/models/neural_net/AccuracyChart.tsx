@@ -4,7 +4,7 @@
  * The baseline is not decoration. The classes are ~55/30/15 on purpose
  * (`cut_quantiles` defaults to 0.55/0.85), so predicting "typical" for
  * everything scores about 0.55, and an accuracy shown on its own flatters
- * this model by roughly that much. `models/neural_net/model.py` carries
+ * this model by roughly that much. `job/models/neural_net/model.py` carries
  * `baseline_accuracy` in every progress payload for exactly this reason and
  * says "render them on the same axis" — so they are on the same axis.
  *

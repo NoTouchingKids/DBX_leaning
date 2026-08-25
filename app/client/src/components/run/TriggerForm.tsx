@@ -102,7 +102,7 @@ export function TriggerForm({
   cancelSlot,
 }: {
   spec: ModelSpec;
-  /** From `GET /api/models`. A model can exist in `models/` with no job
+  /** From `GET /api/models`. A model can exist in `job/models/` with no job
    *  behind it, in which case `POST /api/runs` answers 404. */
   triggerable: boolean | undefined;
   pending: boolean;
@@ -181,7 +181,7 @@ export function TriggerForm({
 
         {triggerable === false && (
           <Callout tone="warn" title="Not triggerable from this app">
-            {`${spec.name} is defined in models/ but GET /api/models does not list it, so no Databricks job is configured for it. POST /api/runs would answer 404.`}
+            {`${spec.name} is defined in job/models/ but GET /api/models does not list it, so no Databricks job is configured for it. POST /api/runs would answer 404.`}
           </Callout>
         )}
 

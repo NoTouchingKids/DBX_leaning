@@ -8,8 +8,8 @@ from datetime import UTC
 
 import pytest
 
-from models._data import Dataset, nyc_taxi_hourly, nyc_taxi_trips
-from models._data import sample_data as sd
+from job.models._data import Dataset, nyc_taxi_hourly, nyc_taxi_trips
+from job.models._data import sample_data as sd
 
 
 def test_no_workspace_means_synthetic_not_an_error():
@@ -167,7 +167,7 @@ def test_hour_ts_is_epoch_ms_whatever_the_source_returned():
     a workspace — the contract has to be true on the path that matters."""
     from datetime import date, datetime
 
-    from models._data.datasets import epoch_ms
+    from job.models._data.datasets import epoch_ms
 
     expected = 1_600_000_000_000
     assert epoch_ms(expected) == expected
@@ -180,14 +180,14 @@ def test_hour_ts_is_epoch_ms_whatever_the_source_returned():
 
 
 def test_a_boolean_is_not_quietly_accepted_as_a_timestamp():
-    from models._data.datasets import epoch_ms
+    from job.models._data.datasets import epoch_ms
 
     with pytest.raises(TypeError, match="boolean"):
         epoch_ms(True)
 
 
 def test_an_unreadable_timestamp_says_what_it_got():
-    from models._data.datasets import epoch_ms
+    from job.models._data.datasets import epoch_ms
 
     with pytest.raises(TypeError, match="cannot read"):
         epoch_ms(object())
@@ -197,8 +197,8 @@ def test_a_workspace_returning_datetimes_still_honours_the_contract(monkeypatch)
     """Belt and braces over the SQL cast: normalise whatever comes back."""
     from datetime import datetime
 
-    from models._data import datasets
-    from models._data import sample_data as sd
+    from job.models._data import datasets
+    from job.models._data import sample_data as sd
 
     rows = [
         {

@@ -49,7 +49,8 @@ def test_missing_run_names_everything_that_was_tried():
         describe_object(Nothing(), "nothing")
 
     message = str(exc.value)
-    for expected in ("run", "solve", "fit", "sample", "execute", "grb_model", "models/README.md"):
+    expected_names = ("run", "solve", "fit", "sample", "execute", "grb_model")
+    for expected in (*expected_names, "job/models/README.md"):
         assert expected in message
 
 
@@ -72,7 +73,7 @@ def test_load_by_import_spec():
 
 def test_unimportable_module_says_so_clearly():
     with pytest.raises(ModelLoadError, match="could not import model module"):
-        load_model("models.not_a_real_model")
+        load_model("job.models.not_a_real_model")
 
 
 def test_missing_attribute_lists_what_the_module_does_have():

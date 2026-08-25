@@ -3,7 +3,7 @@
  *
  * No design doc covers this model — the digest predates it — so both the
  * signature and the charts are derived from the same principle in
- * `../contract.ts` and from what `models/neural_net/model.py` emits.
+ * `../contract.ts` and from what `job/models/neural_net/model.py` emits.
  *
  * The three facts that shaped it:
  *

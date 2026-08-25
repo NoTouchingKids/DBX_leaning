@@ -35,7 +35,7 @@ function log(seq: number, message: string, phase = "input"): LogMessage {
   };
 }
 
-/** The real `build()` lines, copied from `models/ortools_jobshop/model.py`. */
+/** The real `build()` lines, copied from `job/models/ortools_jobshop/model.py`. */
 const SHAPE_LOG = log(
   2,
   "60 jobs / 247 operations over 5 machines (mix, rest, bake, decorate, pack); " +

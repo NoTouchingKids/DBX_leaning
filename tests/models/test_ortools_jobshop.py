@@ -30,8 +30,8 @@ import pytest
 
 pytest.importorskip("ortools", reason="needs the [ortools] extra")
 
-from models._data import Dataset  # noqa: E402
-from models.ortools_jobshop import (  # noqa: E402
+from job.models._data import Dataset  # noqa: E402
+from job.models.ortools_jobshop import (  # noqa: E402
     MAX_JOBS,
     RECIPES,
     STAGES,
@@ -41,8 +41,8 @@ from models.ortools_jobshop import (  # noqa: E402
     operation_ceiling_for,
     recipe_for,
 )
-from models.ortools_jobshop import instance as instance_module  # noqa: E402
-from models.ortools_jobshop.instance import (  # noqa: E402
+from job.models.ortools_jobshop import instance as instance_module  # noqa: E402
+from job.models.ortools_jobshop.instance import (  # noqa: E402
     MAX_OPERATION_MINUTES,
     MAX_UNITS,
     MIN_OPERATION_MINUTES,
@@ -157,7 +157,7 @@ def test_the_solver_is_cp_sat_and_not_the_legacy_mpsolver_wrapper():
 def test_the_harness_sees_the_surface_it_needs():
     from job.loader import describe_object
 
-    handle = describe_object(build_model(FAST), "models.ortools_jobshop")
+    handle = describe_object(build_model(FAST), "job.models.ortools_jobshop")
     assert handle.run is not None and handle.results is not None
     assert handle.build is not None
     assert handle.results_table == "results_ortools_jobshop"
@@ -274,7 +274,7 @@ def test_a_products_recipe_does_not_change_between_processes():
     it, the same product would get a different recipe on every run and the
     instance would stop being reproducible for no reason at all."""
     code = (
-        "from models.ortools_jobshop import recipe_for; "
+        "from job.models.ortools_jobshop import recipe_for; "
         "print(','.join(recipe_for(p) for p in "
         "('Golden Gate Ginger', 'Pearly Pies', 'Reykjavik Rye')))"
     )
@@ -556,14 +556,14 @@ def test_an_impossible_deadline_is_reported_as_infeasible():
 def test_the_only_status_returns_are_real_run_status_members():
     """The other half of the trap below: these two strings are meant to be read
     as statuses, so they have to stay spelled exactly like the enum."""
-    from models.ortools_jobshop.model import STATUS_RETURNS
+    from job.models.ortools_jobshop.model import STATUS_RETURNS
     from shared.envelope import RunStatus
 
     assert [RunStatus(name).value for name in STATUS_RETURNS] == list(STATUS_RETURNS)
 
 
 def test_an_ordinary_outcome_is_returned_as_a_detail_not_a_status(default_run):
-    """The trap in models/README.md, asserted rather than trusted: a string
+    """The trap in job/models/README.md, asserted rather than trusted: a string
     that is not a `RunStatus` member becomes a *detail* on a SUCCEEDED run. The
     outcome strings below rely on that; the status strings must not drift into
     it."""

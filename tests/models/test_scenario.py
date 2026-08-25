@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from models._data import Dataset
-from models.scenario import DEFAULT_GRID, build_model
-from models.scenario import model as scenario_model
+from job.models._data import Dataset
+from job.models.scenario import DEFAULT_GRID, build_model
+from job.models.scenario import model as scenario_model
 
 
 def fake_dataset(*, synthetic: bool = False, n: int = 48) -> Dataset:
@@ -265,7 +265,7 @@ def test_the_data_is_loaded_once_not_per_scenario(monkeypatch, recorder):
 def test_the_harness_sees_the_surface_it_needs():
     from job.loader import describe_object
 
-    handle = describe_object(build_model(), "models.scenario")
+    handle = describe_object(build_model(), "job.models.scenario")
     assert handle.run is not None and handle.results is not None
     assert handle.build is not None
     assert handle.results_table == "results_scenario"

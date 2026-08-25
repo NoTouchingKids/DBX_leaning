@@ -214,7 +214,7 @@ async def test_a_model_with_no_results_table_gets_one_from_its_module_name(cfg, 
         def results(self):
             return [{"a": 1}]
 
-    conf = cfg(model_spec="models.scenario", results_table=None)
+    conf = cfg(model_spec="job.models.scenario", results_table=None)
     await JobHarness(conf, writer=writer, handle=describe_object(Bare(), "bare")).run()
     assert len(rows(writer, "results_scenario")) == 1
 

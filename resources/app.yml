@@ -145,7 +145,7 @@ resources:
 
           # Which job runs which model. This map is also the app's allow-list:
           # a model with no job here cannot be triggered, so the app never
-          # imports models/ just to validate a request.
+          # imports job/models/ just to validate a request.
           - name: DBX_JOB_IDS
             value: >-
               {"gurobi_scheduling": ${resources.jobs.model_gurobi_scheduling.id},

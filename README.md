@@ -32,8 +32,8 @@ don't, so they go first.
 `docs/parallelization-plan.md` has the worktree-per-track breakdown. Short
 version: build `shared/` (the message envelope) once, sequentially, then
 fan out — one Claude Code session per track (`app/`, `job/`, and one per
-model in `models/`). The first five model tracks were briefed from a file in
-`.claude/agents/`; once `models/README.md` and `/new-model` existed the
+model in `job/models/`). The first five model tracks were briefed from a file in
+`.claude/agents/`; once `job/models/README.md` and `/new-model` existed the
 later six needed no brief at all, which is why there are fewer briefs there
 than models.
 
@@ -46,12 +46,12 @@ docs/                  Architecture rationale, platform constraints, envelope sp
 .claude/commands/      /orient, /spike-ws, /spike-sse, /new-model
 
 shared/                The message envelope + protocol. Imported by app/ and job/,
-                       never by models/. Build against this, don't fork it.
+                       never by job/models/. Build against this, don't fork it.
 job/                   The harness: model loader, thread->loop crossing, WS client
                        with HTTP-push fallback, Delta writer, cancellation
 app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
                        backfill, startup reconciliation, ServiceHub/DI
-models/                Eleven model packages. See models/README.md for the
+job/models/                Eleven model packages. See job/models/README.md for the
                        duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
 lakebase_ddl/          Postgres DDL (run state) — applied at startup too
@@ -81,7 +81,7 @@ uv run ruff check .                     # lint
 uv run ty check                         # types (advisory — see below)
 
 # a full run with no app listening — the normal unobserved case
-DBX_MODEL=models.scenario DBX_WRITER=jsonl DBX_ALLOW_LOCAL_WRITER=1 \
+DBX_MODEL=job.models.scenario DBX_WRITER=jsonl DBX_ALLOW_LOCAL_WRITER=1 \
   uv run python -m job.main
 
 uv run uvicorn server.main:app --reload    # the observer, on :8000
@@ -138,7 +138,7 @@ production is how "works on my machine" gets built, so:
 
 | | Local | Deployed |
 |---|---|---|
-| `app/`, `job/`, `shared/`, `models/` | the same code | the same code |
+| `app/`, `job/`, `shared/`, `job/models/` | the same code | the same code |
 | Live path | real WS ingress, real HTTP-push fallback, real SSE | same |
 | Run registry | embedded Postgres (`pgserver`) via `PostgresRunStore` | Lakebase, same class |
 | Concurrency ceiling | the app's check is real; nothing enforces it behind that | the account's own 5-task limit too |
@@ -168,7 +168,7 @@ does it.
 | `GET /api/runs/{id}/messages` | Explicit backfill from Unity Catalog, client-triggered, paged by seq |
 | `GET /api/runs/{id}/results` | The full result set a `result` message only previews — the table its `fetch_hint` points at, paged |
 | `POST /api/runs/{id}/cancel` | Forwards over the job's WebSocket, or 409s naming the CLI escape hatch |
-| `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `models/` |
+| `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `job/models/` |
 | `WS /ws/job/{id}` | The job's ingress, and the only inbound path to a running job |
 | `POST /api/runs/{id}/push` | One-way HTTP fallback ingress |
 | `GET /api/schema` | The wire protocol as JSON Schema — generate the client's types from this |

@@ -14,7 +14,7 @@ Then, before writing or editing anything, state back in your own words:
    **ask which track you're meant to be working on** rather than guessing.
    Note that a missing brief is not a missing track: there are eleven models
    and only five have their own `.claude/agents/model-*.md`, deliberately —
-   `models/README.md` and `/new-model` replaced the per-model brief once the
+   `job/models/README.md` and `/new-model` replaced the per-model brief once the
    contract stopped changing. Read those instead, and do not write a brief to
    fill the gap.
 3. **What has actually run against a real workspace, and what has not.**

@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("emcee", reason="needs the [mcmc] extra")
 
-from models.mcmc import build_model, gaussian_problem, split_rhat  # noqa: E402
+from job.models.mcmc import build_model, gaussian_problem, split_rhat  # noqa: E402
 
 
 def fitted(recorder, **config):
@@ -281,7 +281,7 @@ def test_the_position_snapshot_moves_between_samples(recorder):
 def test_the_position_snapshot_is_bounded_by_the_chain_count(recorder):
     """This fires on every progress sample, so it is capped rather than
     proportional to a caller-chosen walker count."""
-    from models.mcmc.model import MAX_TRACE_CHAINS
+    from job.models.mcmc.model import MAX_TRACE_CHAINS
 
     chains = MAX_TRACE_CHAINS + 6
     r, _ = taxi(recorder, draws=120, burn_in=20, chains=chains, progress_every=40)
@@ -322,7 +322,7 @@ def test_results_carry_a_thinned_sample_of_the_draws(recorder):
 def test_the_thinned_sample_is_capped_not_the_raw_draws(recorder):
     """400 post-burn-in draws x 8 chains is 3,200 values per parameter. The
     sample must not be that: it rides along on the result message."""
-    from models.mcmc.model import TRACE_DRAWS_PER_CHAIN, TRACE_SAMPLE_CAP
+    from job.models.mcmc.model import TRACE_DRAWS_PER_CHAIN, TRACE_SAMPLE_CAP
 
     _, model = taxi(recorder, draws=500, burn_in=100)
     rows = model.results()
@@ -337,7 +337,7 @@ def test_the_thinned_sample_is_capped_not_the_raw_draws(recorder):
 
 
 def test_more_chains_keep_fewer_draws_each_rather_than_growing(recorder):
-    from models.mcmc.model import MAX_TRACE_CHAINS, TRACE_SAMPLE_CAP
+    from job.models.mcmc.model import MAX_TRACE_CHAINS, TRACE_SAMPLE_CAP
 
     _, model = taxi(recorder, draws=300, burn_in=100, chains=MAX_TRACE_CHAINS + 4)
     sample = json.loads(model.results()[0]["draws_sample"])

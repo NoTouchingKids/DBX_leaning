@@ -57,7 +57,7 @@ def build_job_parameters(
     """What the job is launched with. Every key must be in JOB_PARAMETER_NAMES."""
     parameters = {
         "DBX_RUN_ID": run_id,
-        "DBX_MODEL": f"models.{model}",
+        "DBX_MODEL": f"job.models.{model}",
         "DBX_MODEL_CONFIG": json.dumps(config),
         "DBX_CATALOG": app_config.catalog,
         "DBX_SCHEMA": app_config.schema,

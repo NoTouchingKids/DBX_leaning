@@ -3,7 +3,7 @@
 
 The licence date only appears in Gurobi's own banner, so this captures the
 banner rather than asking an API that does not exist. Record what it prints in
-models/gurobi_scheduling/LICENCE_EXPIRY.md next to the pin.
+job/models/gurobi_scheduling/LICENCE_EXPIRY.md next to the pin.
 """
 
 from __future__ import annotations

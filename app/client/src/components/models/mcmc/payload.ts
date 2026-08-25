@@ -5,7 +5,7 @@
  * Two things here are deliberate:
  *
  * 1. `McmcPayload` extends the interface in `@/lib/models` rather than
- *    replacing it. `models/mcmc/model.py` gained `chain_positions` and
+ *    replacing it. `job/models/mcmc/model.py` gained `chain_positions` and
  *    `chain_positions_truncated` after `models.ts` was derived, and that file
  *    is owned by another track. Extending locally keeps the addition visible
  *    as an addition — when `models.ts` catches up, this interface collapses to

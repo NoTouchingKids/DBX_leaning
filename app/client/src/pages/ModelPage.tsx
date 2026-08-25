@@ -23,7 +23,7 @@ export function ModelPage() {
     return (
       <NotFound
         title={`No model named ${model ?? "—"}`}
-        detail="The models this client knows about come from MODEL_SPECS, which is hand-derived from models/<name>/model.py. A model added to the repo needs an entry there before it gets a page."
+        detail="The models this client knows about come from MODEL_SPECS, which is hand-derived from job/models/<name>/model.py. A model added to the repo needs an entry there before it gets a page."
       />
     );
   }

@@ -1,12 +1,12 @@
 ---
 name: model-scenario
-description: Design record for models/scenario/ (BUILT) — a cheap, deterministic scenario-sweep model. Exercises fan-out concurrency and the platform's 5-concurrent-job-task ceiling with many small, fast runs rather than one long one.
+description: Design record for job/models/scenario/ (BUILT) — a cheap, deterministic scenario-sweep model. Exercises fan-out concurrency and the platform's 5-concurrent-job-task ceiling with many small, fast runs rather than one long one.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 ## Status: built. This is the design record, not a to-do list.
 
-`models/scenario/` exists, is tested under `tests/models/`, and is registered in
+`job/models/scenario/` exists, is tested under `tests/models/`, and is registered in
 `pyproject.toml`, `deploy/requirements/`, `resources/model_scenario.job.yml`,
 `resources/app.yml` and `uc_ddl/002_model_results.sql`. Read the source and
 its tests before this file — the module docstring is maintained, this brief
@@ -16,17 +16,17 @@ which is the thing the code cannot say about itself.
 Two facts this brief predates and every one of these briefs got wrong:
 
 - **This model reads real data.** All eleven models load
-  `samples.nyctaxi.trips` through `models/_data`, falling back to a
+  `samples.nyctaxi.trips` through `job/models/_data`, falling back to a
   deterministic generator when there is no workspace, and carry
   `data_source` / `data_synthetic` / `data_rows` / `data_fallback_reason` on
   every result row so the two runs stay distinguishable afterwards. Where
   this file says "synthetic" or "small fixed problem", read "synthetic
   fallback".
 - **There are eleven models, not five.** Any count below is stale. The other
-  six were built from `models/README.md` and `/new-model` with no brief at
+  six were built from `job/models/README.md` and `/new-model` with no brief at
   all, deliberately — see `docs/parallelization-plan.md`.
 
-This brief was written to build `models/scenario/`. Read `CLAUDE.md` and
+This brief was written to build `job/models/scenario/`. Read `CLAUDE.md` and
 `docs/message-envelope-spec.md` before writing anything.
 
 ## What this model is, and why it's in the lineup

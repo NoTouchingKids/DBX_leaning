@@ -16,10 +16,10 @@ import pytest
 
 pytest.importorskip("sklearn", reason="needs the [forecasting] extra")
 
-from models._data import Dataset, nyc_taxi_hourly  # noqa: E402
-from models._data.datasets import TAXI_TRIPS_TABLE  # noqa: E402
-from models.forecasting import build_model  # noqa: E402
-from models.forecasting import model as forecasting_model  # noqa: E402
+from job.models._data import Dataset, nyc_taxi_hourly  # noqa: E402
+from job.models._data.datasets import TAXI_TRIPS_TABLE  # noqa: E402
+from job.models.forecasting import build_model  # noqa: E402
+from job.models.forecasting import model as forecasting_model  # noqa: E402
 
 PROVENANCE_FIELDS = {
     "data_source",
@@ -282,6 +282,6 @@ def test_the_data_and_the_forecast_are_deterministic(recorder):
 def test_the_harness_sees_a_build_step_and_a_results_accessor():
     from job.loader import describe_object
 
-    handle = describe_object(build_model(), "models.forecasting")
+    handle = describe_object(build_model(), "job.models.forecasting")
     assert handle.build is not None and handle.run is not None
     assert handle.results is not None and handle.results_table == "results_forecasting"

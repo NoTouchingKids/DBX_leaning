@@ -4,7 +4,7 @@
  *
  * ## The two levels, and why the x axis is not `epoch`
  *
- * `models/neural_net/model.py` emits progress at two levels on ONE stream:
+ * `job/models/neural_net/model.py` emits progress at two levels on ONE stream:
  * `level: "batch"` a couple of times per epoch (`batch_updates_per_epoch`,
  * default 2) and `level: "epoch"` once at the end of each. Both carry the
  * same payload shape. So on the default config every epoch produces three

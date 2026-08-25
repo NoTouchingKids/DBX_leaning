@@ -136,7 +136,7 @@ the full column listing and the `LONG`-money trap.
 
 **It is also the one entry on this page that has stopped being a
 proposal.**
-`models/ortools_jobshop` reads `sales_transactions` today: a job is one
+`job/models/ortools_jobshop` reads `sales_transactions` today: a job is one
 franchise's sales of one product on one day, and `SUM(quantity)` is what
 drives every duration in the instance. That it was written against a verified
 column listing rather than a guess is the whole reason it could be, and it is
@@ -149,7 +149,7 @@ not.
 ### `nyctaxi.trips`
 
 What nine of the eleven models read today, through the two loaders in
-`models/_data/datasets.py`. One table. Its columns are **not** in
+`job/models/_data/datasets.py`. One table. Its columns are **not** in
 `information_schema.columns` — absence there means nothing, see the inventory
 — and the loaders' three columns have never been confirmed against it. The
 two exceptions are `ortools_jobshop` (`bakehouse`, above) and `panel_fit`,
@@ -265,7 +265,7 @@ page's value is as a curated list of sources known to work in CSV form:
 
 | Source | Notes |
 |---|---|
-| [OWID Dataset Collection](https://github.com/owid/owid-datasets) | Our World in Data, on GitHub. Wide, clean, long time series across many domains — the strongest ML candidate on the list, and the one with a model already waiting for it: `models/panel_fit` defaults to `main.dbx_leaning.owid_country_year`, a name nobody has landed |
+| [OWID Dataset Collection](https://github.com/owid/owid-datasets) | Our World in Data, on GitHub. Wide, clean, long time series across many domains — the strongest ML candidate on the list, and the one with a model already waiting for it: `job/models/panel_fit` defaults to `main.dbx_leaning.owid_country_year`, a name nobody has landed |
 | [Data.gov CSV datasets](https://catalog.data.gov/dataset/?res_format=CSV) | Very large catalogue, quality varies a lot by publisher |
 | [The Squirrel Census](https://www.thesquirrelcensus.com/data) | Small and charming; a classification toy, not a training set |
 | Kaggle: Diamonds | ~54k rows, classic tabular regression. Needs a Kaggle account |
@@ -285,7 +285,7 @@ them.
 
 ## What this would actually change, per model
 
-Nothing here is a decision. Each is one loader in `models/_data/datasets.py`
+Nothing here is a decision. Each is one loader in `job/models/_data/datasets.py`
 plus a config field, and the synthetic fallback stays mandatory regardless.
 
 | Model | Today | Best available upgrade | Why it is better |

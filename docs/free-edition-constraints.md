@@ -40,7 +40,7 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   past it. This build pins `gurobipy >=13,<14`, whose bundled licence expires
   **2027-11-29** (verified 2026-08-22 against 13.0.2). The pin and the date
   live together in `pyproject.toml`, the table of them is in
-  `models/gurobi_scheduling/LICENCE_EXPIRY.md`, and
+  `job/models/gurobi_scheduling/LICENCE_EXPIRY.md`, and
   `scripts/check_gurobi_licence.py` re-reads the date from the installed
   package so the next person does not have to do archaeology.
 - **Lazy constraints do not count against the 2000-constraint cap.** Measured
@@ -49,7 +49,7 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   cuts in the lazy pool rather than adding them to the model. This is what
   makes cut-based formulations (routing, subtour elimination) viable at all
   under the restricted licence, where the same constraints stated up front
-  would blow the cap immediately. `models/gurobi_routing/` relies on it and
+  would blow the cap immediately. `job/models/gurobi_routing/` relies on it and
   pins the behaviour in a test, because it is a licence-relevant assumption
   and not documented by Gurobi as a guarantee.
 - **WLS (Web License Service)** contacts `token.gurobi.com` over the internet
@@ -57,7 +57,7 @@ via Delta, and why client reads should be backfill-on-demand, not polling.
   unless the trusted-domain list is confirmed to include it. **This build
   uses the bundled restricted licence only — no WLS.**
 - **There is an escape hatch, and it is a different solver.**
-  `models/ortools_jobshop` runs on OR-Tools CP-SAT: Apache-2.0, CPU-only, no
+  `job/models/ortools_jobshop` runs on OR-Tools CP-SAT: Apache-2.0, CPU-only, no
   licence file, no expiry date, nothing to contact, and **no variable or
   constraint cap**. Every constraint in this section is a property of the
   bundled Gurobi licence rather than of Free Edition, so a model that cannot
@@ -93,12 +93,12 @@ of band. Routes, roughly in order of how little they can go wrong:
 | **Data bundled in a PyPI package** | Installed with the environment | Genuinely egress-free at run time, because pip already ran. Small datasets only, and it inflates every model environment that lists the extra |
 
 Whatever the route, the model still reads a table, and
-`models/_data.load()` still takes arbitrary SQL — it was never
+`job/models/_data.load()` still takes arbitrary SQL — it was never
 samples-specific. The synthetic fallback stays mandatory either way: it is
 what keeps a model runnable in tests and on a laptop, and it is the reason a
 missing table degrades instead of failing a run.
 
-`models/panel_fit` is what that looks like in practice, and it is worth
+`job/models/panel_fit` is what that looks like in practice, and it is worth
 reading before landing anything. It names
 `main.dbx_leaning.owid_country_year` as its default table — a table nobody
 has created — so *every* run at the default configuration takes the fallback

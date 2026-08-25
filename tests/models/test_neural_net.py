@@ -26,15 +26,15 @@ pytest.importorskip("torch", reason="needs the [nn] extra")
 
 import numpy as np  # noqa: E402
 
-from models._data import Dataset, nyc_taxi_trips  # noqa: E402
-from models._data.datasets import TAXI_TRIPS_TABLE  # noqa: E402
-from models.neural_net import (  # noqa: E402
+from job.models._data import Dataset, nyc_taxi_trips  # noqa: E402
+from job.models._data.datasets import TAXI_TRIPS_TABLE  # noqa: E402
+from job.models.neural_net import (  # noqa: E402
     CLASS_LABELS,
     EXCLUDED_COLUMNS,
     FEATURE_NAMES,
     build_model,
 )
-from models.neural_net import model as neural_net_model  # noqa: E402
+from job.models.neural_net import model as neural_net_model  # noqa: E402
 
 PROVENANCE_FIELDS = {
     "data_source",
@@ -411,7 +411,7 @@ def test_rows_the_real_table_left_null_are_dropped_loudly(recorder, monkeypatch)
 def test_the_harness_sees_a_build_step_and_a_results_accessor():
     from job.loader import describe_object
 
-    handle = describe_object(build_model(), "models.neural_net")
+    handle = describe_object(build_model(), "job.models.neural_net")
     assert handle.build is not None and handle.run is not None
     assert handle.results is not None and handle.results_table == "results_neural_net"
     assert handle.preview_axes == ("class_index", "recall")
@@ -455,6 +455,6 @@ def test_the_model_is_registered_with_the_heavy_extra():
 
 def test_the_model_imports_nothing_from_the_platform():
     """A model conforms to a contract; it does not call into the platform."""
-    source = pathlib.Path("models/neural_net/model.py").read_text()
+    source = pathlib.Path("job/models/neural_net/model.py").read_text()
     for forbidden in ("import app", "import job", "import shared", "from shared", "from job"):
         assert forbidden not in source

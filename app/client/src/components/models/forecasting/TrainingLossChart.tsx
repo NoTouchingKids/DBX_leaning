@@ -6,7 +6,7 @@
  * `primary_metric_label: "val_loss"`, and the payload carries `train_loss`
  * and `best_val_loss`. So this is one chart drawing two series from two
  * different places in the same message, which is easy to get wrong by reading
- * the design doc instead of `models/forecasting/model.py`.
+ * the design doc instead of `job/models/forecasting/model.py`.
  *
  * `best_val_loss` is drawn as a horizontal reference line rather than a third
  * series: it is the model's own early-stopping tracker, it is monotone, and

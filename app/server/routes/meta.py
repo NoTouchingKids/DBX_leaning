@@ -63,7 +63,7 @@ async def schema(kind: str = "protocol") -> dict:
 async def models(hub: Hub) -> dict:
     """What can be triggered from here.
 
-    Derived from the configured job map, not from importing ``models/`` — the
+    Derived from the configured job map, not from importing ``job/models/`` — the
     app has no business pulling in gurobipy, scikit-learn and emcee just to
     list names, and a model with no job behind it cannot be run anyway.
     """

@@ -6,7 +6,7 @@
  *
  *  1. `val_loss` is NOT a payload key. It is `primary_metric` (label
  *     `"val_loss"`); the payload carries `train_loss` and `best_val_loss`.
- *     Verified in `models/forecasting/model.py::_progress`. Earlier design
+ *     Verified in `job/models/forecasting/model.py::_progress`. Earlier design
  *     notes describe the chart as "train_loss/val_loss over epoch" and are
  *     wrong about where one of the two series comes from.
  *  2. `epoch` is 0-BASED — `percent_complete` is `100*(epoch+1)/epochs`, so

@@ -42,7 +42,7 @@ def table(writer: JsonlWriter, name: str) -> list[dict]:
 
 async def test_the_scenario_model_runs_end_to_end_unobserved(run_config, tmp_path):
     writer = JsonlWriter(tmp_path / "delta")
-    cfg = run_config("models.scenario", model_config={"progress_every": 20})
+    cfg = run_config("job.models.scenario", model_config={"progress_every": 20})
 
     outcome = await JobHarness(cfg, writer=writer).run()
 
@@ -67,7 +67,7 @@ async def test_everything_written_is_a_valid_envelope_message(run_config, tmp_pa
     """The durable record must re-validate against the same contract the wire
     uses — two shapes is how v1's reconnect bugs happened."""
     writer = JsonlWriter(tmp_path / "delta")
-    await JobHarness(run_config("models.scenario"), writer=writer).run()
+    await JobHarness(run_config("job.models.scenario"), writer=writer).run()
 
     rebuilt = []
     for name, type_ in (
@@ -92,7 +92,7 @@ async def test_everything_written_is_a_valid_envelope_message(run_config, tmp_pa
 
 async def test_the_streaming_model_writes_each_chunk_as_it_goes(run_config, tmp_path):
     writer = JsonlWriter(tmp_path / "delta")
-    cfg = run_config("models.streaming_results", model_config={"n": 400, "step": 60})
+    cfg = run_config("job.models.streaming_results", model_config={"n": 400, "step": 60})
 
     outcome = await JobHarness(cfg, writer=writer).run()
 
@@ -108,7 +108,7 @@ async def test_the_streaming_model_writes_each_chunk_as_it_goes(run_config, tmp_
 async def test_a_run_cancelled_partway_keeps_what_it_produced(run_config, tmp_path):
     writer = JsonlWriter(tmp_path / "delta")
     cfg = run_config(
-        "models.streaming_results",
+        "job.models.streaming_results",
         model_config={"n": 2000, "step": 10, "window": 100},
     )
     harness = JobHarness(cfg, writer=writer)
@@ -132,7 +132,7 @@ async def test_the_gurobi_model_runs_through_the_gurobi_driver(run_config, tmp_p
 
     writer = JsonlWriter(tmp_path / "delta")
     cfg = run_config(
-        "models.gurobi_scheduling",
+        "job.models.gurobi_scheduling",
         model_config={"staff_count": 12, "days": 7, "time_limit_s": 20},
     )
 
@@ -169,7 +169,7 @@ async def test_a_live_app_sees_the_same_run_the_durable_store_does(run_config, t
 
         async def close(self): ...
 
-    cfg = run_config("models.scenario", model_config={"progress_every": 30})
+    cfg = run_config("job.models.scenario", model_config={"progress_every": 30})
     outcome = await JobHarness(cfg, writer=writer, channels=[Listener()]).run()
 
     assert outcome.observed_live is True

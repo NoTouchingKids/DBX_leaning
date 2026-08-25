@@ -86,7 +86,7 @@ scenario = ["numpy>=1.26"]
 # Rolling-origin backtest: numpy's lstsq, deliberately nothing heavier.
 # The platform value here is the chunked result path, not the modelling.
 streaming = ["numpy>=1.26"]
-# Deliberately empty, and that is the whole point of models/annealing: it is
+# Deliberately empty, and that is the whole point of job/models/annealing: it is
 # the control case proving the microservice split really can produce a
 # minimal environment. Its job deploys with the harness's own transport and
 # nothing else. An empty list is valid PEP 621 and uv/setuptools accept it —
@@ -150,9 +150,10 @@ ortools_jobshop = "ortools"
 panel_fit = "panel"
 
 [tool.setuptools]
-packages = ["shared", "server", "job", "models"]
-# `server/` lives inside `app/`, the deployable app folder — see the layout
-# note in CLAUDE.md. Everything else is at the repo root.
+packages = ["shared", "server", "job"]
+# Each deployable unit is a folder that carries everything it needs:
+# `server/` lives inside `app/`, and `job/models/` lives inside `job/`. See the
+# layout note in CLAUDE.md.
 package-dir = { server = "app/server" }
 
 [tool.pytest.ini_options]
@@ -186,7 +187,7 @@ target-version = "py311"
 # nothing. Scoped this way, `uv run ty check` is a signal that sits at zero.
 # `app/server`, not `app` — `app/client` is TypeScript and `app/shared` is a
 # generated copy of `shared`, which would be checked twice and reported twice.
-include = ["app/server", "job", "models", "shared", "scripts"]
+include = ["app/server", "job", "shared", "scripts"]
 
 [tool.ty.rules]
 # ty is pre-1.0, so it runs advisory (`uv run ty check`) rather than as a CI
@@ -209,4 +210,4 @@ ignore = ["UP042"]
 # `server` lives at `app/server`, not at the repo root, so ruff's automatic
 # first-party detection misses it and sorts it in with third-party imports.
 # Everything here is ours; say so rather than let the import blocks churn.
-known-first-party = ["server", "shared", "job", "models", "scripts", "entrypoints"]
+known-first-party = ["server", "shared", "job", "scripts", "entrypoints"]

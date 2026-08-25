@@ -41,7 +41,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.neural_net
+          default: job.models.neural_net
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG

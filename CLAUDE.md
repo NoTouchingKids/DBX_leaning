@@ -129,7 +129,7 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   2000 variables / 2000 constraints (200 quadratic) — size models to fit.
   The bundled licence has **a fixed expiry per gurobipy release**; whatever
   version is pinned, record its expiry next to the pin. A problem that will
-  not fit has somewhere to go: `models/ortools_jobshop` is CP-SAT,
+  not fit has somewhere to go: `job/models/ortools_jobshop` is CP-SAT,
   Apache-2.0, with no licence file, no expiry and no size cap at all.
 - **Delta writes go through Spark**, behind one `write_batch(table, rows)`
   interface, implementation chosen once at startup. delta-rs remains the
@@ -164,16 +164,23 @@ app/            THE DEPLOYED APP — everything it needs, nothing else. This
   shared/       A TRACKED COPY of shared/ — `scripts/sync_shared.py` makes it,
                 `tests/deploy/test_shared_copy.py` fails when it drifts
   requirements.txt  App deps, where Databricks Apps looks for them
-job/            Job harness (WS client, HTTP push, Delta writer, model loader)
-models/         One package per model — eleven of them: gurobi_scheduling/,
+job/            THE JOB UNIT — the harness plus its payload, its own floor
+  (harness)     WS client, HTTP push, Delta writer, model loader
+  models/           One package per model — eleven of them: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
                 mcmc/, bayesian_ab/, neural_net/, streaming_results/,
                 annealing/, panel_fit/ (plus _data/, the shared
                 samples-catalog loaders — ortools_jobshop and panel_fit
                 bring their own). Registered in [tool.dbx-leaning.models]
                 in pyproject.toml
+  shared/       A TRACKED COPY, like app/shared/ — NOT load-bearing today: a
+                task runs entrypoints/run_model.py from the whole synced tree
+                and imports the canonical shared/. It is here so job/ is
+                already a complete unit when it becomes a wheel
+  requirements.txt  The harness's floor. Each task installs
+                deploy/requirements/<model>.txt, which is this plus one extra
 shared/         The message envelope + protocol helpers, imported by both
-                app/ and job/ (and indirectly by models/ via the callback
+                app/ and job/ (and indirectly by job/models/ via the callback
                 they're handed — models never import shared/ directly)
 uc_ddl/         Unity Catalog DDL (telemetry + per-model results tables)
 lakebase_ddl/   Postgres DDL (run_status), applied at app startup
@@ -187,19 +194,31 @@ docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
 
-**`app/` is the whole app and nothing else**, the shape the Databricks app
-template uses (`server/` + `client/`, `requirements.txt` at the app root), one
-level down so the repo can also hold the jobs. `resources/app.yml` gives
-Databricks Apps that folder as its `source_code_path` and nothing outside it
-travels — which is why `shared/` has a tracked copy at `app/shared/`, and why
-that copy is a copy: **the workspace export rejects symlinks**, and it is the
-same rule that keeps `.venv` and `app/client/node_modules` out of the sync.
-Nothing is staged or assembled at deploy time; `app/` is a real directory.
+**Each deployable unit is a folder that carries everything it needs.**
+
+`app/` takes the shape of the Databricks app template — `server/` for the
+FastAPI code, `client/` for the React source, `requirements.txt` at the app
+root — one level down so the repo can hold the jobs too. `resources/app.yml`
+gives Databricks Apps that folder as its `source_code_path` and **nothing
+outside it travels**, which is why `shared/` has a tracked copy at
+`app/shared/`. `job/` mirrors the shape: the harness, `job/models/`, its own
+`requirements.txt`, its own copy.
+
+The copies are copies rather than symlinks because **the workspace export
+rejects symlinks** — the same rule that keeps `.venv` and
+`app/client/node_modules` out of the sync. Nothing is staged or assembled at
+deploy time; both folders are real directories, made by
+`scripts/sync_shared.py` and committed.
+
+Only `app/shared/` is load-bearing today. A job task runs
+`entrypoints/run_model.py` out of the whole synced tree, so it imports the
+canonical `shared/` and never reads `job/shared/`; that copy is there so the
+folder is already complete when it becomes a wheel.
 
 The duplication is a known compromise, scoped to this stage — packaging
 `shared` as a wheel retires it. `tests/deploy/test_shared_copy.py` is what
-makes it safe in the meantime: it fails the moment the two differ, and it
-asserts that tests import the canonical `shared/`, never the copy.
+makes it safe in the meantime: it fails the moment a copy differs, and it
+asserts that tests import the canonical `shared/`, never a copy.
 
 ## Deployment shape: a model is a microservice
 

@@ -201,7 +201,7 @@ written — `src/transport/` is the implementation and
 
 ## Per-model pages
 
-Each model in `models/` gets its own page/route, since each has a
+Each model in `job/models/` gets its own page/route, since each has a
 genuinely different progress shape (Gurobi's MIP-gap chart vs. a forecast
 chart vs. an MCMC trace plot vs. a scenario-sweep completion view vs. the
 streaming-results model's incrementally-arriving result chunks). Build a
@@ -214,11 +214,11 @@ against.
 The per-model contract this needs is `src/lib/models.ts`, and it is worth
 knowing what it is before touching it: a **hand-derived** `ModelSpec` per
 model, read out of every `cfg.get(...)` call and every `emit("progress", ...)`
-payload in `models/<name>/model.py`. The server validates
+payload in `job/models/<name>/model.py`. The server validates
 `TriggerRequest.config` not at all — it is `dict[str, Any]` passed verbatim
 into `DBX_MODEL_CONFIG` — so there is no schema to generate from and no test
 that will tell you when this file falls behind. Re-derive it whenever
-`models/` changes. It currently covers **nine of eleven models**:
+`job/models/` changes. It currently covers **nine of eleven models**:
 `ortools_jobshop` and `panel_fit` have no entry, so they are triggerable by
 API and absent from the UI.
 

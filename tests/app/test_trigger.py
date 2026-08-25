@@ -91,7 +91,7 @@ def test_triggering_launches_the_job_and_registers_the_run(triggerable):
     sent = job_http.requests[0]["json"]
     assert sent["job_id"] == 4242
     params = sent["job_parameters"]
-    assert params["DBX_MODEL"] == "models.scenario"
+    assert params["DBX_MODEL"] == "job.models.scenario"
     assert json.loads(params["DBX_MODEL_CONFIG"]) == {"progress_every": 5}
     assert params["DBX_RUN_ID"] == body["run_id"]
     assert params["DBX_APP_URL"] == "https://app.example.com"

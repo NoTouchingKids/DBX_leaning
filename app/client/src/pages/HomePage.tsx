@@ -3,7 +3,7 @@
  *
  * Cross-references two lists that can legitimately disagree: `MODEL_SPECS`
  * (what this client knows how to build a form for, hand-derived from
- * `models/<name>/model.py`) and `GET /api/models` (what has a Databricks job
+ * `job/models/<name>/model.py`) and `GET /api/models` (what has a Databricks job
  * configured behind it). A model in the first and not the second exists but
  * cannot be run, and that difference is rendered rather than hidden — hiding
  * it turns a configuration gap into a mysterious 404 at trigger time.

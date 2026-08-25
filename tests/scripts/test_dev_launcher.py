@@ -68,7 +68,7 @@ def launcher(tmp_path):
 
 
 def _parameters(**overrides) -> dict[str, str]:
-    base = {"DBX_RUN_ID": "r1", "DBX_MODEL": "models.scenario", "DBX_MODEL_CONFIG": "{}"}
+    base = {"DBX_RUN_ID": "r1", "DBX_MODEL": "job.models.scenario", "DBX_MODEL_CONFIG": "{}"}
     base.update(overrides)
     return base
 
@@ -122,7 +122,7 @@ def test_the_apps_own_trigger_parameters_are_accepted(launcher):
     launcher.run_now(launcher.job_ids["scenario"], parameters)
 
     argv, _, _ = launcher.spawned[0]
-    assert parse_settings(argv[2:])["DBX_MODEL"] == "models.scenario"
+    assert parse_settings(argv[2:])["DBX_MODEL"] == "job.models.scenario"
 
 
 def test_an_undeclared_parameter_is_refused_the_way_databricks_refuses_it(launcher):

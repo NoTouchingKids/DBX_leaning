@@ -1,19 +1,19 @@
 ---
 name: model-nyctaxi-demand
-description: "UNBUILT PROPOSAL — models/nyctaxi_demand/ does not exist and its original justification is void. Do not dispatch this to write code without reading the header first."
+description: "UNBUILT PROPOSAL — job/models/nyctaxi_demand/ does not exist and its original justification is void. Do not dispatch this to write code without reading the header first."
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 ## STOP — this describes a model that was never built, on premises that are now false
 
-`models/nyctaxi_demand/` does not exist, and nothing in the repo references
+`job/models/nyctaxi_demand/` does not exist, and nothing in the repo references
 it. This file is kept as a **proposal**, not as a work order. It is the only
 brief here for an unbuilt model; every other `.claude/agents/model-*.md`
 documents something on disk.
 
 **Its central justification is gone.** This brief was written when the five
 models then in existence all used synthetic in-memory data, and it proposed
-closing that gap. That gap closed a different way: `models/_data` now reads
+closing that gap. That gap closed a different way: `job/models/_data` now reads
 `samples.nyctaxi.trips` for all eleven models, through the job's Spark
 session, falling back to a deterministic generator off-platform — and every
 result row carries `data_source` / `data_synthetic` / `data_rows` /
@@ -53,7 +53,7 @@ Read `CLAUDE.md`, `docs/message-envelope-spec.md`, and
 
 RETRACTED PREMISE — this paragraph was true when written and is not now.
 Every model in the repo reads a real Unity Catalog table through
-`models/_data`, with provenance on every result row; the fallback to a
+`job/models/_data`, with provenance on every result row; the fallback to a
 deterministic generator is a degraded path that says so, not the design.
 `docs/model-expansion-and-packaging.md`'s status note 1 records the same
 retraction. What follows is preserved as the original argument.
@@ -81,7 +81,7 @@ exactly this kind of use).
 Same convention as every other model (see `docs/architecture.md`). This
 model has no Gurobi model to expose and no callback slot to compose — check
 what `job/loader.py`'s discovery actually requires (`build`/`run`/`results`
-by name) and satisfy that, the same shape `models/scenario/model.py` and
+by name) and satisfy that, the same shape `job/models/scenario/model.py` and
 the others already do.
 
 **Where this model is genuinely different from the other five:** it needs a
@@ -110,7 +110,7 @@ completed vs total) from a light background loop, or a registered
   APIs expose that a richer view could use later
 
 Emit at a sensible cadence relative to how fast stages complete — same
-batching discipline as `models/scenario/model.py`, not a message per task.
+batching discipline as `job/models/scenario/model.py`, not a message per task.
 
 ## Cancellation
 

@@ -4,7 +4,7 @@
  * ## Why this and not the neural net the design digest sketches
  *
  * The digest's own table flags the Three.js neural net as an **open question,
- * not a decision** — because `models/forecasting/model.py` is
+ * not a decision** — because `job/models/forecasting/model.py` is
  * `SGDRegressor.partial_fit` over lag features and says so in its docstring,
  * and the wireframe carries a callout saying "not a neural net". A generic
  * "a model is training" visual describes this model's class less precisely

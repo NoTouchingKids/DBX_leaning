@@ -23,9 +23,9 @@ import sys
 
 import pytest
 
-from models._data import Dataset
-from models.annealing import build_model
-from models.annealing import model as annealing_model
+from job.models._data import Dataset
+from job.models.annealing import build_model
+from job.models.annealing import model as annealing_model
 
 PACKAGE = pathlib.Path(annealing_model.__file__).parent
 
@@ -78,7 +78,7 @@ def test_runs_standalone_with_no_harness(recorder):
 def test_the_harness_sees_the_surface_it_needs():
     from job.loader import describe_object
 
-    handle = describe_object(build_model(), "models.annealing")
+    handle = describe_object(build_model(), "job.models.annealing")
     assert handle.run is not None and handle.results is not None
     assert handle.build is not None
     assert handle.results_table == "results_annealing"
@@ -114,24 +114,27 @@ def test_the_package_imports_nothing_outside_the_standard_library():
     #: not about zero imports.
     allowed = sys.stdlib_module_names | {"models", "__future__"}
     offenders = sorted(_imported_top_level_modules() - allowed)
-    assert not offenders, f"models/annealing imports third-party packages: {offenders}"
+    assert not offenders, f"job/models/annealing imports third-party packages: {offenders}"
 
 
 def test_the_only_non_stdlib_import_is_the_shared_data_loader():
-    from_models = {
+    """`_data` is reached RELATIVELY — `from .._data import ...`.
+
+    That is not style. An absolute `from job.models._data import ...` would be
+    a model importing the platform by name, which the test above forbids
+    outright, and it would stop resolving the moment this package is built
+    into its own wheel (`scripts/build_model_wheel.py` stages it under a bare
+    `models/`).
+    """
+    # level 1 is this package's own modules (`from .model import ...`);
+    # level 2 is its parent, `job/models/`, where `_data` lives.
+    outward = {
         node.module
         for path in sorted(PACKAGE.rglob("*.py"))
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path)))
-        if isinstance(node, ast.ImportFrom) and not node.level and (node.module or "") == "models"
-    } | {
-        node.module
-        for path in sorted(PACKAGE.rglob("*.py"))
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path)))
-        if isinstance(node, ast.ImportFrom)
-        and not node.level
-        and (node.module or "").startswith("models.")
+        if isinstance(node, ast.ImportFrom) and node.level > 1
     }
-    assert from_models == {"models._data"}, from_models
+    assert outward == {"_data"}, outward
 
 
 def test_the_registered_extra_is_empty():
@@ -140,7 +143,8 @@ def test_the_registered_extra_is_empty():
     than quietly gaining a package."""
     import tomllib
 
-    root = pathlib.Path(annealing_model.__file__).resolve().parents[2]
+    # model.py -> annealing/ -> models/ -> job/ -> the repo root.
+    root = pathlib.Path(annealing_model.__file__).resolve().parents[3]
     with (root / "pyproject.toml").open("rb") as fh:
         pyproject = tomllib.load(fh)
 

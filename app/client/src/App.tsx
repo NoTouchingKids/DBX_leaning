@@ -55,7 +55,7 @@ export default function App() {
             <Route index element={<HomePage />} />
             <Route path="runs" element={<RunsPage />} />
             <Route path="runs/:runId" element={<RunDetailPage />} />
-            <Route path="models/:model" element={<ModelPage />} />
+            <Route path="job/models/:model" element={<ModelPage />} />
             <Route path="dev/probe" element={<StreamProbe />} />
             {/* The review surface for the nine signature animations. There is
                 no workspace to see them in, so this is where they get looked

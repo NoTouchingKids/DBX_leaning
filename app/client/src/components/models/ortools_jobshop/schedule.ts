@@ -41,13 +41,13 @@
 
 import type { LogMessage, ResultMessage } from "@/lib/envelope";
 
-/** `models/ortools_jobshop/instance.py::STAGES`. The index into this tuple IS
+/** `job/models/ortools_jobshop/instance.py::STAGES`. The index into this tuple IS
  *  the `machine_id` on the result rows. Used only as the fallback lane naming
  *  when the build log has not arrived — never to relabel rows that carry their
  *  own `machine_label`. */
 export const STAGES = ["mix", "rest", "bake", "decorate", "pack"] as const;
 
-/** `models/ortools_jobshop/model.py::DEFAULT_MAX_JOBS`. */
+/** `job/models/ortools_jobshop/model.py::DEFAULT_MAX_JOBS`. */
 const DEFAULT_JOBS = 60;
 
 export interface InstanceShape {

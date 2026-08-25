@@ -9,7 +9,7 @@ of every model still ships to every job's deployment regardless of which
 one it runs, because ``job/loader.py`` only chooses what to *import* at
 runtime, after everything is already on disk.
 
-This script stages ``shared/`` + ``job/`` + exactly one ``models/<name>/``
+This script stages ``shared/`` + ``job/`` + exactly one ``job/models/<name>/``
 into a throwaway directory with a small generated ``pyproject.toml``, and
 builds a wheel from that — nothing else. The MCMC job's wheel ends up with
 ``shared``, ``job``, ``models.mcmc``, and MCMC's own dependencies. No
@@ -46,6 +46,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _registry import UnregisteredModel, extra_for, model_names  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+#: The model packages live inside `job/`, the folder that carries
+#: everything a job needs — they are the job's payload, not the app's.
+MODELS_ROOT = REPO_ROOT / "job" / "models"
 
 #: The model registry lives in pyproject.toml's [tool.dbx-leaning.models],
 #: read through scripts/_registry.py — this script and the requirements
@@ -142,10 +145,10 @@ def stage_and_build(
     root = load_root_pyproject()
     project = root["project"]
 
-    src_model_path = REPO_ROOT / "models" / model_dir_name
+    src_model_path = MODELS_ROOT / model_dir_name
     if not src_model_path.is_dir():
         raise BuildError(
-            f"models/{model_dir_name} does not exist (looked under {REPO_ROOT / 'models'})"
+            f"job/models/{model_dir_name} does not exist (looked under {REPO_ROOT / 'models'})"
         )
     try:
         extra = extra_for(model_dir_name)
@@ -159,16 +162,16 @@ def stage_and_build(
     stage.mkdir(parents=True)
 
     try:
-        # shared/ and job/ verbatim; models/<name>/ only, plus a bare
-        # models/__init__.py so "models" is still a regular package without
+        # shared/ and job/ verbatim; job/models/<name>/ only, plus a bare
+        # job/models/__init__.py so "models" is still a regular package without
         # dragging in any sibling model.
         shutil.copytree(REPO_ROOT / "shared", stage / "shared")
         shutil.copytree(REPO_ROOT / "job", stage / "job")
         (stage / "models").mkdir()
-        shutil.copy2(REPO_ROOT / "models" / "__init__.py", stage / "models" / "__init__.py")
+        shutil.copy2(MODELS_ROOT / "__init__.py", stage / "models" / "__init__.py")
         shutil.copytree(src_model_path, stage / "models" / model_dir_name)
 
-        packages = ["shared", "job", *JOB_SUBPACKAGES, "models", f"models.{model_dir_name}"]
+        packages = ["shared", "job", *JOB_SUBPACKAGES, "models", f"job.models.{model_dir_name}"]
         pyproject_text = render_pyproject(
             name=f"{project['name']}-{model_dir_name.replace('_', '-')}",
             version=project["version"],
@@ -194,9 +197,9 @@ def stage_and_build(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "models", nargs="*", help="model directory names under models/, e.g. mcmc scenario"
+        "models", nargs="*", help="model directory names under job/models/, e.g. mcmc scenario"
     )
-    parser.add_argument("--all", action="store_true", help="build every model under models/")
+    parser.add_argument("--all", action="store_true", help="build every model under job/models/")
     parser.add_argument(
         # NOT `dist`: that name at the repo root is the built SPA now, and it
         # is tracked (see app/client/.gitignore). Wheels go under `build/`,

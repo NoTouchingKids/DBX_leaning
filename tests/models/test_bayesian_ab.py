@@ -25,7 +25,7 @@ import pytest
 
 pytest.importorskip("numpy", reason="needs the [mcmc] extra")
 
-from models.bayesian_ab import (  # noqa: E402
+from job.models.bayesian_ab import (  # noqa: E402
     COMPARISONS,
     STAGES,
     Beta,
@@ -122,7 +122,7 @@ def test_prob_greater_and_its_mirror_sum_to_one():
 def test_the_quadrature_path_agrees_with_the_exact_series():
     """A fractional prior (Jeffreys) takes the quadrature branch. It has to
     give the same answer the series does where both apply."""
-    from models.bayesian_ab.conjugate import _prob_greater_quadrature
+    from job.models.bayesian_ab.conjugate import _prob_greater_quadrature
 
     for a1, b1, a2, b2 in ((1.0, 1.0, 2.0, 1.0), (12.0, 30.0, 18.0, 25.0)):
         assert _prob_greater_quadrature(a1, b1, a2, b2) == pytest.approx(

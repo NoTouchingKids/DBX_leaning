@@ -188,8 +188,7 @@ class WriterKind(StrEnum):
             return cls((value or cls.AUTO.value).strip().lower())
         except ValueError:
             raise ValueError(
-                f"unknown writer {value!r}; expected one of "
-                f"{'|'.join(k.value for k in cls)}"
+                f"unknown writer {value!r}; expected one of {'|'.join(k.value for k in cls)}"
             ) from None
 
 

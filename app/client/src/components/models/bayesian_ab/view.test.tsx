@@ -1,7 +1,7 @@
 /**
  * The behaviour this model's view exists to get right.
  *
- * `models/bayesian_ab` is closed-form: the whole run is five stages of
+ * `job/models/bayesian_ab` is closed-form: the whole run is five stages of
  * arithmetic and finishes in milliseconds. A browser will routinely be handed
  * the terminal status with `snapshot.progress` still empty, because the run
  * ended before the SSE stream delivered anything. So the test that matters is

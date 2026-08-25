@@ -67,9 +67,7 @@ async def _amain() -> int:
         # Databricks cancels a task with SIGTERM. Treating it as a cancel
         # rather than a kill is what lets results already produced survive.
         try:
-            loop.add_signal_handler(
-                sig, lambda s=sig: harness.token.cancel(f"received {s.name}")
-            )
+            loop.add_signal_handler(sig, lambda s=sig: harness.token.cancel(f"received {s.name}"))
         except NotImplementedError:  # pragma: no cover - non-POSIX
             pass
 

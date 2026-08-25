@@ -51,9 +51,13 @@ DBX_leaning/
 │   ├── dist/            the built SPA. Committed. server/spa.py serves it.
 │   ├── shared/          a TRACKED COPY of ../shared — see below
 │   └── requirements.txt where Databricks Apps looks for it
-├── shared/              canonical. job/, models/ and tests import this one.
-├── job/  models/  entrypoints/      the jobs. The app never imports them.
-└── databricks.yml  resources/       the bundle
+├── job/                 <- the job unit: harness + payload + its own floor
+│   ├── models/          eleven model packages, plus _data/
+│   ├── shared/          a tracked copy too — not load-bearing yet, see below
+│   └── requirements.txt the harness's floor; each task installs this + 1 extra
+├── shared/              canonical. job/, job/models/ and tests import this one.
+├── entrypoints/         what a task actually runs
+└── databricks.yml  resources/  uc_ddl/       the bundle and its DDL
 ```
 
 Three consequences, all of which have bitten this repo:
@@ -61,12 +65,18 @@ Three consequences, all of which have bitten this repo:
 **`app/shared/` is a copy, and copies drift.** `app/` deploys alone, so
 everything `server/` imports has to be inside it — and `server/` imports
 exactly one first-party package, `shared`. It cannot be a symlink (see below).
-So one directory is canonical and one is a copy:
+`job/` carries the same copy for symmetry.
+So one directory is canonical and the rest are copies:
 
 ```bash
-uv run python scripts/sync_shared.py           # refresh it
-uv run python scripts/sync_shared.py --check    # is it current?
+uv run python scripts/sync_shared.py           # refresh them
+uv run python scripts/sync_shared.py --check    # are they current?
 ```
+
+`job/shared/` is the same copy, and it is **not load-bearing today**: a job
+task runs `entrypoints/run_model.py` out of the whole synced repo tree, so it
+imports the canonical `shared/` and never reads `job/shared/`. It is there so
+`job/` is already a complete unit the moment it is packaged as a wheel.
 
 `tests/deploy/test_shared_copy.py` fails the moment the two differ, and also
 asserts that tests import the canonical `shared/` rather than the copy —
@@ -287,7 +297,7 @@ workspace rather than trusting:
 
 ```bash
 databricks jobs run-now <job-id> --json '{
-  "job_parameters": {"DBX_RUN_ID": "manual-1", "DBX_MODEL": "models.scenario"}
+  "job_parameters": {"DBX_RUN_ID": "manual-1", "DBX_MODEL": "job.models.scenario"}
 }'
 ```
 

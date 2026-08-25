@@ -102,7 +102,7 @@ export function parseCoverage(logs: readonly LogMessage[]): Coverage | null {
  * The real schedule, from result rows
  * ================================================================== */
 
-/** The canonical order from `models/gurobi_scheduling/instance.py::SHIFTS`.
+/** The canonical order from `job/models/gurobi_scheduling/instance.py::SHIFTS`.
  *  Anything else a future instance emits is kept and sorted after these,
  *  rather than dropped. */
 export const SHIFT_ORDER = ["morning", "evening", "night"] as const;

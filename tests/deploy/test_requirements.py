@@ -16,6 +16,10 @@ REQUIREMENTS = ROOT / "deploy" / "requirements"
 #: The app installs from its own SOURCE directory — `app/`, which is what
 #: `resources/app.yml` gives Databricks Apps — not from the repo root.
 APP_REQUIREMENTS = ROOT / "app" / "requirements.txt"
+#: The job unit's baseline. Nothing installs it today — each task installs its
+#: own `deploy/requirements/<model>.txt`, which is this plus one model extra —
+#: but it is what `job/` states about itself, so it must stay honest.
+JOB_REQUIREMENTS = ROOT / "job" / "requirements.txt"
 
 #: library -> the pyproject extra that provides it. Two models sharing an
 #: extra legitimately share its libraries, so the property to assert is not
@@ -85,7 +89,7 @@ def test_every_environment_pins_the_same_version_of_a_shared_dependency():
     """One resolution, many subsets. Two environments disagreeing about
     pydantic would mean the lock was bypassed somewhere."""
     versions: dict[str, set[str]] = {}
-    for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS]:
+    for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS, JOB_REQUIREMENTS]:
         for package, version in pins(path).items():
             versions.setdefault(package, set()).add(version)
     conflicts = {p: v for p, v in versions.items() if len(v) > 1}
@@ -93,7 +97,7 @@ def test_every_environment_pins_the_same_version_of_a_shared_dependency():
 
 
 def test_nothing_is_left_unpinned():
-    for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS]:
+    for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS, JOB_REQUIREMENTS]:
         for line in path.read_text().splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -134,3 +138,28 @@ def test_torch_reaches_exactly_one_job_environment():
     carrying = [p.name for p in REQUIREMENTS.glob("*.txt") if "torch" in pins(p)]
     assert carrying == ["neural_net.txt"], carrying
     assert "torch" not in pins(APP_REQUIREMENTS), "the app must not install torch"
+
+
+def test_the_job_baseline_carries_no_model_library():
+    """`job/requirements.txt` is the harness's floor, not any model's.
+
+    The microservice split only means something if the baseline is empty of
+    solver and ML libraries: each task installs this plus exactly ONE model
+    extra, so anything that leaks in here is carried by all eleven jobs.
+    """
+    baseline = pins(JOB_REQUIREMENTS)
+    for library in ("gurobipy", "ortools", "torch", "scikit-learn", "emcee", "pandas"):
+        assert library not in baseline, (
+            f"{library} in job/requirements.txt would be installed by every job, "
+            "which is the thing the per-model split exists to avoid"
+        )
+
+
+def test_every_model_environment_is_the_job_baseline_plus_its_own():
+    """Each `deploy/requirements/<model>.txt` must be a superset of the
+    baseline. If a job dropped part of the harness, its telemetry would fail
+    at run time rather than at deploy time."""
+    baseline = set(pins(JOB_REQUIREMENTS))
+    for path in sorted(REQUIREMENTS.glob("*.txt")):
+        missing = baseline - set(pins(path))
+        assert not missing, f"{path.name} is missing harness packages: {sorted(missing)}"

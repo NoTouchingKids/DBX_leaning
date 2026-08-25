@@ -175,8 +175,8 @@ def main() -> int:
     parser.add_argument("--counts", action="store_true", help="COUNT(*) each table (slower)")
     args = parser.parse_args()
 
-    from models._data import samples_available, spark_session
-    from models._data.datasets import nyc_taxi_hourly, nyc_taxi_trips
+    from job.models._data import samples_available, spark_session
+    from job.models._data.datasets import nyc_taxi_hourly, nyc_taxi_trips
 
     spark = spark_session()
     if spark is None:

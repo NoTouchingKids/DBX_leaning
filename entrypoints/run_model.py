@@ -9,7 +9,7 @@ not an installed package, so something has to put the synced repo root on
 Deliberately thin. Anything with logic in it belongs in ``job/``, where it can
 be tested without a workspace.
 
-    run_model.py DBX_RUN_ID=abc DBX_MODEL=models.scenario DBX_APP_URL=
+    run_model.py DBX_RUN_ID=abc DBX_MODEL=job.models.scenario DBX_APP_URL=
 
 An argument with an empty value is dropped rather than exported as an empty
 string, so an unset ``DBX_APP_URL`` means "no app" rather than "an app at ''".
@@ -37,7 +37,7 @@ def parse_settings(args: list[str]) -> dict[str, str]:
         if "=" not in arg:
             raise SystemExit(
                 f"bad argument {arg!r}: expected KEY=VALUE\n"
-                f"  usage: run_model.py DBX_RUN_ID=... DBX_MODEL=models.scenario ..."
+                f"  usage: run_model.py DBX_RUN_ID=... DBX_MODEL=job.models.scenario ..."
             )
         key, _, value = arg.partition("=")
         key = key.strip()

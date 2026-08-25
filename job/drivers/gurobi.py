@@ -181,8 +181,15 @@ class GurobiDriver:
             return RunStatus.CANCELLED
         if status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD, GRB.UNBOUNDED):
             return RunStatus.INFEASIBLE
-        if status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT, GRB.NODE_LIMIT,
-                      GRB.SOLUTION_LIMIT, GRB.ITERATION_LIMIT, GRB.USER_OBJ_LIMIT):
+        if status in (
+            GRB.OPTIMAL,
+            GRB.SUBOPTIMAL,
+            GRB.TIME_LIMIT,
+            GRB.NODE_LIMIT,
+            GRB.SOLUTION_LIMIT,
+            GRB.ITERATION_LIMIT,
+            GRB.USER_OBJ_LIMIT,
+        ):
             return RunStatus.SUCCEEDED
         return RunStatus.FAILED
 

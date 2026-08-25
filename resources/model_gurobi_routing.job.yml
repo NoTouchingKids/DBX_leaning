@@ -4,7 +4,7 @@
 # dependency list and its compute — change any of them here without touching
 # another model.
 #
-# Shares the `gurobi` extra with models/gurobi_scheduling — deliberate reuse,
+# Shares the `gurobi` extra with job/models/gurobi_scheduling — deliberate reuse,
 # and the case that proves the per-model split does not force one extra per
 # model. Two jobs, one dependency set, separate environments.
 #
@@ -40,7 +40,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.gurobi_routing
+          default: job.models.gurobi_routing
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG

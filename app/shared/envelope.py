@@ -54,7 +54,7 @@ def sanitize_metric(value: float | None) -> float | None:
 
     This is a floor, not the whole story: Gurobi's pre-incumbent sentinel is
     ``±1e100``, which is *finite* and therefore invisible here. That one is
-    handled where it is produced — see ``models/gurobi_scheduling``.
+    handled where it is produced — see ``job/models/gurobi_scheduling``.
     """
     if value is None:
         return None

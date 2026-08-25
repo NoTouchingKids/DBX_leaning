@@ -41,42 +41,42 @@ branch = one Claude Code session.
 |---|---|---|
 | `job/` harness (WS client, HTTP push, Delta writer, model loader) | `.claude/agents/transport-job.md` | `shared/` |
 | `app/` (FastAPI, SSE, ServiceHub, whoami) | `.claude/agents/transport-app.md` | `shared/` |
-| `models/gurobi_scheduling/` | `.claude/agents/model-gurobi-scheduling.md` | `shared/` (message shape only — a model never imports the job or app) |
-| `models/scenario/` | `.claude/agents/model-scenario.md` | `shared/` |
-| `models/forecasting/` | `.claude/agents/model-forecasting.md` | `shared/` |
-| `models/mcmc/` | `.claude/agents/model-mcmc.md` | `shared/` |
-| `models/streaming_results/` | `.claude/agents/model-streaming-results.md` | `shared/` |
-| `models/annealing/`, `models/bayesian_ab/`, `models/gurobi_routing/`, `models/neural_net/` | none — built after the pattern was established, from `models/README.md` and `/new-model` | `shared/` |
-| `models/ortools_jobshop/` — CP-SAT job shop, the open-source counterweight to the two Gurobi models: no licence file, no expiry, no size cap | none — same route, and later still | `shared/` |
-| `models/panel_fit/` — many small per-group fits, and the one model whose individual units may FAIL while the run SUCCEEDS | none — same route, and later still | `shared/` |
+| `job/models/gurobi_scheduling/` | `.claude/agents/model-gurobi-scheduling.md` | `shared/` (message shape only — a model never imports the job or app) |
+| `job/models/scenario/` | `.claude/agents/model-scenario.md` | `shared/` |
+| `job/models/forecasting/` | `.claude/agents/model-forecasting.md` | `shared/` |
+| `job/models/mcmc/` | `.claude/agents/model-mcmc.md` | `shared/` |
+| `job/models/streaming_results/` | `.claude/agents/model-streaming-results.md` | `shared/` |
+| `job/models/annealing/`, `job/models/bayesian_ab/`, `job/models/gurobi_routing/`, `job/models/neural_net/` | none — built after the pattern was established, from `job/models/README.md` and `/new-model` | `shared/` |
+| `job/models/ortools_jobshop/` — CP-SAT job shop, the open-source counterweight to the two Gurobi models: no licence file, no expiry, no size cap | none — same route, and later still | `shared/` |
+| `job/models/panel_fit/` — many small per-group fits, and the one model whose individual units may FAIL while the run SUCCEEDS | none — same route, and later still | `shared/` |
 | `app/client/` | `.claude/agents/frontend.md` | Explicitly low priority — start after `app/` + `job/` + one model work end to end |
 
 There are **eleven** models on disk, not the five that got their own brief.
-`models/` on disk, `[tool.dbx-leaning.models]` in `pyproject.toml`, and
+`job/models/` on disk, `[tool.dbx-leaning.models]` in `pyproject.toml`, and
 `resources/model_*.job.yml` all have to agree; they are cross-checked in
 `tests/deploy/`. A brief per model turned out to be worth writing only while
-the contract was still being discovered — once `models/README.md` and
+the contract was still being discovered — once `job/models/README.md` and
 `/new-model` existed, the later six needed no brief at all, and that is the
 signal to stop writing them rather than a gap to fill in. Six is now enough
 of a run to call it settled rather than lucky, and the last two are the
 better evidence: `ortools_jobshop` and `panel_fit` arrived when there was
 considerably more surrounding platform to get wrong than there had been for
 the middle four — a registry in `pyproject.toml`, a job file, a generated
-requirements file, a results-table DDL — and `models/README.md` covered all
+requirements file, a results-table DDL — and `job/models/README.md` covered all
 of it.
 
 One brief describes a model that was never built:
 `.claude/agents/model-nyctaxi-demand.md`, the Spark-native aggregation
 proposed in `docs/model-expansion-and-packaging.md`. Its original
 justification is gone — nine of the eleven models read
-`samples.nyctaxi.trips` through `models/_data`, and the other two read
+`samples.nyctaxi.trips` through `job/models/_data`, and the other two read
 elsewhere in Unity Catalog (`ortools_jobshop` builds its instance from
 `samples.bakehouse.sales_transactions`; `panel_fit` asks for a panel table
 nobody has landed and falls back to its generator) — so if it is ever built
 it is on the strength of its telemetry shape, not on closing a gap. See that
 document.
 
-The `models/*` tracks are the cleanest parallel case: same contract, zero
+The `job/models/*` tracks are the cleanest parallel case: same contract, zero
 file overlap, no dependency on each other or on `job`/`app` internals (a
 model only ever touches the `emit()` callback it's handed). They can run
 concurrently with `job/` and `app/` from the moment `shared/` lands.
@@ -111,11 +111,11 @@ Merge each branch back via PR once its track's own tests pass.
 tool.** If you'd rather not juggle terminals, a single Claude Code session
 in the main repo can dispatch each track as a subagent task, pointing it at
 the same `.claude/agents/*.md` brief and, if the tracks write to different
-directories (`job/`, `app/`, `models/x/`), this is safe without worktrees —
+directories (`job/`, `app/`, `job/models/x/`), this is safe without worktrees —
 they're disjoint files. Worktrees start to matter more once a track's work
 might touch shared files (e.g. a shared requirements/lockfile) — see
 `/new-model` for the one common shared-file collision (adding a new model to
-`models/` doesn't touch anything another model track touches, but adding a
+`job/models/` doesn't touch anything another model track touches, but adding a
 dependency to a shared `pyproject.toml` does; if that comes up, do it as a
 separate, sequential step, not inside a parallel track).
 
@@ -137,7 +137,7 @@ subagent tool's own scheduling.
    land these before the model PRs merge (the model PRs can still be
    *developed* in parallel against `shared/` alone; they just don't get
    integration-tested until `job/`+`app/` land).
-3. One model — `models/gurobi_scheduling/` is the natural first pick, since
+3. One model — `job/models/gurobi_scheduling/` is the natural first pick, since
    it was the original driving use case — merges next and becomes the first
    end-to-end vertical slice.
 4. The remaining model tracks merge in any order once the first slice
@@ -152,13 +152,13 @@ subagent tool's own scheduling.
    own callbacks, not a new hook in `job/` — which is what the duck-typed
    contract is supposed to buy. Neither model touched `job/`, `app/` or
    `shared/` at all; what they touched outside their own package is exactly
-   the registration list in `models/README.md`, one entry each.
+   the registration list in `job/models/README.md`, one entry each.
 5. `app/client/` starts once step 3 is done, not before. That gate is met and
    the track has started — see `app/client/README.md` for where it is.
 
 ## What "done" means per track, before merging
 
-- `models/*`: produces valid envelope messages via `emit()`, respects
+- `job/models/*`: produces valid envelope messages via `emit()`, respects
   cancellation, writes to its own results table, has unit tests that don't
   require a live Databricks connection (mock the `emit()` callback and the
   results sink).

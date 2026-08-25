@@ -15,7 +15,7 @@
  * `PanelLattice` renders both, and the honesty note says which is which.
  *
  * INFEASIBLE is a DESIGNED state here, not defensive cover the way it is in
- * `annealing/frames.ts`. `models/panel_fit/model.py::_terminal_status` returns
+ * `annealing/frames.ts`. `job/models/panel_fit/model.py::_terminal_status` returns
  * it explicitly when `groups_fitted == 0`: the run completed, the results are
  * correct and durable, and the answer is that nothing could be fitted. It must
  * not read as a crash.

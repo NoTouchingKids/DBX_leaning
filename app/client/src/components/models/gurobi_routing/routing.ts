@@ -191,7 +191,7 @@ export function resolveRoutes(results: readonly ResultMessage[]): ResolvedRoutes
  * The decorative layer
  * ================================================================== */
 
-/** The same golden angle `models/gurobi_routing/instance.py` uses to spread
+/** The same golden angle `job/models/gurobi_routing/instance.py` uses to spread
  *  stops around the depot. Borrowing the rule means the decorative scatter has
  *  the character of a real instance without pretending to BE one. */
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));

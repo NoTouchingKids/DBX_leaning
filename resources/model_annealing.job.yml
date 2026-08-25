@@ -36,7 +36,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.annealing
+          default: job.models.annealing
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG

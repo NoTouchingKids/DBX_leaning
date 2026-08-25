@@ -23,7 +23,7 @@ REQUIREMENTS = ROOT / "deploy" / "requirements"
 #: The model packages, discovered rather than listed.
 MODELS = sorted(
     p.name
-    for p in (ROOT / "models").iterdir()
+    for p in (ROOT / "job" / "models").iterdir()
     if p.is_dir() and (p / "__init__.py").exists() and not p.name.startswith("_")
 )
 
@@ -66,13 +66,13 @@ def test_every_model_has_its_own_job_file():
 def test_no_job_exists_for_a_model_that_does_not(jobs):
     for name in jobs:
         model = name.removeprefix("model_")
-        assert model in MODELS, f"job {name} refers to a model that is not in models/"
+        assert model in MODELS, f"job {name} refers to a model that is not in job/models/"
 
 
 def test_each_job_runs_its_own_model(jobs):
     for model in MODELS:
         params = {p["name"]: p["default"] for p in jobs[f"model_{model}"]["parameters"]}
-        assert params["DBX_MODEL"] == f"models.{model}"
+        assert params["DBX_MODEL"] == f"job.models.{model}"
 
 
 def test_jobs_declare_exactly_the_parameters_the_app_sends(jobs):
@@ -297,7 +297,7 @@ def test_every_model_on_disk_is_in_the_registry():
     from _registry import discovered_packages, model_extras
 
     assert set(discovered_packages()) == set(model_extras()), (
-        "models/ and [tool.dbx-leaning.models] disagree"
+        "job/models/ and [tool.dbx-leaning.models] disagree"
     )
 
 
@@ -333,7 +333,7 @@ def _declared_results_tables() -> dict[str, str]:
     """
     found: dict[str, str] = {}
     for name in MODELS:
-        source = (ROOT / "models" / name / "model.py").read_text()
+        source = (ROOT / "job" / "models" / name / "model.py").read_text()
         match = re.search(r'^\s*results_table\s*=\s*"([^"]+)"', source, re.MULTILINE)
         if match:
             found[name] = match.group(1)
@@ -343,7 +343,7 @@ def _declared_results_tables() -> dict[str, str]:
 def test_every_model_declares_a_results_table():
     declared = _declared_results_tables()
     missing = sorted(set(MODELS) - set(declared))
-    assert not missing, f"no results_table declared in models/<name>/model.py: {missing}"
+    assert not missing, f"no results_table declared in job/models/<name>/model.py: {missing}"
 
 
 def test_every_model_results_table_exists_in_the_ddl():

@@ -2,7 +2,7 @@
  * neural_net's signature: a layer sketch over a two-tier epoch/batch ladder.
  *
  * No design doc exists for this model, so it is derived from the same
- * principle the others follow and from what `models/neural_net/model.py`
+ * principle the others follow and from what `job/models/neural_net/model.py`
  * actually does.
  *
  * Two halves, for two different jobs:
@@ -45,7 +45,7 @@ function spread(count: number): number[] {
 
 /**
  * The outer two layers are real: `FEATURE_NAMES` and `CLASS_LABELS` in
- * `models/neural_net/model.py` are fixed-length tuples, mirrored in
+ * `job/models/neural_net/model.py` are fixed-length tuples, mirrored in
  * `@/lib/models` so the counts here are derived rather than retyped. The 6
  * and 5 are a sketch — the default `hidden` is [32, 16], which cannot be
  * drawn, and the actual widths are config the payload never carries.

@@ -3,7 +3,7 @@
  *
  * `fixtures.ts` has no script for this model (`hasScript("panel_fit")` is
  * false), so these build their own payloads straight from
- * `models/panel_fit/model.py::_progress` and `_flush`. That is the right
+ * `job/models/panel_fit/model.py::_progress` and `_flush`. That is the right
  * source anyway: `@/lib/models` is hand-derived from the same place and can
  * drift, so a test written against the model rather than against the interface
  * is the one that would notice.

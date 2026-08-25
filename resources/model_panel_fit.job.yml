@@ -37,7 +37,7 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: models.panel_fit
+          default: job.models.panel_fit
         - name: DBX_MODEL_CONFIG
           default: "{}"
         - name: DBX_CATALOG
