@@ -178,6 +178,21 @@ class ServiceHub:
         dev stack and any deployment still using a static `DATABRICKS_TOKEN`.
         """
         if not cfg.has_client_credentials:
+            if cfg.oauth_client_id and not cfg.oauth_client_secret:
+                # Half-configured, and the half that is missing is the one a
+                # deploy can silently lose: the secret is a `value_from` in
+                # `resources/app.yml` that is commented out by default,
+                # because a declared secret resource is validated at deploy
+                # time and 404s the whole deploy if the key is absent. Someone
+                # who set the id meant to run as that principal; falling back
+                # to the app's own without saying so would look like it worked.
+                self.degraded["oauth"] = (
+                    f"DBX_OAUTH_CLIENT_ID is set ({cfg.oauth_client_id}) but no "
+                    "DBX_OAUTH_CLIENT_SECRET; running as the app's own service "
+                    "principal instead. Uncomment the oauth-client-secret block "
+                    "in resources/app.yml, and create the secret first"
+                )
+                log.warning(self.degraded["oauth"])
             return None
 
         provider = OAuthTokenProvider(

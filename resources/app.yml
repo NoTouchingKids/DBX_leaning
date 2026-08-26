@@ -67,21 +67,35 @@ resources:
         # READ and WRITE are DECLARED SEPARATELY because Unity Catalog treats
         # them as separate privileges — `WRITE VOLUME` does not imply
         # `READ VOLUME`, and `permission` here takes one value.
-        # The service principal the app authenticates AS — against Postgres,
-        # Unity Catalog and the Jobs API alike. Its client id is not a
-        # credential and is set as a plain env var below; the SECRET is one,
-        # so it lives here and never in a bundle variable, which would land in
-        # the deployment state.
+        # OPTIONAL — running as a service principal you granted yourself,
+        # rather than the one Databricks Apps creates for this app.
         #
-        # Leave the scope key unset and the app falls back to the app's own
-        # service principal (DATABRICKS_CLIENT_ID/SECRET, injected by Apps) or
-        # to a static DATABRICKS_TOKEN. `/healthz` reports what it got.
-        - name: oauth-client-secret
-          description: Secret for the service principal the app runs as.
-          secret:
-            scope: ${var.app_secret_scope}
-            key: oauth-client-secret
-            permission: READ
+        # COMMENTED OUT ON PURPOSE, and it is not a style choice. A declared
+        # secret resource is VALIDATED AT DEPLOY TIME, so if the key is not in
+        # the scope the whole deploy fails before uploading anything:
+        #
+        #   Error: cannot update resources.apps.dbx_leaning:
+        #   Invalid secret resource oauth-client-secret: Secret with scope
+        #   dbx-leaning and key oauth-client-secret does not exist. (404)
+        #
+        # There is no "leave it unset and it falls back" for a declared
+        # resource — declaring it makes it required. Everything else optional
+        # in this platform degrades at RUN time and says so on `/healthz`;
+        # this one cannot, so it is off until you opt in.
+        #
+        # To use a principal of your own, create the secret first, then
+        # uncomment BOTH this block and the DBX_OAUTH_CLIENT_SECRET env below,
+        # and set the `oauth_client_id` variable to its application id:
+        #
+        #   databricks secrets put-secret ${var.app_secret_scope} \
+        #     oauth-client-secret --string-value "<the SP's OAuth secret>"
+        #
+        # - name: oauth-client-secret
+        #   description: Secret for the service principal the app runs as.
+        #   secret:
+        #     scope: ${var.app_secret_scope}
+        #     key: oauth-client-secret
+        #     permission: READ
 
         - name: app-store-read
           description: Read the app's own volume.
@@ -183,10 +197,13 @@ resources:
           # DATABRICKS_TOKEN. Naming one here is for when the app should run
           # as a principal you granted explicitly — which is also what
           # `lakebase_user` above should be set to.
+          # The id alone does nothing — `has_client_credentials` needs both —
+          # and setting it without uncommenting the secret below is reported
+          # on `/healthz` rather than silently ignored.
           - name: DBX_OAUTH_CLIENT_ID
             value: ${var.oauth_client_id}
-          - name: DBX_OAUTH_CLIENT_SECRET
-            value_from: oauth-client-secret
+          # - name: DBX_OAUTH_CLIENT_SECRET
+          #   value_from: oauth-client-secret
 
           # Which job runs which model. This map is also the app's allow-list:
           # a model with no job here cannot be triggered, so the app never

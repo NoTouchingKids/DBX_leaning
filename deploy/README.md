@@ -323,18 +323,43 @@ the schema is there.
 ### Running as a service principal you granted yourself
 
 By default the app authenticates as the service principal Databricks Apps
-creates for it. To use one you made and granted explicitly — Postgres, Unity
-Catalog and the Jobs API — name it:
+creates for it, and **nothing needs configuring**. Using one you made and
+granted explicitly is opt-in, in three steps that must happen in this order:
 
 ```bash
+# 1. The secret must EXIST before the bundle may mention it.
 databricks secrets put-secret dbx-leaning oauth-client-secret \
   --string-value "<the SP's OAuth secret>"
 
+# 2. Uncomment BOTH blocks in resources/app.yml - the `oauth-client-secret`
+#    resource, and the DBX_OAUTH_CLIENT_SECRET env that reads it.
+
+# 3. Deploy, naming the principal.
 databricks bundle deploy -t dev \
   --var="oauth_client_id=<the SP's application id>" \
   --var="lakebase_host=<read_write_dns>" \
   --var="lakebase_user=<the SP's application id>"
 ```
+
+**Why it ships commented out rather than just empty.** A declared secret
+resource is validated when the app is updated, so a bundle that mentions a key
+the scope does not have fails the whole deploy before uploading anything:
+
+```
+Error: cannot update resources.apps.dbx_leaning:
+Invalid secret resource oauth-client-secret: Secret with scope dbx-leaning
+and key oauth-client-secret does not exist. (404 NOT_FOUND)
+```
+
+There is no fallback for a *declared* resource — declaring it makes it
+required. Everything else optional in this platform degrades at run time and
+reports itself on `/healthz`; this one cannot, so it is off until you opt in.
+`tests/deploy/test_bundle.py` fails if it is ever declared by default.
+
+Setting `oauth_client_id` without doing step 2 is inert but not silent:
+`/healthz` reports `oauth` degraded, naming the id it was given, because
+falling back to the app's own principal while a Lakebase role is granted to a
+different one is a failure that otherwise looks like success.
 
 `lakebase_user` is the same application id: the Postgres role Databricks
 provisions for a principal is named after it, so the app must connect as the

@@ -262,3 +262,30 @@ async def test_no_credential_at_all_sends_no_header():
     from server.oauth import bearer_headers
 
     assert await bearer_headers(None, None) == {}
+
+
+async def test_an_id_with_no_secret_is_reported_rather_than_ignored():
+    """The secret is a `value_from` that ships commented out, because a
+    declared secret resource is validated at deploy time and 404s the whole
+    deploy when the key is absent.
+
+    That makes "id set, secret missing" the likely misconfiguration rather than
+    an exotic one — and it is the silent kind: the app runs happily as its own
+    service principal, against a Lakebase role granted to a different one.
+    """
+    cfg = _config(
+        DATABRICKS_HOST=HOST,
+        DBX_LAKEBASE_HOST="pg.example.com",
+        DATABRICKS_CLIENT_ID="the-sp-id",
+    )
+    hub = ServiceHub(cfg)
+    assert hub._token_source(cfg) is None
+    assert "oauth" in hub.degraded
+    assert "the-sp-id" in hub.degraded["oauth"]
+
+
+async def test_neither_set_is_not_degraded():
+    """The default deploy, and the local dev stack. Nothing is wrong."""
+    hub = ServiceHub(_config())
+    assert hub._token_source(_config()) is None
+    assert "oauth" not in hub.degraded

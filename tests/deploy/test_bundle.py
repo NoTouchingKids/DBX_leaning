@@ -481,24 +481,48 @@ def test_each_job_names_its_environment_after_its_model(jobs):
             assert used == model, f"{name}: task uses environment {used!r}"
 
 
-def test_the_service_principal_secret_is_a_secret_not_a_variable(bundle):
-    """The app authenticates as one service principal against Postgres, Unity
-    Catalog and the Jobs API. Its id is not a credential; its secret is.
+def test_the_optional_service_principal_secret_is_not_declared_by_default(bundle):
+    """`oauth-client-secret` must ship COMMENTED OUT, and this is the test that
+    keeps it that way.
 
-    A bundle variable lands in the deployment state, so a credential there is
-    readable by anyone who can read the bundle's state — which is not the same
-    set of people as those who can read the secret scope.
+    A declared secret resource is validated when the app is updated, not when
+    it is read — so declaring one whose key is not in the scope fails the whole
+    deploy before a single file is uploaded:
+
+        Invalid secret resource oauth-client-secret: Secret with scope
+        dbx-leaning and key oauth-client-secret does not exist. (404)
+
+    Every other optional thing here degrades at run time and says so on
+    /healthz. This one cannot, so the default must not require it. Someone
+    running as their own principal uncomments two blocks and creates the
+    secret; nobody else pays for the feature.
     """
     app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
     env = {e["name"]: e for e in app["config"]["env"]}
 
-    assert "value" not in env["DBX_OAUTH_CLIENT_SECRET"], "never a literal"
-    assert env["DBX_OAUTH_CLIENT_SECRET"]["value_from"] == "oauth-client-secret"
-    secret = next(r for r in app["resources"] if r["name"] == "oauth-client-secret")["secret"]
-    assert secret["permission"] == "READ"
+    declared = [r["name"] for r in app["resources"]]
+    assert "oauth-client-secret" not in declared, (
+        "declaring this makes it REQUIRED — a deploy without the secret 404s"
+    )
+    assert "DBX_OAUTH_CLIENT_SECRET" not in env, (
+        "a value_from pointing at an undeclared resource fails the same way"
+    )
 
-    # The id may be a variable — it is an identifier, not a credential.
+    # The id stays: it is an identifier, not a credential, and on its own it
+    # is inert — `has_client_credentials` needs both, and services.py reports
+    # the half-configured case on /healthz rather than silently falling back.
     assert env["DBX_OAUTH_CLIENT_ID"]["value"] == "${var.oauth_client_id}"
+
+
+def test_the_commented_secret_block_still_says_value_from(bundle):
+    """The instructions someone uncomments have to be correct when they do.
+
+    `valueFrom` is right in app.yaml and wrong here, and a commented block is
+    exactly where that rots unnoticed — nothing parses it.
+    """
+    text = (RESOURCES / "app.yml").read_text()
+    assert "#   value_from: oauth-client-secret" in text
+    assert "valueFrom: oauth-client-secret" not in text
 
 
 def test_no_variable_holds_a_credential(bundle):
