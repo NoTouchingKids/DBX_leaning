@@ -2,8 +2,9 @@
  * The cooling schedule, and what it is buying.
  *
  * This chart earns the second slot because it is the receipt for the signature
- * animation: the lattice claims to be paced by `temperature`, and this is that
- * number, unretouched. It is also the one diagnostic that says whether the
+ * animation: the lattice's extent and its palette are set by `temperature`
+ * (its cadence is not — that is fixed), and this is that number, unretouched
+ * and normalised by nothing. It is also the one diagnostic that says whether the
  * schedule was right. The model cools geometrically, so on a log axis a
  * healthy run is a straight line — a kink means the bounds were overridden
  * into something else. Acceptance rate on the right axis is the consequence:

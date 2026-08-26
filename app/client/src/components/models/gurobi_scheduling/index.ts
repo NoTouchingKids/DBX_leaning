@@ -32,7 +32,7 @@ const view: ModelView = {
     },
   ],
   honesty:
-    "The grid's dimensions are this run's real staff x day instance, read from the model's own build log. Which cells light up while the run is going is DECORATIVE: no progress message carries per-cell or candidate-schedule data, only aggregate solve metrics. What is real is the cadence — the grid changes exactly once per new incumbent (solution_count increment) and sits still when the solver is not improving, so a frozen grid means a stalled search, not a stalled page. The terminal frame is not decorative: on a succeeded or cancelled run the grid is the actual schedule from the result rows, one filled cell per assigned shift.",
+    "The grid's dimensions are this run's real staff x day instance, read from the model's own build log. Which cells light up while the run is going is DECORATIVE: no progress message carries per-cell or candidate-schedule data, only aggregate solve metrics. What is real is the cadence — the cells stay empty until the first feasible schedule is found, then re-lay exactly once per new incumbent (a solution_count increment) and hold still between them, so a board that is not changing means the search is not improving. The sweep of light crossing the board is the one thing here on a clock: it says the page is still live and nothing else, so its speed and position are not progress. The terminal frame is not decorative: on a succeeded or cancelled run the grid is the actual schedule from the result rows, one filled cell per assigned shift.",
 };
 
 export default view;

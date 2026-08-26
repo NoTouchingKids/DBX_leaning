@@ -184,7 +184,7 @@ export function coolingSeries(
 }
 
 /* ================================================================== *
- * Heat — what paces the signature animation
+ * Heat — how far through its cooling schedule the search is
  * ================================================================== */
 
 /**

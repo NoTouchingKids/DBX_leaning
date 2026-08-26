@@ -37,7 +37,7 @@ const forecastingView: ModelView = {
     },
   ],
   honesty:
-    "Real in the animation: how many horizon markers are lit, which tracks percent_complete (100 × (epoch + 1) / epochs), and the single flat colour a finished run freezes into. Decorative: the history waveform, the projected path the markers sit on, and the width of the shaded band — the band narrows with elapsed progress, not with uncertainty, and this model emits no prediction interval of any kind. Nothing in the animation encodes the loss. Both charts below are entirely real: training loss from live progress messages, the forecast from results().",
+    "Real in the animation: how many horizon markers are lit, which tracks percent_complete (100 × (epoch + 1) / epochs), and the single flat colour a finished run freezes into. Decorative: the history waveform, the projected path the markers sit on, the width of the shaded band, and the sweep that crosses the forecast region while a run is live. The band narrows with elapsed progress, not with uncertainty — this model emits no prediction interval of any kind — and the sweep is pacing, tied to no epoch and no step. Nothing in the animation encodes the loss. Both charts below are entirely real: training loss from live progress messages, the forecast from results().",
 };
 
 export default forecastingView;

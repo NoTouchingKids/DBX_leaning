@@ -16,8 +16,9 @@ export interface SignatureFrame {
   /** The dot beside the caption. */
   dotClass: string;
   headline: string;
-  /** Whether the lattice churns. False in every terminal state, and in
-   *  QUEUED — nothing is searching yet. */
+  /** Whether the lattice churns. True in RUNNING and nowhere else: false in
+   *  every terminal state, in QUEUED because nothing is searching yet, and in
+   *  STARTING because that frame is a held inhale, not work. */
   animated: boolean;
   /** Whether cells take their colour from the live heat rather than from
    *  `cellClass`. Only true while the search is actually running. */
@@ -114,17 +115,23 @@ export function frameFor(state: UiRunState | null): SignatureFrame {
  * ================================================================== */
 
 /**
- * How the lattice moves at a given heat.
+ * How much the lattice moves at a given heat.
  *
- * Both numbers are the animation's whole claim to being paced by something
- * real, so they are derived rather than picked per state: at the start of a
- * default run cells change several times a second, and by the end a change is
- * a rare single event. That is the cooling schedule, felt rather than read.
+ * Heat sets the EXTENT of the motion, never its rate. `AnnealingSignature`
+ * runs one batch of proposals per `DURATION.ambient` whatever the temperature
+ * and spends the heat on how many cells turn over in that batch; a hot search
+ * therefore changes more at once, not more often. It used to spend it on
+ * `intervalMs` instead, which strobed at the hot end and never fired at all at
+ * the cold end — the header of `AnnealingSignature.tsx` has the full account.
  */
 export interface HeatMotion {
-  /** Milliseconds between churns. */
+  /** Milliseconds between churns. VESTIGIAL: nothing reads this and nothing
+   *  should. 110ms is a strobe, and `motion.ts` puts the floor for an ambient
+   *  loop at about 1.5s. It survives only as the ramp `flipsPerTick` was
+   *  originally scaled against. */
   intervalMs: number;
-  /** Cells flipped per churn. */
+  /** Cells flipped per churn — the ramp the signature scales its per-batch
+   *  turnover against, rather than a count it uses directly. */
   flipsPerTick: number;
   /** Colour-transition duration, in ms. Long at low heat so the few changes
    *  that do happen drift rather than snap. */

@@ -35,18 +35,26 @@ const view: ModelView = {
     },
   ],
   honesty:
-    "The scan head is real: it sits on the demand x capacity cell of the last scenario the run " +
-    "reported, matched from that scenario's own multipliers, and the amber cell marks a genuine " +
-    "best_objective improvement. The grid is 6x4 because the third dimension, unit cost, is swept " +
-    "inside each cell — every cell is visited three times, not once. Drawn rather than measured: " +
-    "progress is batched about every ten scenarios, so the head jumps, and the brief left-to-right " +
-    "cascade between jumps exists only to keep the jump legible; the head resting on the first cell " +
-    "while a run is starting is a spin-up frame, not a report; and because a model view is never " +
-    "handed the run's config, the axes are the default multipliers, so a run with a custom grid " +
-    "places its head at its completed fraction of the sweep instead — real progress, but not a real " +
-    "coordinate. Cells are four discrete states and never a magnitude. When the run ends the whole " +
-    "grid goes to one flat colour and stops meaning anything cell by cell; the numbers are in the " +
-    "two cards below.",
+    "The scan cursor is filled once the run has reported a scenario and outlined until then — " +
+    "outlined, it is parked on the first cell as a spin-up frame and claims nothing. Where the " +
+    "filled cursor sits is real: the demand x capacity cell of the last scenario the run reported, " +
+    "matched from that scenario's own multipliers, with that scenario's row and column labels lit. " +
+    "The amber cell marks a genuine best_objective improvement, and its two forms are the " +
+    "difference between knowing and guessing where — filled means the improving scenario is the one " +
+    "the message named, dashed means the cell is an approximation, either because the improvement " +
+    "happened somewhere inside a batch or because the run's grid is not the one drawn here. The " +
+    "grid is 6x4 because the third dimension, unit cost, is swept inside each cell — every cell is " +
+    "visited three times, not once. Drawn " +
+    "rather than measured: progress is batched about every ten scenarios, so the cursor jumps, and " +
+    "both the brief left-to-right cascade behind a jump and the cursor's slow pulse between jumps " +
+    "exist to keep a live run distinguishable from a stalled one — the pulse is not a scenario " +
+    "being evaluated, only the run still being open. Because a model view is never handed the run's " +
+    "config, the axes are the default multipliers, so a run with a custom grid matches nothing and " +
+    "its marks are placed at its completed fraction of the sweep instead — real progress, but not a " +
+    "real coordinate, and the axis labels stay unlit to say so. Cells carry four discrete states " +
+    "and the cursor sits on top of them; nothing anywhere is a magnitude. When the run ends the " +
+    "whole grid goes to one flat colour, the legend is withdrawn, and nothing means anything cell " +
+    "by cell; the numbers are in the two cards below.",
 };
 
 export default view;

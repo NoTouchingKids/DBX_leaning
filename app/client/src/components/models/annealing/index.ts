@@ -9,8 +9,11 @@
  * take, and `AnnealingSignature` for the cooling animation.
  *
  * Two charts, which is the contract's maximum, and the second one is not
- * padding: the signature claims to be paced by the real temperature, and the
- * cooling chart is where that claim can be checked.
+ * padding: the signature claims its extent and its palette are set by the real
+ * temperature, and the cooling chart is where that claim can be checked. Note
+ * what it does NOT claim — the lattice's cadence is a fixed 2.4s and has
+ * nothing to do with the temperature. Pacing the flicker by heat is the thing
+ * that got removed, because it strobed.
  */
 
 import type { ModelView } from "@/components/models/contract";
@@ -40,7 +43,7 @@ const ANNEALING_VIEW: ModelView = {
     },
   ],
   honesty:
-    "the lattice's pace and its colour. How often cells change, how many change at once, and how warm they look are all derived from the run's own temperature, normalised against the geometric cooling schedule the model reports — a hot search shimmers in warm tones, a cold one is nearly still and blue — and the four readouts under the grid are read straight off the latest progress message. Decorative: which cells are lit. The payload carries nothing per-trip, so the pattern is a random walk over a fixed grid rather than the shift being assembled; the trips actually chosen exist only in the results table. When the run ends the whole grid takes one flat colour for the outcome and stops, and no cell means anything different from any other at that point.",
+    "how much of the lattice moves, how deep the settled block at the bottom is, and how warm the colours are. All three are derived from the run's own temperature, normalised against the geometric cooling schedule the model reports — a hot search agitates the whole field in warm tones, a cold one has crystallised almost to the top and changes a single cell at a time in blue — and the four readouts under the grid are read straight off the latest progress message. Decorative: which cells are lit, and the rhythm. The lattice turns over on a fixed 2.4-second cycle whatever the temperature, because pacing the flicker by temperature strobed at the hot end. The payload carries nothing per-trip, so the pattern is a random walk over a fixed grid rather than the shift being assembled: the settled block's depth is the run's position on its cooling schedule and not a count of anything, and the trips actually chosen exist only in the results table. When the run ends the whole grid takes one flat colour for the outcome and stops, and no cell means anything different from any other at that point.",
 };
 
 export default ANNEALING_VIEW;

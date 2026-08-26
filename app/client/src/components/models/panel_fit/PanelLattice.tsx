@@ -6,9 +6,9 @@
  * **The lattice** is the animation. Its structure is real — one cell per group
  * where the panel is small enough, a stated proportion where it is not — and
  * the frontier cell marks the group being fitted right now, which is
- * `groups_done` and nothing else. Nothing in it runs on a timer. Per
- * `contract.ts` it collapses to ONE flat frame the moment the run is over: no
- * cell means anything different from any other cell at that point.
+ * `groups_done` and nothing else. Per `contract.ts` it collapses to ONE flat
+ * frame the moment the run is over: no cell means anything different from any
+ * other cell at that point.
  *
  * **The outcome bar and the readout** under it are data, not animation. They
  * are identical in every state including terminal, which is where the
@@ -21,9 +21,54 @@
  * A failed group is styled as information, never as alarm. `FailureTone` has
  * no `bad` member, so that cannot be undone by an edit that does not notice it
  * is making a judgement.
+ *
+ * ## The phases of `motion.ts`, as frames
+ *
+ *   idle       nothing moves, and nothing is drawn that would imply a size.
+ *              The panel is grouped inside the job, so before the first
+ *              progress message this view does not know how many groups exist
+ *              and must not sketch a lattice it would then have to resize.
+ *   starting   the field brightens once over DURATION.inhale while a single
+ *              band of light crosses it, then HOLDS at the brighter tint. The
+ *              hold is the load-bearing half: a cold Free Edition job sits in
+ *              this phase for tens of seconds, so what is on screen after the
+ *              gesture finishes has to be visibly different from idle on its
+ *              own.
+ *   running    the same band, looping at DURATION.ambient over the rows that
+ *              still hold pending groups, plus the frontier cell's breath.
+ *   settled    one flat frame, arrived at as a left-to-right wave inside
+ *              STAGGER.budget. After it lands nothing moves at all.
+ *
+ * Three things the previous version got wrong, none of them visible in a
+ * screenshot:
+ *
+ *  - STARTING and the early part of RUNNING had no motion whatsoever. The
+ *    lattice needs `groups_total`, which arrives with the FIRST progress
+ *    message, so until then this view rendered one static sentence in a dashed
+ *    box — for the whole of a cold start. A live run and a page whose stream
+ *    had died were pixel-identical, which is the one thing a live view owes
+ *    the person watching it.
+ *  - The frontier pulse was the only moving element and it exists only while a
+ *    cell is still pending. A run that has processed every group but not yet
+ *    flushed its final chunk also went completely still, several seconds
+ *    before it was over.
+ *  - `duration-300` was a number chosen in this file and used nowhere else in
+ *    the app. It is `DURATION.base` now, and the flatten it drives is
+ *    staggered so the end of a run reads as one gesture rather than 96 cells
+ *    changing their minds at once.
+ *
+ * `frames.ts` carries an `animated` flag, true in exactly the state `phaseOf`
+ * calls `running`. This file no longer reads it: `motion.ts` is the single
+ * authority on which phases move, and two sources for that is how eleven views
+ * end up disagreeing. The flag stays declared over there because `frames.ts`
+ * belongs to the state machine, not to this component.
  */
 
+import { motion } from "motion/react";
+import type { CSSProperties } from "react";
+
 import { isSettled, type ModelViewProps } from "@/components/models/contract";
+import { DURATION, EASE, phaseOf, staggerFor } from "@/components/models/motion";
 import { usePrefersReducedMotion } from "@/components/models/useReducedMotion";
 import { EMPTY, formatCount } from "@/lib/format";
 
@@ -53,10 +98,99 @@ const FAILED_CELL: Record<FailureTone, string> = {
   notable: "border-warn/70 bg-warn-soft",
 };
 
+/**
+ * Cell geometry, in pixels rather than in `rem`.
+ *
+ * The columns stay fluid (`1fr`) because the contract says a signature fills
+ * the width it is given, but the ROW pitch has to be a number this file knows:
+ * the sweep is clipped to the rows that still hold pending groups, and
+ * deriving that from `0.85rem` means guessing the root font size. Height and
+ * gap are set inline from these so the geometry and the layout cannot drift.
+ */
+const CELL_PX = 14;
+const GAP_PX = 3;
+
+/** The band's width as a share of the surface it crosses, and its peak
+ *  opacity. Wide and faint on purpose: this is the only element on screen that
+ *  repeats forever, and anything with real presence at that cadence becomes
+ *  the thing you cannot stop looking at over a ten-minute panel. */
+const SWEEP_WIDTH_PCT = 18;
+const SWEEP_PEAK = 0.14;
+
+/**
+ * The band's travel, in percentages of its OWN width — which is how `motion`
+ * reads a percentage `x`. It starts fully off the left edge and ends fully off
+ * the right, so the loop's restart is never seen.
+ *
+ * Derived from `SWEEP_WIDTH_PCT` rather than written out, so widening the band
+ * cannot silently leave it stopping short of the far edge.
+ */
+const SWEEP_TIMES = [0, 0.15, 0.85, 1];
+/** Fully off the left edge, and fully off the right. */
+const SWEEP_START = -100;
+const SWEEP_END = (100 / SWEEP_WIDTH_PCT) * 100;
+/** Evenly spaced against `SWEEP_TIMES`, so the travel stays linear while the
+ *  opacity gets its ramps off the same keyframe list. */
+const sweepX = (t: number) => `${(SWEEP_START + t * (SWEEP_END - SWEEP_START)).toFixed(1)}%`;
+const SWEEP_X = SWEEP_TIMES.map(sweepX);
+const SWEEP_OPACITY = [0, SWEEP_PEAK, SWEEP_PEAK, 0];
+
+/** The field before the inhale. Dim enough to read as "not asked yet", not so
+ *  dim that the sentence inside it stops being legible. */
+const REST_OPACITY = 0.45;
+
 function cellClass(kind: CellKind, tone: FailureTone): string {
   if (kind === "fitted") return FITTED_CELL;
   if (kind === "failed") return FAILED_CELL[tone];
   return PENDING_CELL;
+}
+
+/**
+ * One pass of light, left to right, over whatever surface is on screen.
+ *
+ * The same arrangement the two Gurobi views use for their boards, deliberately:
+ * one shape for "asked, not yet answered" and for "working", differing only in
+ * whether it loops. Eleven views each inventing their own idea of ambient is
+ * what `motion.ts` exists to prevent.
+ *
+ * The gradient is asymmetric — a bright leading edge with the fade behind it —
+ * because the symmetric band is the skeleton shimmer every loading screen in
+ * the world uses, and this is not a loading state. Left to right because that
+ * is the direction the lattice fills.
+ *
+ * `opacity` rides the same keyframe list as `x` rather than getting its own
+ * looping transition: two independently scheduled loops of nominally equal
+ * length drift apart, and a band whose fade has slipped out of step with its
+ * travel reads as a glitch some minutes into a solve.
+ */
+function Sweep({ loop, style }: { loop: boolean; style: CSSProperties }) {
+  return (
+    <div className="pointer-events-none absolute overflow-hidden" style={style} aria-hidden="true">
+      <motion.div
+        // `currentColor` off a token-bound class, never a literal: the dark
+        // palette re-points these at runtime.
+        className="text-accent"
+        style={{
+          position: "absolute",
+          insetBlock: 0,
+          left: 0,
+          width: `${SWEEP_WIDTH_PCT}%`,
+          background: "linear-gradient(90deg, transparent, currentColor)",
+        }}
+        initial={{ x: sweepX(0), opacity: 0 }}
+        animate={{ x: SWEEP_X, opacity: SWEEP_OPACITY }}
+        transition={{
+          duration: loop ? DURATION.ambient : DURATION.inhale,
+          times: SWEEP_TIMES,
+          // Linear, and the only linear thing in this file. A loop that eases
+          // pumps once a cycle, which is precisely what becomes irritating on
+          // a run that sits open for ten minutes.
+          ease: "linear",
+          ...(loop ? { repeat: Infinity } : {}),
+        }}
+      />
+    </div>
+  );
 }
 
 function Stat({
@@ -78,6 +212,7 @@ function Stat({
 export function PanelLattice({ state, snapshot }: ModelViewProps) {
   const reducedMotion = usePrefersReducedMotion();
   const frame = frameFor(state);
+  const phase = phaseOf(state);
   const settled = isSettled(state);
 
   const counts = readCounts(snapshot.latestProgress);
@@ -88,10 +223,66 @@ export function PanelLattice({ state, snapshot }: ModelViewProps) {
 
   const latest = buildGroupPoints(snapshot.progress).at(-1) ?? null;
 
-  // The frontier only pulses while the run is genuinely working. Reduced
-  // motion drops the pulse and keeps the cell, because the cell is where the
+  // The frontier only breathes while the run is genuinely working. Reduced
+  // motion drops the breath and keeps the cell, because the cell is where the
   // information is — the movement only draws the eye to it.
-  const pulseFrontier = frame.animated && !reducedMotion && !settled;
+  const pulseFrontier = phase === "running" && !reducedMotion;
+
+  // Purely ambient, so reduced motion drops it outright rather than snapping
+  // it: it states nothing the header does not already say in words.
+  const sweeping = !reducedMotion && (phase === "starting" || phase === "running");
+  // The inhale is a transition, so reduced motion skips straight to its end
+  // state — which is the half that carries the information.
+  const inhaling = !reducedMotion && phase === "starting";
+  const awake = phase === "starting" || phase === "running";
+
+  const cols = Math.min(LATTICE_COLUMNS, lattice.cells.length);
+  const rows = cols > 0 ? Math.ceil(lattice.cells.length / cols) : 0;
+  // The first row still holding a pending group. STARTING has no frontier yet
+  // (it has no counts at all in the normal case), so it sweeps the whole
+  // field; RUNNING sweeps only what is left to do, and sweeps nothing once
+  // nothing is pending — a run in its final flush has no work left to gesture
+  // at, and the header's live dot is what says it is still going.
+  const sweepFromRow =
+    phase === "starting"
+      ? 0
+      : lattice.frontier === null
+        ? null
+        : Math.floor(lattice.frontier / cols);
+
+  const sweepBox: CSSProperties | null =
+    sweepFromRow === null || rows === 0
+      ? null
+      : {
+          left: 0,
+          right: 0,
+          top: `${sweepFromRow * (CELL_PX + GAP_PX)}px`,
+          height: `${(rows - sweepFromRow) * CELL_PX + (rows - sweepFromRow - 1) * GAP_PX}px`,
+        };
+
+  /**
+   * The settle, as one wave rather than 96 simultaneous colour changes.
+   *
+   * Nonzero ONLY in a terminal state. A per-cell delay applied while the run
+   * is live would land on the frontier's own advance, which is the one colour
+   * change in this view that is an event rather than a gesture — cell 90 of 96
+   * would report its group half a second after the group finished.
+   */
+  const flattenStep = settled && !reducedMotion ? staggerFor(lattice.cells.length) : 0;
+
+  // Built once per render, not per cell: RUNNING is where this component lives
+  // for minutes and re-renders on every progress message, and it is also the
+  // phase with no per-cell delay to vary.
+  const sharedCellStyle: CSSProperties = reducedMotion
+    ? // Not the `motion-reduce:` variant — an inline `transitionProperty`
+      // outranks a class, so the class would silently lose this argument.
+      { height: `${CELL_PX}px`, transitionProperty: "none" }
+    : {
+        height: `${CELL_PX}px`,
+        transitionProperty: "background-color, border-color, opacity",
+        transitionDuration: `${DURATION.base}s`,
+        transitionTimingFunction: `cubic-bezier(${EASE.standard.join(", ")})`,
+      };
 
   const denominator = counts.total ?? counts.done ?? 0;
   const fittedWidth = denominator > 0 ? ((counts.fitted ?? 0) / denominator) * 100 : 0;
@@ -139,19 +330,45 @@ export function PanelLattice({ state, snapshot }: ModelViewProps) {
       )}
 
       {lattice.cells.length === 0 ? (
-        <div className="flex h-[3.4rem] items-center rounded-[6px] border border-dashed border-edge px-3 text-[0.72rem] text-faint">
+        /*
+          No lattice yet, which is not the same as nothing to draw. This is the
+          frame a cold start sits in, so it inhales once and then holds at the
+          brighter tint rather than relying on a gesture that has already
+          finished.
+
+          `initial={false}` in every other phase: a view mounting straight into
+          a terminal run must not replay an entrance for something that is
+          already over.
+        */
+        <motion.div
+          className={
+            "relative flex h-[3.4rem] items-center overflow-hidden rounded-[6px] border border-dashed px-3 text-[0.72rem] " +
+            (awake ? "border-accent/50 text-dim" : "border-edge text-faint")
+          }
+          initial={inhaling ? { opacity: REST_OPACITY } : false}
+          animate={{ opacity: 1 }}
+          transition={{ duration: DURATION.inhale, ease: EASE.decelerate }}
+        >
           {settled
             ? "This run reported no groups at all — an empty panel, not an empty chart."
             : "Waiting for the first group. The panel is grouped before any fit runs, so the total arrives with the first progress message."}
-        </div>
+          {/* Keyed on the phase so the loop restarts cleanly at the handover
+              from the single inhale to the ambient cycle, rather than
+              retiming a pass already half way across. */}
+          {sweeping && <Sweep key={phase} loop={phase === "running"} style={{ inset: 0 }} />}
+        </motion.div>
       ) : (
-        <div
+        <motion.div
           role="img"
           aria-label={splitLabel}
-          className="grid gap-[3px]"
+          className="relative grid"
           style={{
-            gridTemplateColumns: `repeat(${Math.min(LATTICE_COLUMNS, lattice.cells.length)}, minmax(0, 1fr))`,
+            gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+            gap: `${GAP_PX}px`,
           }}
+          initial={inhaling ? { opacity: REST_OPACITY } : false}
+          animate={{ opacity: 1 }}
+          transition={{ duration: DURATION.inhale, ease: EASE.decelerate }}
         >
           {lattice.cells.map((kind, index) => {
             const frontier = frame.split && index === lattice.frontier;
@@ -168,17 +385,35 @@ export function PanelLattice({ state, snapshot }: ModelViewProps) {
               <div
                 key={index}
                 data-cell={frame.split ? kind : "flat"}
+                style={
+                  flattenStep === 0
+                    ? sharedCellStyle
+                    : { ...sharedCellStyle, transitionDelay: `${(index * flattenStep).toFixed(3)}s` }
+                }
                 className={
-                  `h-[0.85rem] rounded-[2px] border transition-colors duration-300 motion-reduce:transition-none ${base}` +
-                  // Reduced motion drops the pulse and keeps the accent cell:
+                  `rounded-[2px] border ${base}` +
+                  // Reduced motion drops the breath and keeps the accent cell:
                   // the frontier's POSITION is the information, the movement
                   // only draws the eye to it.
+                  //
+                  // The one loop here not timed from `motion.ts`. Its 2s cycle
+                  // is inside the unhurried band the vocabulary asks for, and
+                  // it is a symmetric ease-in-out — which a breath needs and
+                  // which none of the `EASE` curves are, since those exist for
+                  // one-way moves. Re-timing it with `EASE.standard` would
+                  // make it worse, not more consistent.
                   (frontier && pulseFrontier ? " animate-pulse" : "")
                 }
               />
             );
           })}
-        </div>
+
+          {/* Last in the DOM so the light passes OVER the cells rather than
+              being hidden behind their opaque fills. */}
+          {sweeping && sweepBox !== null && (
+            <Sweep key={phase} loop={phase === "running"} style={sweepBox} />
+          )}
+        </motion.div>
       )}
 
       {/*

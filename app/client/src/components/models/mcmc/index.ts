@@ -37,15 +37,20 @@ const view: ModelView = {
     },
   ],
   honesty:
-    "The number of dots is the run's real chain count, and how far they " +
-    "spread from the centre is the only thing in this panel driven by data: " +
-    "it is max_rhat mapped onto a radius, so the cloud draws in as the chains " +
-    "converge and stays wide while they have not. Everything else is " +
-    "decoration — the dashed contours are a fixed reference, not a posterior, " +
-    "and each dot's position is a seeded random walk rather than that chain's " +
-    "parameters. The real per-chain positions are the trace chart below. On a " +
-    "finished run the walk stops and every dot takes the run's outcome colour, " +
-    "with no per-chain meaning surviving.",
+    "The number of dots is the run's chain count, up to sixteen; before the " +
+    "first progress message arrives there is no count yet and eight " +
+    "placeholder dots are drawn, which is why the chains figure above reads " +
+    "as absent rather than as eight. How far the ensemble spreads from the " +
+    "centre is the only thing in this panel driven by data: it is max_rhat " +
+    "mapped onto a radius, so the cloud draws in as the chains converge and " +
+    "stays wide while they have not. Everything else is decoration — the " +
+    "dashed contours are a fixed reference, not a posterior, each dot sits at " +
+    "a seeded offset and wanders on a slow decorative drift rather than " +
+    "tracking that chain's parameters, and where the soft halos pile up is " +
+    "dots overlapping, not a density. The real per-chain positions are the " +
+    "trace chart below. On a finished run the drift stops, the ensemble comes " +
+    "to rest on one ring and every dot takes the run's outcome colour, with " +
+    "no per-chain meaning surviving.",
 };
 
 export default view;

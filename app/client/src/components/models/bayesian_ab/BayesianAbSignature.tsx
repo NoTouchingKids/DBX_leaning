@@ -14,15 +14,38 @@
  * arriving fully lit in one frame, and that is the case it is designed for —
  * the animated path is the exception.
  *
- * What is real: which chips are filled, the arm labels, the decision word.
- * What is not: the pacing, and the fact that there is any pacing at all.
- * Nothing here is positioned or sized by a numeric value — the numbers are in
- * the two charts.
+ * The lifecycle phases of `motion.ts` land here as:
+ *
+ *   idle      a flat empty rail, five dashed chips, nothing in motion.
+ *   starting  the rail draws itself once, left to right, over DURATION.inhale
+ *             and then HOLDS lit. The hold is the whole point: a cold job can
+ *             sit in this phase for tens of seconds, and the frame it sits in
+ *             must not be the idle frame.
+ *   running   one soft pass along the rail per DURATION.ambient, and a solid
+ *             outline on the stage the payload says is in flight. Rarely seen,
+ *             since this model outruns its own telemetry — but it is the phase
+ *             a wedged run would sit in for minutes, so it is paced for that.
+ *   settled   the chips wash in as one staggered wave, the decision lands, and
+ *             everything stops. Nothing loops past the end of a run.
+ *
+ * The previous version animated the chips on mount only. That is wrong here in
+ * a way that is easy to miss: `RunWorkspace` keeps this component mounted for
+ * the life of a run, so a run watched from QUEUED through to SUCCEEDED played
+ * its cascade once, at QUEUED, with all five chips still empty — and then
+ * silently recoloured. The wash below is driven by `animate` rather than
+ * `initial`, so it fires when the stage count actually changes, whether that
+ * is on mount or four seconds later.
  */
 
 import { motion } from "motion/react";
 
 import { isSettled, type ModelViewProps } from "@/components/models/contract";
+import {
+  DURATION,
+  EASE,
+  phaseOf,
+  staggerFor,
+} from "@/components/models/motion";
 import { usePrefersReducedMotion } from "@/components/models/useReducedMotion";
 import type { UiRunState } from "@/lib/envelope";
 import { BAYESIAN_AB_STAGES } from "@/lib/models";
@@ -45,14 +68,38 @@ const STAGE_LABELS: Record<string, string> = {
   decision: "Decision",
 };
 
-const DONE_CLASS: Record<UiRunState, string> = {
-  STARTING: "border-accent bg-accent-soft text-accent-ink",
-  QUEUED: "border-info bg-info-soft text-info",
-  RUNNING: "border-info bg-info-soft text-info",
-  SUCCEEDED: "border-good bg-good-soft text-good",
-  FAILED: "border-bad bg-bad-soft text-bad",
-  CANCELLED: "border-idle bg-idle-soft text-idle",
-  INFEASIBLE: "border-warn bg-warn-soft text-warn",
+/* The lit chip is two layers, not one class: the border and text switch by CSS
+ * transition, and the background arrives separately as a wash that scales in
+ * from the left. Splitting them is what lets the fill be the animated thing —
+ * a background-colour crossfade cannot be staggered into a direction. */
+const DONE_EDGE: Record<UiRunState, string> = {
+  STARTING: "border-accent text-accent-ink",
+  QUEUED: "border-info text-info",
+  RUNNING: "border-info text-info",
+  SUCCEEDED: "border-good text-good",
+  FAILED: "border-bad text-bad",
+  CANCELLED: "border-idle text-idle",
+  INFEASIBLE: "border-warn text-warn",
+};
+
+const DONE_WASH: Record<UiRunState, string> = {
+  STARTING: "bg-accent-soft",
+  QUEUED: "bg-info-soft",
+  RUNNING: "bg-info-soft",
+  SUCCEEDED: "bg-good-soft",
+  FAILED: "bg-bad-soft",
+  CANCELLED: "bg-idle-soft",
+  INFEASIBLE: "bg-warn-soft",
+};
+
+const RAIL_FILL: Record<UiRunState, string> = {
+  STARTING: "bg-accent",
+  QUEUED: "bg-info",
+  RUNNING: "bg-info",
+  SUCCEEDED: "bg-good",
+  FAILED: "bg-bad",
+  CANCELLED: "bg-idle",
+  INFEASIBLE: "bg-warn",
 };
 
 const CAPTION: Record<UiRunState, [string, string]> = {
@@ -65,12 +112,19 @@ const CAPTION: Record<UiRunState, [string, string]> = {
   INFEASIBLE: ["Stopped", "reported infeasible"],
 };
 
+/* Five chips, so this is STAGGER.step untouched — the cap only bites on the
+ * grid-sized sets. Against a DURATION.base fill it produces a diagonal wave
+ * rather than five distinct arrivals, which is the honest reading: these
+ * stages really did all happen at once, in this order. */
+const STAGGER_STEP = staggerFor(BAYESIAN_AB_STAGES.length);
+
 export function BayesianAbSignature({ state, snapshot }: ModelViewProps) {
   const reduced = usePrefersReducedMotion();
   const stages = deriveStages(state, snapshot);
   const { arms } = armsFromSnapshot(snapshot);
   const decision = decisionFromSnapshot(snapshot);
   const settled = isSettled(state);
+  const phase = phaseOf(state);
   const key = state ?? "QUEUED";
   const [headline, sub] = CAPTION[key];
 
@@ -96,39 +150,119 @@ export function BayesianAbSignature({ state, snapshot }: ModelViewProps) {
         </div>
       </div>
 
-      <div className="px-4 pt-3 pb-1">
-        <ol className="flex flex-wrap gap-2">
+      <div className="px-4 pt-3.5 pb-1">
+        {/* The rail carries the phase machine. The chips carry the detail; this
+            says the same thing from across the room, and it is the one element
+            that has something to show during `starting`, when no stage has
+            completed and every chip is still empty. */}
+        <div
+          aria-hidden
+          className="relative h-[3px] overflow-hidden rounded-full bg-line"
+        >
+          <motion.div
+            className={`absolute inset-0 origin-left rounded-full ${RAIL_FILL[key]}`}
+            initial={reduced ? false : { scaleX: 0 }}
+            animate={{ scaleX: stages.done / STAGE_COUNT }}
+            transition={
+              reduced
+                ? { duration: 0 }
+                : { duration: DURATION.base, ease: EASE.standard }
+            }
+          />
+
+          {phase === "starting" && (
+            /* The inhale. One draw, decelerating into a held tint — it does not
+               loop and it does not fade back out, because the thing it has to
+               survive is a forty-second cold start with nothing to report. A
+               pulse here would be describing waiting as if it were work. */
+            <motion.div
+              className="absolute inset-0 origin-left rounded-full bg-accent/30"
+              initial={reduced ? false : { scaleX: 0 }}
+              animate={{ scaleX: 1 }}
+              transition={
+                reduced
+                  ? { duration: 0 }
+                  : { duration: DURATION.inhale, ease: EASE.decelerate }
+              }
+            />
+          )}
+
+          {phase === "running" && !reduced && (
+            /* Ambient: one unhurried pass, seam-free because the highlight
+               fades up after it enters and down before it leaves, so the wrap
+               is never visible. Linear on purpose — an eased traverse spends
+               its slow ends where the highlight is already invisible and its
+               fast middle where it is not, which reads as a dart rather than a
+               drift. Under reduced motion this is absent entirely; "running"
+               is still legible from the caption and the outlined chip. */
+            <motion.div
+              className="absolute inset-y-0 left-0 w-1/5 rounded-full bg-accent"
+              animate={{ x: ["-150%", "560%"], opacity: [0, 0.8, 0.8, 0] }}
+              transition={{
+                duration: DURATION.ambient,
+                repeat: Infinity,
+                ease: "linear",
+              }}
+            />
+          )}
+        </div>
+
+        <ol className="mt-3.5 flex flex-wrap gap-2">
           {BAYESIAN_AB_STAGES.map((stage, index) => {
             const done = index < stages.done;
             const failed = stages.failedAt === index + 1;
+            // Only claimed while RUNNING, where `stage_index` genuinely means
+            // "this many finished, the next one is in flight". During starting
+            // the job has not reached stage 1 yet and marking it would be a
+            // guess dressed as a reading. No guard for done === STAGE_COUNT is
+            // needed: there is no chip at index 5 to match it.
+            const next = phase === "running" && index === stages.done;
+            const washed = done || failed;
+
             return (
-              <motion.li
+              <li
                 key={stage}
                 title={stage}
-                // The stagger exists because of this model specifically. Five
-                // chips arriving lit in the same frame — the normal case here,
-                // since the run outruns the stream — reads as a static
-                // diagram, and a reader learns nothing about the shape of the
-                // computation from it. A 70ms cascade says "these happened in
-                // this order" once, on arrival. Under reduced motion the
-                // cascade is removed and the chips are simply already lit:
-                // the transition goes, the state does not.
-                initial={reduced ? false : { opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={reduced ? { duration: 0 } : { duration: 0.22, delay: index * 0.07 }}
                 className={
-                  `flex-1 basis-[8.5rem] rounded-md border px-2.5 py-2 text-[0.72rem] ` +
+                  `relative flex-1 basis-[8.5rem] overflow-hidden rounded-md border ` +
+                  `bg-paper px-2.5 py-2 text-[0.72rem] ` +
                   `transition-colors duration-300 motion-reduce:transition-none ` +
                   (failed
-                    ? "border-bad bg-bad-soft text-bad"
+                    ? "border-bad text-bad"
                     : done
-                      ? DONE_CLASS[key]
-                      : "border-dashed border-line bg-paper text-faint")
+                      ? DONE_EDGE[key]
+                      : next
+                        ? "border-accent text-dim"
+                        : "border-dashed border-line text-faint")
                 }
               >
-                <div className="font-mono text-[0.6rem] opacity-70">{index + 1}</div>
-                <div className="font-semibold">{STAGE_LABELS[stage] ?? stage}</div>
-              </motion.li>
+                <motion.span
+                  aria-hidden
+                  className={`absolute inset-0 origin-left ${failed ? "bg-bad-soft" : DONE_WASH[key]}`}
+                  // `initial` would only ever fire on mount, and this component
+                  // is mounted for the life of the run. Driving scaleX from
+                  // `animate` means the wave replays whenever the stage count
+                  // moves — including the usual case, where it moves from 0 to
+                  // 5 in a single frame long after mount.
+                  initial={reduced ? false : { scaleX: 0 }}
+                  animate={{ scaleX: washed ? 1 : 0 }}
+                  transition={
+                    reduced
+                      ? { duration: 0 }
+                      : {
+                          duration: DURATION.base,
+                          ease: EASE.standard,
+                          delay: washed ? index * STAGGER_STEP : 0,
+                        }
+                  }
+                />
+                <div className="relative font-mono text-[0.6rem] opacity-70">
+                  {index + 1}
+                </div>
+                <div className="relative font-semibold">
+                  {STAGE_LABELS[stage] ?? stage}
+                </div>
+              </li>
             );
           })}
         </ol>
@@ -137,7 +271,9 @@ export function BayesianAbSignature({ state, snapshot }: ModelViewProps) {
       <div className="px-4 pt-3 pb-4">
         {/* The arms, named. Labels are the model's own — "weekend_hours",
             "long_trips" — and are what `decision` will be one of, so showing
-            them here is what makes the decision word legible later. */}
+            them here is what makes the decision word legible later. Deliberately
+            unanimated: they are the reference the wave above is read against,
+            and a reference that moves is not one. */}
         <div className="flex flex-wrap items-stretch gap-2">
           {arms.length === 0 ? (
             <p className="text-[0.72rem] text-faint">
@@ -163,7 +299,20 @@ export function BayesianAbSignature({ state, snapshot }: ModelViewProps) {
         </div>
 
         {decision.decision !== null && (
-          <div
+          /* The one settling gesture in the panel, and it belongs here: the
+             decision word is what the other five stages were for. Delayed
+             behind the chip wave so the two read in order rather than as one
+             blur, and EASE.emphasis so it arrives with the slight overshoot of
+             something landing rather than something fading up. Then it is
+             still — per contract.ts, nothing survives the end of the run. */
+          <motion.div
+            initial={reduced ? false : { opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={
+              reduced
+                ? { duration: 0 }
+                : { duration: DURATION.slow, ease: EASE.emphasis, delay: DURATION.fast }
+            }
             className={
               `mt-3 rounded-md border px-3 py-2 text-[0.78rem] ` +
               `transition-colors duration-300 motion-reduce:transition-none ` +
@@ -187,7 +336,7 @@ export function BayesianAbSignature({ state, snapshot }: ModelViewProps) {
                 (read from the result rows — no progress message arrived)
               </span>
             )}
-          </div>
+          </motion.div>
         )}
 
         {looksLikeInputError(state, stages) && (

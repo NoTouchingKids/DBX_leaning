@@ -77,6 +77,21 @@ export default defineConfig({
     emptyOutDir: true,
     assetsDir: "assets",
     sourcemap: true,
+    rolldownOptions: {
+      output: {
+        // `three` gets its own chunk, and it must stay that way.
+        //
+        // It is ~600 kB before gzip and is needed by exactly one route. Left
+        // to the default chunking it can be pulled into the entry as soon as
+        // anything in the main graph reaches it, at which point every user of
+        // every page downloads a decorative hero. `SceneBoundary` lazy-loads
+        // it and this keeps the split honest;
+        // `src/components/landing/chunk.test.ts` runs a real build and fails
+        // if three ends up in the entry chunk.
+        manualChunks: (id: string) =>
+          id.includes("node_modules/three") ? "three" : undefined,
+      },
+    },
   },
   server: {
     // Dev runs against the real FastAPI app so the SSE path, the named

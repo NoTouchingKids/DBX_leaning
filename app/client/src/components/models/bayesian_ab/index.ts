@@ -35,17 +35,21 @@ const view: ModelView = {
     },
   ],
   honesty:
-    "Which of the five chips are filled is real: it comes from stage_index " +
-    "when a progress message arrives and, when none does, from the terminal " +
-    "status — a SUCCEEDED run necessarily ran all five stages. The arm labels " +
-    "and the decision word are quoted verbatim from the payload or, if the run " +
+    "Which of the five chips are filled is real, and so is how far the rail " +
+    "above them fills — both are the same count, from stage_index when a " +
+    "progress message arrives and, when none does, from the terminal status: a " +
+    "SUCCEEDED run necessarily ran all five stages. The outlined chip during a " +
+    "running run is the stage the payload says is in flight. The arm labels and " +
+    "the decision word are quoted verbatim from the payload or, if the run " +
     "outran the stream, from the result rows. What is not real is the pacing, " +
     "and the implication that there is any: this model is closed-form and " +
-    "finishes in milliseconds, so the cascade across the chips is a fixed 70ms " +
-    "stagger that exists only to show the order the stages run in, and the " +
-    "normal case is all five arriving at once. Nothing in the panel is " +
-    "positioned or sized by a numeric value — the numbers are in the two " +
-    "charts below.",
+    "finishes in milliseconds, so the wave washing across the chips is a fixed " +
+    "40ms stagger that exists only to show the order the stages run in, and the " +
+    "normal case is all five arriving at once. The rail's one slow draw while " +
+    "starting and its one slow pass while running are likewise time-keeping " +
+    "with nothing behind them — neither is measuring anything, and both stop " +
+    "the moment the run ends. Nothing in the panel is positioned or sized by a " +
+    "measured value; the numbers are in the two charts below.",
 };
 
 export default view;

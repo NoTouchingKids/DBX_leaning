@@ -54,8 +54,16 @@ export interface WalkerLayout {
   count: number;
   /** 0..1, from `spreadForRhat`. The only real quantity in the picture. */
   spread: number;
-  /** Advances the random walk. Held at 0 under reduced motion, which leaves
-   *  the spread — the information — intact while the motion stops. */
+  /** Advances the random walk.
+   *
+   *  `McmcSignature` pins this to 0 in EVERY phase, not just under reduced
+   *  motion. Re-seeding positions per tick teleported walkers across the disc
+   *  between frames, which is noise rather than exploration, so the running
+   *  motion is now a per-walker drift the component adds on top and this
+   *  function is left to place the cloud. Holding it at 0 leaves the spread —
+   *  the one real quantity — intact, which is what reduced motion needed
+   *  anyway. Still honoured here, and still tested, so a caller that wants a
+   *  stepped walk gets one. */
   tick: number;
 }
 
@@ -77,8 +85,10 @@ export function walkerPositions({
     }
 
     // STARTING is a wide, STILL cloud: the chains exist but have not taken a
-    // step. Freezing the tick is what keeps it visually distinct from
-    // RUNNING, which is the same cloud in motion.
+    // step. Freezing the tick keeps that true for any caller that does advance
+    // it — but the signature no longer does, so what separates STARTING from
+    // RUNNING on screen is the drift the component layers over these points,
+    // not this line.
     const step = phase === "walk" ? tick : 0;
     const angle = hash01(i, step * 2 + 1) * TAU;
     // sqrt of a uniform draw, so the cloud is uniform over the disc rather

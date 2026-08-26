@@ -30,17 +30,21 @@ const view: ModelView = {
     },
   ],
   honesty:
-    "This is the one signature on the platform whose position is state rather than decoration. " +
-    "The window is placed from windows_done and moves only when a backtest window actually " +
-    "finished and its chunk of results went out; nothing in it runs on a timer, and there is no " +
-    "idle drift. Two qualifications. The track is a fixed twelve segments while the real window " +
-    "count comes from the run's config — at the defaults there are roughly thirty of them — so the " +
-    "step is proportional, and the line under the track says whether you are getting one step per " +
-    "window or several windows per step. The window's three-segment width is drawn rather than " +
-    "measured: it is how wide a window looks, not the run's window size. When the run ends the " +
-    "track becomes one flat colour and the frame disappears, because a stopped window has no " +
-    "position left to report. The chart below is not part of the animation at all: those are the " +
-    "real predicted and actual rows out of the result chunks.",
+    "The window's position here is state rather than decoration. It is placed from windows_done " +
+    "and moves only when a backtest window actually finished and its chunk of results went out — " +
+    "never on a timer, and never as idle drift. How many segments stand at full height is the " +
+    "same count, read the same way. Three qualifications. The track is a fixed twelve segments " +
+    "while the real window count comes from the run's config — at the defaults there are roughly " +
+    "thirty of them — so the step is proportional, and the line under the track says whether you " +
+    "are getting one step per window or several windows per step. The window's footprint, and its " +
+    "split into a fit region and the forecast horizon ahead of it, is drawn rather than measured: " +
+    "neither the window size nor the horizon is in the progress payload this animation reads. And " +
+    "the pale bar sweeping across the window while the run is live is pacing on a fixed loop, so " +
+    "that a live run looks different from a stalled one; it is not tied to a window, a row, or " +
+    "anything the job reports. When the run ends the track becomes one flat colour at one height " +
+    "and the window fades out, because a stopped window has no position left to report. The chart " +
+    "below is not part of the animation at all: those are the real predicted and actual rows out " +
+    "of the result chunks.",
 };
 
 export default view;
