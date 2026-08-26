@@ -361,9 +361,14 @@ Setting `oauth_client_id` without doing step 2 is inert but not silent:
 falling back to the app's own principal while a Lakebase role is granted to a
 different one is a failure that otherwise looks like success.
 
-`lakebase_user` is the same application id: the Postgres role Databricks
-provisions for a principal is named after it, so the app must connect as the
-principal whose token it presents.
+**`lakebase_user` is the SAME application id, and this is the mistake to
+avoid.** Lakebase takes an OAuth token as its password, and the Postgres role
+Databricks provisions is named after the principal that token belongs to.
+Connecting as one principal while presenting another's token fails as a plain
+authentication error — indistinguishable from a wrong secret, so the hour goes
+into the secret scope. `tests/deploy/test_bundle.py` refuses the mismatch in
+the bundle, and `/healthz` reports `lakebase_identity` at run time if the two
+env vars ever disagree.
 
 **The id is a variable, the secret is a secret.** A bundle variable ends up in
 the deployment state, which is readable by a different set of people than the

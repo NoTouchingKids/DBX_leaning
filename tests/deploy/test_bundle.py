@@ -599,3 +599,29 @@ def test_nothing_invokes_a_bun_builtin_as_though_it_were_a_script():
         "these invoke a bun builtin where a package script was meant; "
         f"use `bun run <script>`: {offenders}"
     )
+
+
+def test_lakebase_connects_as_the_principal_whose_token_it_presents(bundle):
+    """`lakebase_user` and `oauth_client_id` must be the same application id.
+
+    Lakebase takes an OAuth token as its password, and the Postgres role
+    Databricks provisions is named after the principal that token belongs to.
+    Connecting as one principal while presenting another's token fails as a
+    plain authentication error — indistinguishable from a wrong secret, so the
+    hour is spent looking at the secret scope.
+
+    Either may be empty: no Lakebase configured, or the app running as the
+    service principal Apps injects for it. It is the two disagreeing that is
+    always wrong.
+    """
+    variables = {
+        name: str(spec.get("default", "")).strip() for name, spec in bundle["variables"].items()
+    }
+    user, client = variables["lakebase_user"], variables["oauth_client_id"]
+    if not user or not client:
+        return
+    assert user == client, (
+        f"lakebase_user is {user!r} but the app authenticates as {client!r}. "
+        "The Lakebase role is named after the principal whose token is "
+        "presented; these must be the same application id."
+    )

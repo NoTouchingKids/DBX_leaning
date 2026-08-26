@@ -28,7 +28,13 @@ variables:
     description: >-
       SQL warehouse for the app's READ path only (backfill, reconciliation).
       Free Edition allows one, 2X-Small. Nothing writes through it.
-    default: "7474655945367403"
+
+      This was "7474655945367403" until 2026-08-26, which is the WORKSPACE
+      number that also appears in app_public_url — not a warehouse id at all.
+      It had never been exercised: the app reports `sql` degraded and keeps
+      streaming when the read path is unavailable, so a wrong id here looks
+      exactly like no id at all.
+    default: "e4a96cfb1f5b262b"
   app_volume:
     description: >-
       Unity Catalog volume giving the app a durable filesystem — exports,
@@ -81,10 +87,26 @@ variables:
   lakebase_port:
     description: Lakebase port. TLS is required and assumed.
     default: "5432"
+  # There is deliberately NO lakebase_password variable, and there never will
+  # be one. An instance created with `enable_pg_native_login: false` — the
+  # default, and what this deployment has — accepts only a short-lived
+  # Databricks OAuth token as its password. `app/server/oauth.py` fetches one
+  # per connection. A static credential could not work here even if a variable
+  # were the right place for it, which it is not: variables land in the
+  # deployment state.
   lakebase_user:
     description: >-
-      Postgres role the app connects as. Usually the app's service principal
-      id, which is what Databricks provisions the Lakebase role for.
+      Postgres role the app connects as.
+
+      When `oauth_client_id` is set this MUST be the same application id.
+      Lakebase authenticates with an OAuth token and the role Databricks
+      provisions is named after the principal that token belongs to, so
+      connecting as one principal while presenting another's token fails as
+      an ordinary authentication error — which reads as a bad password and
+      sends you looking at the secret. `tests/deploy/test_bundle.py` refuses
+      the mismatch, and `/healthz` reports it at run time.
+
+      Empty falls back to the warehouse-backed run store.
     default: ""
 
 # The workspace sync is what puts the tree in the workspace;

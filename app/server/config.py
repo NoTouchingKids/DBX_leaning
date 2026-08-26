@@ -109,6 +109,16 @@ class AppConfig:
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
 
+    #: The Postgres role, kept alongside the DSN it is already baked into.
+    #:
+    #: Duplicated on purpose. `services.py` has to compare it against
+    #: `oauth_client_id`: Lakebase's role is named after the principal whose
+    #: OAuth token is presented, so connecting as one while presenting the
+    #: other's token fails as an ordinary authentication error — which reads
+    #: as a wrong secret and sends whoever is debugging it to the secret scope.
+    #: Parsing it back out of the DSN to make that comparison would be worse.
+    lakebase_user: str | None = None
+
     @property
     def has_client_credentials(self) -> bool:
         return bool(self.oauth_client_id and self.oauth_client_secret and self.workspace_host)
@@ -152,6 +162,7 @@ class AppConfig:
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
             frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "dist",
             app_volume=(e.get("DBX_APP_VOLUME") or "").strip() or None,
+            lakebase_user=(e.get("DBX_LAKEBASE_USER") or "").strip() or None,
             oauth_client_id=(
                 e.get("DBX_OAUTH_CLIENT_ID") or e.get("DATABRICKS_CLIENT_ID") or ""
             ).strip()

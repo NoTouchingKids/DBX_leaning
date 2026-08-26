@@ -43,7 +43,7 @@ env:
   - name: DBX_SCHEMA
     value: dbx_leaning
   - name: DBX_WAREHOUSE_ID
-    value: "7474655945367403"
+    value: "e4a96cfb1f5b262b"
   - name: DBX_APP_PUBLIC_URL
     value: https://dbx-leaning-7474655945367403.aws.databricksapps.com
 

@@ -203,6 +203,31 @@ class ServiceHub:
         log.info("credential: OAuth token for %s from %s", cfg.oauth_client_id, provider.url)
         return provider.token
 
+    def _check_lakebase_identity(self, cfg: AppConfig) -> None:
+        """Is the app connecting as the principal whose token it presents?
+
+        Lakebase takes an OAuth token as its password and the Postgres role is
+        named after the principal that token belongs to. Presenting one
+        principal's token while connecting as another's role fails as an
+        ordinary authentication error — which reads as a wrong secret, and
+        sends whoever is debugging it into the secret scope rather than here.
+
+        Checked at startup because the answer cannot change afterwards, and
+        because the alternative is finding out on the first trigger.
+        """
+        if not cfg.has_client_credentials or not cfg.lakebase_user:
+            return
+        if cfg.lakebase_user == cfg.oauth_client_id:
+            return
+        self.degraded["lakebase_identity"] = (
+            f"connecting to Lakebase as {cfg.lakebase_user!r} while presenting a token "
+            f"for {cfg.oauth_client_id!r}. The Postgres role is named after the "
+            "principal the token belongs to, so this fails as an authentication "
+            "error that looks like a bad secret. Set DBX_LAKEBASE_USER to the same "
+            "application id."
+        )
+        log.error(self.degraded["lakebase_identity"])
+
     async def _start_store(self, cfg: AppConfig) -> None:
         """Pick the run store once, and say which one loudly.
 
@@ -211,6 +236,7 @@ class ServiceHub:
         key without anyone noticing.
         """
         if cfg.lakebase_dsn:
+            self._check_lakebase_identity(cfg)
             store: RunStore = PostgresRunStore(
                 cfg.lakebase_dsn, password_provider=self.token_provider
             )

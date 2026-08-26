@@ -289,3 +289,37 @@ async def test_neither_set_is_not_degraded():
     hub = ServiceHub(_config())
     assert hub._token_source(_config()) is None
     assert "oauth" not in hub.degraded
+
+
+async def test_a_lakebase_role_that_is_not_the_token_holder_is_reported():
+    """The failure this catches arrives as `password authentication failed`,
+    which sends you to the secret scope rather than to the role name."""
+    cfg = AppConfig.from_env(
+        {
+            "DATABRICKS_HOST": HOST,
+            "DBX_LAKEBASE_HOST": "pg.example.com",
+            "DBX_LAKEBASE_USER": "some-other-principal",
+            "DATABRICKS_CLIENT_ID": "the-app-sp",
+            "DATABRICKS_CLIENT_SECRET": "secret",
+        }
+    )
+    hub = ServiceHub(cfg)
+    hub._check_lakebase_identity(cfg)
+    assert "lakebase_identity" in hub.degraded
+    assert "some-other-principal" in hub.degraded["lakebase_identity"]
+    assert "the-app-sp" in hub.degraded["lakebase_identity"]
+
+
+async def test_matching_identities_are_not_reported():
+    cfg = AppConfig.from_env(
+        {
+            "DATABRICKS_HOST": HOST,
+            "DBX_LAKEBASE_HOST": "pg.example.com",
+            "DBX_LAKEBASE_USER": "the-app-sp",
+            "DATABRICKS_CLIENT_ID": "the-app-sp",
+            "DATABRICKS_CLIENT_SECRET": "secret",
+        }
+    )
+    hub = ServiceHub(cfg)
+    hub._check_lakebase_identity(cfg)
+    assert "lakebase_identity" not in hub.degraded
