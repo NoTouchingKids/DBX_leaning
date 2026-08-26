@@ -2,7 +2,7 @@
 
     uv run python scripts/dev_stack.py
 
-Then, in another terminal, ``cd app/client && pnpm dev`` and open the Vite URL.
+Then, in another terminal, ``cd app/client && bun run dev`` and open the Vite URL.
 Clicking Run on any model triggers the real ``POST /api/runs``, which launches
 the real ``job/`` harness in its own process, which attaches to the real
 WebSocket ingress and streams real envelope messages to the browser over the
@@ -431,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dev_stack",
         description="Run app + job launcher + registry locally, with no Databricks workspace.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Then: cd app/client && pnpm dev",
+        epilog="Then: cd app/client && bun run dev",
     )
     parser.add_argument("--app-port", type=int, default=DEFAULT_APP_PORT)
     parser.add_argument("--launcher-port", type=int, default=DEFAULT_LAUNCHER_PORT)
@@ -485,7 +485,7 @@ def _banner(stack: DevStack) -> str:
   triggerable    {models}
   start with     {fast or "(none of the fast models are enabled)"}
 
-  Next:   cd app/client && pnpm dev        (its proxy targets 127.0.0.1:8000)
+  Next:   cd app/client && bun run dev        (its proxy targets 127.0.0.1:8000)
   Or:     curl -sS -X POST {stack.app_url}/api/runs \\
             -H 'content-type: application/json' \\
             -d '{{"model":"bayesian_ab"}}'

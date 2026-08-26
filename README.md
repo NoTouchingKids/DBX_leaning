@@ -117,7 +117,7 @@ trigger a model from the browser and watch its telemetry arrive:
 
 ```bash
 uv run python scripts/dev_stack.py      # app + job launcher + registry
-cd frontend && pnpm dev                 # in a second terminal
+cd frontend && bun run dev                 # in a second terminal
 ```
 
 Then click Run on any of the eleven models. That goes through `POST /api/runs`,

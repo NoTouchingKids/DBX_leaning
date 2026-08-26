@@ -205,10 +205,11 @@ def test_the_app_folder_carries_everything_it_needs():
 
 
 def test_the_sync_excludes_things_that_must_not_be_uploaded(bundle):
-    """Two of these are not tidiness. The App export rejects symlinks, naming
-    one file — and `.venv/bin/python` is only the first of them, with
-    `frontend/node_modules` holding thousands because that is how pnpm stores
-    packages. Either one reaching the workspace fails the whole deploy.
+    """Two of these are not tidiness. The App export rejects symlinks and
+    fails on the FIRST one it meets, so the count is beside the point:
+    `.venv/bin` is full of them and `app/client/node_modules` carries bin
+    shims whatever installs it. Either directory reaching the workspace
+    fails the whole deploy.
     """
     excluded = set(bundle["sync"]["exclude"])
     for pattern in (
@@ -269,7 +270,7 @@ def test_the_built_frontend_is_tracked_by_git():
         check=True,
     ).stdout.split()
     assert "app/dist/index.html" in tracked, (
-        "the built SPA must be committed; run `pnpm build` in app/client/"
+        "the built SPA must be committed; run `bun run build` in app/client/"
     )
     assert not [f for f in tracked if f.endswith(".map")], (
         "sourcemaps are 4x the bundle and regenerate on every build"
@@ -515,3 +516,62 @@ def test_no_variable_holds_a_credential(bundle):
             f"variable {name!r} looks like a credential; variables land in the "
             "deployment state — declare it under `resources:` as a secret"
         )
+
+
+# --- the package manager ---------------------------------------------------
+
+CLIENT = ROOT / "app" / "client"
+
+
+def test_the_client_is_installed_with_bun():
+    """One lockfile, and it is bun's.
+
+    Two lockfiles in a tree is how a build starts resolving differently from
+    the tests: whichever tool a given machine reaches for wins, and neither
+    file is wrong on its own.
+    """
+    assert (CLIENT / "bun.lock").is_file(), "app/client/bun.lock is the lockfile"
+    for stale in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock"):
+        assert not (CLIENT / stale).exists(), (
+            f"{stale} is a second source of truth for the same dependency set"
+        )
+
+
+def test_nothing_invokes_a_bun_builtin_as_though_it_were_a_script():
+    """`bun <name>` is shorthand for `bun run <name>` ONLY when the name is not
+    a bun builtin — and `test` and `build` both are.
+
+    `bun test` runs Bun's own test runner, which collects none of the vitest
+    suite and reports success having run nothing. `bun build` is Bun's bundler,
+    not `tsc -b && vite build`. Both fail by doing something plausible instead
+    of erroring, so this reads every tracked file rather than trusting anyone
+    to remember which names collide.
+    """
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.split()
+
+    offenders = []
+    for name in tracked:
+        path = ROOT / name
+        if not path.is_file() or "lock" in path.name:
+            continue
+        # This file states the rule, so it necessarily quotes what the rule
+        # forbids. Excluding it is not a loophole — there is nothing here for
+        # anyone to run.
+        if path == pathlib.Path(__file__).resolve():
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, IsADirectoryError):
+            continue
+        for builtin in ("test", "build", "install", "add", "remove", "update"):
+            if f"bun {builtin}" in text and builtin != "install":
+                offenders.append(f"{name}: 'bun {builtin}'")
+
+    assert not offenders, (
+        "these invoke a bun builtin where a package script was meant; "
+        f"use `bun run <script>`: {offenders}"
+    )

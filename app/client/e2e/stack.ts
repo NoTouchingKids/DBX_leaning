@@ -9,7 +9,7 @@
  * overrides, not allocated.
  *
  * The defaults deliberately avoid 8000. `app/client/vite.config.ts` proxies to
- * 127.0.0.1:8000, so a developer running `pnpm dev` against a hand-started
+ * 127.0.0.1:8000, so a developer running `bun run dev` against a hand-started
  * stack keeps working while this suite runs beside it.
  *
  * ## Why the server's access log is an assertion target

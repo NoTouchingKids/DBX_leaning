@@ -50,7 +50,7 @@ RESERVED_PREFIXES = frozenset({"api", "ws", "healthz", "docs", "redoc", "openapi
 
 NO_BUNDLE = (
     "the frontend bundle has not been built, so there is nothing to serve at "
-    "this path. Build it (`pnpm build` in app/client/, which writes ../dist) "
+    "this path. Build it (`bun run build` in app/client/, which writes ../dist) "
     "or point DBX_FRONTEND_DIST at the dist directory. The API is "
     "unaffected."
 )

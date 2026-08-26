@@ -18,7 +18,7 @@ generated schema, and tests.
 
 ## The stack, and the one thing to know about each choice
 
-pnpm, Vite, React 19, TypeScript, React Router, TanStack Query, Tailwind v4,
+Bun, Vite, React 19, TypeScript, React Router, TanStack Query, Tailwind v4,
 Recharts, Motion. Vitest + Testing Library + jsdom for tests, oxlint for lint.
 
 Three of those carry a constraint rather than a preference:
@@ -42,12 +42,12 @@ Three of those carry a constraint rather than a preference:
 
 ```bash
 cd frontend
-pnpm install
-pnpm dev          # :5173, proxying /api, /ws and /healthz to :8000
-pnpm test         # vitest, once
-pnpm lint         # oxlint
-pnpm typecheck    # tsc -b --force
-pnpm build        # tsc -b, then vite build -> dist/
+bun install
+bun run dev          # :5173, proxying /api, /ws and /healthz to :8000
+bun run test         # vitest, once
+bun run lint         # oxlint
+bun run typecheck    # tsc -b --force
+bun run build        # tsc -b, then vite build -> dist/
 ```
 
 Run the API alongside it — `uv run uvicorn server.main:app --reload` from the
@@ -59,7 +59,7 @@ mock reproduces usefully.
 watching a run's raw transport state — connection tier, connection state, seq
 gaps — without the rest of the UI in the way.
 
-**`pnpm build` writes `../dist`, at the repo root, and that directory is
+**`bun run build` writes `../dist`, at the repo root, and that directory is
 COMMITTED.** The repo root is the app root a deploy hands to Databricks Apps,
 so `dist/` sits beside `app/` and `requirements.txt` and this tree is excluded
 from the sync entirely. It is in git because a deploy driven from inside
@@ -72,9 +72,9 @@ deployed UI is silently the previous one. Sourcemaps are gitignored. See
 ## Browser tests (`e2e/`)
 
 ```bash
-pnpm e2e                      # playwright test, Chromium
-pnpm exec playwright test e2e/01-live-run.e2e.ts     # one file
-DBX_E2E_APP_PORT=9200 pnpm e2e                       # if 8811/8812 are taken
+bun run e2e                      # playwright test, Chromium
+bunx playwright test e2e/01-live-run.e2e.ts     # one file
+DBX_E2E_APP_PORT=9200 bun run e2e                       # if 8811/8812 are taken
 ```
 
 Six tests, and they are the only ones here that run against a **real browser
@@ -86,7 +86,7 @@ shape: correct in every offline test, wrong on first contact with a real
 browser. This suite exists for that class and no other; it is not a place to
 re-run the unit tests slowly.
 
-`pnpm e2e` needs nothing running first. Global setup builds the SPA, starts
+`bun run e2e` needs nothing running first. Global setup builds the SPA, starts
 `scripts/dev_stack.py` (real `app/` under uvicorn, real `job/` harness per
 run, real embedded Postgres behind the real `PostgresRunStore`, real models —
 only the Databricks Jobs API is substituted) and waits for `/healthz`. The app
@@ -95,7 +95,7 @@ serves the built bundle itself, the way `app/server/spa.py` does in a deploy, so
 involved. **If the stack cannot start, setup throws with the stack's own
 output.** Nothing is mocked and nothing is skipped to keep a run green. It
 needs `uv` and the repo's Python extras (`uv sync --all-extras`), and a
-Chromium for Playwright — `pnpm exec playwright install chromium` if
+Chromium for Playwright — `bunx playwright install chromium` if
 `PLAYWRIGHT_BROWSERS_PATH` does not already point at one.
 
 Nothing is written inside the repo — the build, Postgres, the stack log and
@@ -116,7 +116,7 @@ Two things to know before writing another one:
 - **Files are `*.e2e.ts`, not `*.spec.ts`.** Vitest's default `include` claims
   `*.{test,spec}.ts` anywhere under this directory and `vite.config.ts` sets
   no `include` of its own, so a Playwright file named `*.spec.ts` would be
-  collected by `pnpm test` and fail in jsdom.
+  collected by `bun run test` and fail in jsdom.
 - **The SPA's `EventSource` lives in a `SharedWorker`, which Playwright cannot
   see.** `page.on("request")` never fires for the stream path — a SharedWorker
   is a separate browser target with no page association. Connection counts are

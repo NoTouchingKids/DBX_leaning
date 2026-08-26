@@ -99,13 +99,13 @@ function buildSpa(): void {
     return;
   }
   console.log(`[e2e] building the SPA into ${DIST_DIR}`);
-  // `vite build`, not `pnpm build`: `tsc -b` is a separate quality gate with
-  // its own command, and four agents are editing src/ — a type error in
+  // `vite build`, not `bun run build`: `tsc -b` is a separate quality gate
+  // with its own command, and four agents are editing src/ — a type error in
   // someone else's in-flight file should not be reported here as "the browser
   // tests cannot start".
   const built = spawnSync(
-    "pnpm",
-    ["exec", "vite", "build", "--outDir", DIST_DIR, "--emptyOutDir"],
+    "bunx",
+    ["vite", "build", "--outDir", DIST_DIR, "--emptyOutDir"],
     { cwd: CLIENT_DIR, encoding: "utf8" },
   );
   if (built.status !== 0) {

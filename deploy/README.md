@@ -175,9 +175,10 @@ Failed to export .../DBX_leaning/.venv/bin/python
 INVALID_PARAMETER_VALUE: Path (...) is not an exportable asset. type=symlink
 ```
 
-`.venv` is what fails first and is not the whole problem —
-`app/client/node_modules` holds thousands, that being how pnpm stores
-packages. Both are in `databricks.yml`'s `sync.exclude`, and
+The export fails on the FIRST symlink it meets, so the count is beside the
+point — `.venv/bin` is full of them and `app/client/node_modules` carries
+bin shims (22 under bun; pnpm's symlink-per-package store had thousands).
+Both are in `databricks.yml`'s `sync.exclude`, and
 `tests/deploy/test_bundle.py` asserts it.
 
 **A sync exclude does not clean up what an earlier deploy already uploaded.**
@@ -248,7 +249,7 @@ own tables.
 ## Deploy
 
 ```bash
-cd app/client && pnpm install && pnpm build && cd ../..   # only if the SPA changed
+cd app/client && bun install && bun run build && cd ../..   # only if the SPA changed
 databricks bundle validate                           # schema and references
 databricks bundle deploy -t dev
 ```
@@ -258,7 +259,7 @@ was last committed, because `app/dist/` is in git — which is also what makes
 `databricks bundle deploy` work unchanged from inside a Databricks Git folder,
 where there is no Node to run it.
 
-**`pnpm build` runs `tsc -b` first**, so a type error fails the build rather
+**`bun run build` runs `tsc -b` first**, so a type error fails the build rather
 than shipping a stale bundle. Commit the result: a rebuilt `app/dist/` that is
 not committed deploys the previous UI without saying so.
 
@@ -273,7 +274,7 @@ Both halves run together, and it is the same code that deploys:
 
 ```bash
 uv run python scripts/dev_stack.py     # FastAPI + a real job runner + Postgres
-cd app/client && pnpm dev              # Vite, proxying /api, /ws, /healthz
+cd app/client && bun run dev              # Vite, proxying /api, /ws, /healthz
 ```
 
 `app/client/vite.config.ts` proxies to `DBX_DEV_API` (default
@@ -286,7 +287,7 @@ To exercise what actually deploys instead — FastAPI serving the built bundle,
 one process, no Vite — build first and open the app's own port:
 
 ```bash
-cd app/client && pnpm build && cd ../..
+cd app/client && bun run build && cd ../..
 uv run python scripts/dev_stack.py
 ```
 

@@ -19,7 +19,7 @@ export default defineConfig({
    * covers `**\/*.{test,spec}.?(c|m)[jt]s?(x)` from the project root, and
    * `vite.config.ts` sets no `include` of its own — so a Playwright file
    * named `*.spec.ts` anywhere under `app/client/` would be collected by
-   * `pnpm test` and fail in jsdom with no browser behind it. The suffix is
+   * `bun run test` and fail in jsdom with no browser behind it. The suffix is
    * what keeps the two runners apart.
    */
   testMatch: "**/*.e2e.ts",

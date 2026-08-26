@@ -91,10 +91,11 @@ variables:
 # `resources/app.yml` then hands Databricks Apps the `app/` subfolder of it,
 # and each job task runs `entrypoints/run_model.py` out of the same tree.
 #
-# Two of these excludes are not tidiness. The App export rejects symlinks,
-# naming one file — `.venv/bin/python` is only the first, with
-# `app/client/node_modules` holding thousands because that is how pnpm stores
-# packages. Either one reaching the workspace fails the whole deploy.
+# Two of these excludes are not tidiness. The App export rejects symlinks and
+# fails on the FIRST one it meets, so the count is beside the point: `.venv/bin`
+# is full of them, and `app/client/node_modules` carries bin shims whatever
+# installs it — 22 under bun, thousands under pnpm's symlink-per-package store.
+# Either directory reaching the workspace fails the whole deploy.
 #
 # `app/client/**` goes wholesale: the React source has no business in a
 # workspace with no Node runtime, and the build output is not in that

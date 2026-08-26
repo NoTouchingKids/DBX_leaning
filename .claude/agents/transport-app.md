@@ -153,7 +153,7 @@ Edition) is a drop-in, not a rewrite that touches every call site.
 - No polling of any kind for status or cancel.
 - No frontend code — this agent is API-only. (`app/server/spa.py` serving `dist/` is
   the one exception, and it serves a bundle it does not build: Databricks Apps
-  has no Node runtime, so `pnpm build` — which writes the repo root's `dist/`
+  has no Node runtime, so `bun run build` — which writes the repo root's `dist/`
   from `app/client/` — has to happen, and be committed, before a deploy, or
   every page serves the previous bundle or answers 503.)
 

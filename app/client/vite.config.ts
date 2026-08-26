@@ -6,15 +6,15 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 /**
- * Where `pnpm dev` proxies `/api`, `/ws` and `/healthz`.
+ * Where `bun run dev` proxies `/api`, `/ws` and `/healthz`.
  *
  * The default matches `scripts/dev_stack.py::DEFAULT_APP_PORT`, so the
- * documented "start the dev stack, then `pnpm dev`" flow needs no environment
+ * documented "start the dev stack, then `bun run dev`" flow needs no environment
  * at all — and dev_stack.py's own comment points back at this file, so the
  * two agree by construction. The override exists because that port is not
  * fixed: `dev_stack.py` takes `--app-port`, and the browser suite runs its own
  * stack on 8811 (`e2e/stack.ts`, deliberately off 8000 so it can run beside a
- * hand-started one). A hardcoded target was the reason `pnpm dev` could not
+ * hand-started one). A hardcoded target was the reason `bun run dev` could not
  * be pointed at either.
  *
  * Origin only — scheme, host, port. A path here would be silently ignored by
@@ -28,7 +28,7 @@ const DEV_API = process.env.DBX_DEV_API ?? "http://127.0.0.1:8000";
 const DEV_WS = DEV_API.replace(/^http/, "ws");
 
 /** Shared by `server` and `preview`. `preview` does NOT inherit `server.proxy`
- *  — they are separate option trees — and without its own copy `pnpm preview`
+ *  — they are separate option trees — and without its own copy `bun run preview`
  *  served a bundle whose every `/api` call fell through to the SPA fallback
  *  and came back as HTML with a 200, failing later in a JSON parser. */
 const apiProxy = {

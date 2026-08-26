@@ -36,9 +36,10 @@ resources:
       #   Failed to export .../DBX_leaning/.venv/bin/python
       #   INVALID_PARAMETER_VALUE: ... is not an exportable asset. type=symlink
       #
-      # Which is why the copy is a copy. `app/client/node_modules` holds
-      # thousands of symlinks — that being how pnpm stores packages — and is
-      # excluded from the sync in `databricks.yml`, along with `.venv`.
+      # Which is why the copy is a copy. `app/client/node_modules` carries
+      # symlinked bin shims whatever installs it, and the export fails on the
+      # first symlink it meets — so it is excluded from the sync in
+      # `databricks.yml`, along with `.venv`.
       #
       # A sync exclude does not remove what an EARLIER deploy already put
       # there. If a previous run uploaded `.venv`, delete it in the workspace
