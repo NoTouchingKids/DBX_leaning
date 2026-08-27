@@ -8,9 +8,12 @@ after a service exists. Here, the process *is* the run.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import signal
 import sys
+from collections.abc import Coroutine
+from typing import Any
 
 from .config import JobConfig
 from .runner import JobHarness
@@ -67,8 +70,19 @@ async def _amain() -> int:
         # rather than a kill is what lets results already produced survive.
         try:
             loop.add_signal_handler(sig, lambda s=sig: harness.token.cancel(f"received {s.name}"))
-        except NotImplementedError:  # pragma: no cover - non-POSIX
-            pass
+        except (NotImplementedError, RuntimeError, ValueError) as exc:
+            # NotImplementedError on non-POSIX. RuntimeError when this loop is
+            # not on the main thread — "set_wakeup_fd only works in main thread
+            # of the main interpreter" — which is exactly where `_run` below
+            # puts us on serverless, since the kernel owns the main thread.
+            #
+            # Not fatal, and not silent either: cancel from the UI travels over
+            # the WebSocket control channel and is unaffected. What is lost is
+            # the SIGTERM path — `databricks jobs cancel-run` and the platform's
+            # own task cancellation become a kill rather than a graceful stop,
+            # so a run cancelled that way keeps only what it had already
+            # flushed instead of writing out its incumbent.
+            log.info("no %s handler (%s); cancel over the WebSocket still works", sig.name, exc)
 
     outcome = await harness.run()
     log.info(
@@ -89,10 +103,40 @@ async def _amain() -> int:
     return 0 if outcome.status in (RunStatus.SUCCEEDED, RunStatus.CANCELLED) else 1
 
 
+def _run(coro: Coroutine[Any, Any, int]) -> int:
+    """Drive the run to completion, with or without a loop already running.
+
+    `asyncio.run` is right for the normal case — this process exists to do one
+    run and then exit. But a serverless `spark_python_task` does not give us a
+    process: it reads this repo's entrypoint and `exec`s it inside an
+    ipykernel, which is already running a loop of its own, and `asyncio.run`
+    refuses outright:
+
+        RuntimeError: asyncio.run() cannot be called from a running event loop
+
+    So when there is a loop, the run gets its own on a worker thread. The
+    kernel's loop keeps turning, ours is a normal `asyncio.run` that happens
+    not to be on the main thread, and `.result()` blocks the caller until the
+    run finishes — which is the semantics the task runner expects anyway.
+
+    `nest_asyncio` would be the other answer. It is a dependency that
+    monkey-patches the event loop, and it would have to be added to all eleven
+    model environments to fix a problem in one of them.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    log.info("an event loop is already running here; taking a thread of our own")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="job") as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def main() -> int:
     _setup_logging()
     try:
-        return asyncio.run(_amain())
+        return _run(_amain())
     except KeyboardInterrupt:
         return 130
 
