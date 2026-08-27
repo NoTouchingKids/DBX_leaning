@@ -15,7 +15,7 @@ import pathlib
 import pytest
 from fastapi.testclient import TestClient
 
-from entrypoints.run_model import parse_settings
+from job.run_model import parse_settings
 from scripts._registry import model_names
 from scripts.dev_launcher import (
     DECLARED_PARAMETERS,
@@ -156,7 +156,7 @@ def test_argv_matches_what_a_serverless_task_passes(launcher):
 
     argv, _, _ = launcher.spawned[0]
     assert argv[0] == "/usr/bin/python3"
-    assert argv[1].endswith("entrypoints/run_model.py")
+    assert argv[1].endswith("job/run_model.py")
 
     arguments = argv[2:]
     assert [a.partition("=")[0] for a in arguments] == list(DECLARED_PARAMETERS)

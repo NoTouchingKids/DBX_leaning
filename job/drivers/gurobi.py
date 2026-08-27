@@ -17,9 +17,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from shared.envelope import RunStatus
-
 from ..loader import ModelHandle
+from ..shared.envelope import RunStatus
 from .base import DriverResult
 
 log = logging.getLogger(__name__)

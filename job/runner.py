@@ -13,11 +13,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from shared.envelope import RunStatus
-from shared.protocol import ControlFrame, ControlKind
-from shared.seq import SeqCounter
-from shared.tables import TableSet
-
 from .cancellation import CancellationToken
 from .channels import HttpPushChannel, WebSocketChannel
 from .config import JobConfig
@@ -26,6 +21,10 @@ from .drivers import select_driver
 from .emitter import Emitter
 from .loader import ModelHandle, load_model
 from .relay import LiveChannel, LiveRelay
+from .shared.envelope import RunStatus
+from .shared.protocol import ControlFrame, ControlKind
+from .shared.seq import SeqCounter
+from .shared.tables import TableSet
 from .sink import DurableSink
 
 log = logging.getLogger(__name__)

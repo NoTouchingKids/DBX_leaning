@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from shared.envelope import RunStatus
+from ..shared.envelope import RunStatus
 
 __all__ = ["Driver", "DriverResult"]
 

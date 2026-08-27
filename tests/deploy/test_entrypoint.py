@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-import entrypoints.run_model as run_model
-from entrypoints.run_model import ROOT_OVERRIDE, parse_settings, repo_root
+import job.run_model as run_model
+from job.run_model import ROOT_OVERRIDE, parse_settings, repo_root
 
 
 def test_key_value_arguments_become_settings():
@@ -64,7 +64,7 @@ class TestFindingTheRootWithoutDunderFile:
         its path, exec it in a bare namespace. The old first statement raised
         NameError here, at import, before `main()` was ever reached.
         """
-        path = repo_root() / "entrypoints" / "run_model.py"
+        path = repo_root() / "job" / "run_model.py"
         # Not `__main__`, so exec'ing it does not also try to run a job.
         namespace: dict = {"__name__": "job_entrypoint"}
         exec(compile(path.read_bytes(), str(path), "exec"), namespace)
@@ -79,7 +79,7 @@ class TestFindingTheRootWithoutDunderFile:
         """`compile(source, filename, ...)` keeps the filename even though the
         namespace has no `__file__` — which is how the traceback could name the
         file and the line while the module could not name itself."""
-        path = repo_root() / "entrypoints" / "run_model.py"
+        path = repo_root() / "job" / "run_model.py"
         namespace: dict = {"__name__": "job_entrypoint"}
         exec(compile(path.read_bytes(), str(path), "exec"), namespace)
 

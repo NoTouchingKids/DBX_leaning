@@ -76,7 +76,7 @@ def _candidates() -> list[tuple[str, pathlib.Path]]:
 
 
 def repo_root() -> pathlib.Path:
-    """The synced repo root: ``<root>/entrypoints/run_model.py`` -> ``<root>``.
+    """The synced repo root: ``<root>/job/run_model.py`` -> ``<root>``.
 
     Resolved by search rather than from ``__file__``, because ``__file__`` is
     not always there. Each candidate is checked for ``job/main.py`` before it is

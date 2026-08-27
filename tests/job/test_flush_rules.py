@@ -11,8 +11,8 @@ import time
 
 from job.buffer import DurableBuffer
 from job.delta import JsonlWriter
+from job.shared.tables import TableSet
 from job.sink import DurableSink
-from shared.tables import TableSet
 
 
 class FlakyWriter:

@@ -617,7 +617,21 @@ async def test_the_seq_stream_a_browser_sees_legitimately_has_gaps(live):
     is not in the live stream *and* not in the backfill. A client that retries
     backfill until its seq range is contiguous will retry forever.
     """
-    from job.relay import _live_visible  # the enforcement point, imported not copied
+    # The enforcement point, imported rather than restated. It lives in the
+    # OTHER deployable unit, though, and `job/` carries its own copy of the
+    # envelope — so an enum member from `job.shared` is not the same object as
+    # its twin from `shared`, and `_live_visible`'s `msg.type is
+    # MessageType.LOG` is False for a message this file built. Byte-identical
+    # source, distinct types.
+    #
+    # The two copies never meet in a real process: the job emits bytes and the
+    # app parses them. They meet here, so this hands the rule a message typed
+    # the way the job types its own, and publishes the app-typed one.
+    from job.relay import _live_visible
+    from job.shared.envelope import MessageAdapter as JobMessage
+
+    def as_the_job_sees_it(msg):
+        return JobMessage.validate_python(msg.model_dump())
 
     emitted = [
         log(0),
@@ -629,7 +643,7 @@ async def test_the_seq_stream_a_browser_sees_legitimately_has_gaps(live):
     async with live() as (port, hub):
         conn = await open_stream(port)
         try:
-            await publish(hub, *[m for m in emitted if _live_visible(m)])
+            await publish(hub, *[m for m in emitted if _live_visible(as_the_job_sees_it(m))])
             await conn.read_events(4)
             await conn.drain_quiet()
             assert conn.parser.ids == ["0", "1", "3", "4"]

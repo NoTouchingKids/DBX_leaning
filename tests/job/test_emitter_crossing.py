@@ -13,9 +13,9 @@ from job.buffer import DurableBuffer
 from job.delta import JsonlWriter
 from job.emitter import Emitter
 from job.relay import LiveRelay
+from job.shared.envelope import LogMessage, MessageType
+from job.shared.tables import TableSet
 from job.sink import DurableSink
-from shared.envelope import LogMessage, MessageType
-from shared.tables import TableSet
 
 
 def make_emitter(tmp_path, **kw):

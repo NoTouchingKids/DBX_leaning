@@ -22,7 +22,7 @@ import logging
 from collections import deque
 from typing import Protocol, runtime_checkable
 
-from shared.envelope import LogMessage, Message, MessageType, ProgressMessage
+from .shared.envelope import LogMessage, Message, MessageType, ProgressMessage
 
 log = logging.getLogger(__name__)
 

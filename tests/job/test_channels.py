@@ -10,8 +10,8 @@ from __future__ import annotations
 import asyncio
 
 from job.channels import HttpPushChannel, WebSocketChannel
-from shared.envelope import make_message
-from shared.protocol import ControlFrame, ControlKind, cancel, pack_frame, unpack_frame
+from job.shared.envelope import make_message
+from job.shared.protocol import ControlFrame, ControlKind, cancel, pack_frame, unpack_frame
 
 
 class FakeWS:

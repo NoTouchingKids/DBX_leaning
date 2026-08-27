@@ -16,9 +16,9 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
-from shared.codec import to_jsonable
-from shared.envelope import Message
-from shared.protocol import ControlFrame, ControlKind, hello, pack_frame, pong, unpack_frame
+from .shared.codec import to_jsonable
+from .shared.envelope import Message
+from .shared.protocol import ControlFrame, ControlKind, hello, pack_frame, pong, unpack_frame
 
 log = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ class WebSocketChannel:
         # App-level ping, not a WS protocol ping: a proxy can answer a
         # protocol ping without the frame ever reaching the app, which makes
         # it useless for telling a dropped connection from a quiet one.
-        from shared.protocol import ping as ping_frame
+        from .shared.protocol import ping as ping_frame
 
         while True:
             await asyncio.sleep(self.ping_s)

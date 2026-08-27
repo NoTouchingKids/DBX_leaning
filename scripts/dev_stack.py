@@ -15,7 +15,7 @@ REAL — the same code that would run on Databricks, unmodified
   * ``app/`` under uvicorn, including SSE, the WS ingress, the HTTP-push
     ingress, cancel forwarding, the ServiceHub and its degradation reporting.
   * ``job/`` in a separate OS process per run, launched through
-    ``entrypoints/run_model.py`` with ``KEY=VALUE`` argv exactly as a
+    ``job/run_model.py`` with ``KEY=VALUE`` argv exactly as a
     serverless task passes them.
   * ``shared/`` — one envelope, one seq counter per run, msgpack on the wire.
   * The models themselves. Real solving, real progress, real results.
@@ -135,7 +135,7 @@ def preflight(*, ports: dict[str, int], check_ports: bool = True) -> list[str]:
         if importlib.util.find_spec(module) is None:
             problems.append(f"{module} is not installed — {fix} (or `uv sync --all-extras`)")
 
-    entrypoint = REPO_ROOT / "entrypoints" / "run_model.py"
+    entrypoint = REPO_ROOT / "job" / "run_model.py"
     if not entrypoint.exists():
         problems.append(f"{entrypoint} is missing; the launcher has nothing to run")
 

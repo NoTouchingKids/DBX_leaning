@@ -12,11 +12,10 @@ import asyncio
 import logging
 from typing import Any
 
-from shared.envelope import Message
-from shared.tables import TableSet, table_for, to_row
-
 from .buffer import DurableBuffer
 from .delta import BatchWriter
+from .shared.envelope import Message
+from .shared.tables import TableSet, table_for, to_row
 
 log = logging.getLogger(__name__)
 

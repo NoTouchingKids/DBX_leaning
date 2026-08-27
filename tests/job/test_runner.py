@@ -11,7 +11,7 @@ import pytest
 from job.delta import JsonlWriter
 from job.loader import describe_object
 from job.runner import JobHarness
-from shared.envelope import RunStatus
+from job.shared.envelope import RunStatus
 
 from .conftest import BlockingModel, ChunkedModel, FakeModel
 

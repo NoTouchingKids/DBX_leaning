@@ -210,4 +210,4 @@ ignore = ["UP042"]
 # `server` lives at `app/server`, not at the repo root, so ruff's automatic
 # first-party detection misses it and sorts it in with third-party imports.
 # Everything here is ours; say so rather than let the import blocks churn.
-known-first-party = ["server", "shared", "job", "scripts", "entrypoints"]
+known-first-party = ["server", "shared", "job", "scripts"]

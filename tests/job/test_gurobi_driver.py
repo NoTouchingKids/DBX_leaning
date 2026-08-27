@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from job.drivers.gurobi import GurobiDriver
 from job.loader import describe_object
-from shared.envelope import RunStatus
+from job.shared.envelope import RunStatus
 
 
 class Callback:

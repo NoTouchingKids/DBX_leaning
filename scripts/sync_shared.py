@@ -14,12 +14,10 @@ Each deployable unit is a folder that carries everything it needs:
   outside it travels — but ``app/server/`` imports ``shared``, the message
   envelope. Without a copy inside the folder the deployed process does not
   start. **This copy is load-bearing today.**
-- ``job/`` is the job unit: the harness, ``job/models/``, and its own
-  requirements. **This copy is not load-bearing today** — a job task runs
-  ``entrypoints/run_model.py`` out of the whole synced repo tree, so it
-  imports the canonical ``shared`` and never reads ``job/shared/``. It is here
-  so the folder is already a complete unit when it is packaged as a wheel or
-  deployed alone, which is where test and prod are going.
+- ``job/`` is the job unit: the harness, ``job/run_model.py``, ``job/models/``
+  and its own requirements. ``job/*.py`` imports ``.shared`` — RELATIVE, its
+  own copy — so **this copy is load-bearing too**, and `job` is importable as
+  one package from anywhere its parent is on ``sys.path``.
 
 Neither can be a symlink: the workspace export rejects those outright, which
 is the failure that started this whole line of work.
@@ -28,10 +26,26 @@ So one directory is canonical and the rest are copies:
 
 - ``shared/`` at the repo root is the source of truth. ``job/``,
   ``job/models/``, ``scripts/`` and ``tests/`` import it, unchanged.
-- ``app/shared/`` and ``job/shared/`` are byte-identical copies, TRACKED in
-  git rather than generated at deploy time — because a deploy driven from
-  inside Databricks sees only tracked files, so a gitignored copy would
-  simply not be there.
+- ``app/shared/`` and ``job/shared/`` are byte-identical copies of it.
+
+They differ in one way, and it is deliberate:
+
+- ``app/shared/`` is **TRACKED in git**. It has to be: an app can be deployed
+  without this bundle at all — the Apps UI, or
+  ``databricks apps deploy --source-code-path ...`` — and those see only what
+  is committed. A generated copy would simply not be there, and the app would
+  not boot.
+- ``job/shared/`` is **GENERATED, and gitignored**. A job is only ever
+  deployed by ``databricks bundle deploy``, which runs this script as a
+  ``preinit`` hook before it syncs anything — so the copy exists in the
+  workspace and not in the history. One canonical ``shared/`` in the repo,
+  a self-contained ``job/`` in Databricks.
+
+The consequence of that second choice: **a fresh checkout cannot import
+``job`` until this has been run.** ``conftest.py`` at the repo root runs it
+before collection so the test suite is unaffected; anything else wants::
+
+    uv run python scripts/sync_shared.py
 
 The copies are a known compromise, scoped to this stage. Packaging ``shared``
 as a wheel retires this file and both duplicate directories.
@@ -53,9 +67,12 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "shared"
 
-#: Every folder that has to carry its own copy. `app/` needs one to boot;
-#: `job/` carries one so it is a complete unit when it is packaged.
+#: Every folder that has to carry its own copy — both load-bearing.
 TARGETS = (ROOT / "app" / "shared", ROOT / "job" / "shared")
+
+#: Of those, the ones that are gitignored and made at deploy time rather than
+#: committed. See the module docstring for why `app/shared/` cannot be one.
+GENERATED = (ROOT / "job" / "shared",)
 
 #: Never copied. `__pycache__` in particular would be a stale-bytecode landmine
 #: in a deployed folder, and its presence makes the two trees differ forever.
@@ -113,6 +130,17 @@ def sync() -> None:
             shutil.rmtree(target)
         shutil.copytree(SOURCE, target, ignore=IGNORE, symlinks=False)
         (target / MARKER).write_text(HEADER)
+
+
+def ensure() -> None:
+    """Make any MISSING copy, and leave an existing one alone.
+
+    For callers that need `job` to be importable and do not care whether it is
+    also up to date — `conftest.py`, a dev launcher. Drift is a separate
+    question, and `tests/deploy/test_shared_copy.py` is what asks it.
+    """
+    if any(not target.is_dir() for target in TARGETS):
+        sync()
 
 
 def main() -> int:

@@ -9,9 +9,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from shared.envelope import RunStatus
-
 from ..loader import ModelHandle
+from ..shared.envelope import RunStatus
 from .base import DriverResult
 
 __all__ = ["SelfDrivingDriver"]

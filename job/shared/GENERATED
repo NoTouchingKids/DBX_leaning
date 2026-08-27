@@ -1,5 +1,0 @@
-GENERATED — do not edit. A copy of the repo root's shared/, kept here
-because this folder is a deployable unit and has to carry what it imports.
-Edits here are overwritten. Change shared/ instead, then run:
-
-    uv run python scripts/sync_shared.py

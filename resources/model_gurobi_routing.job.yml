@@ -65,7 +65,7 @@ resources:
         - task_key: run
           environment_key: gurobi_routing
           spark_python_task:
-            python_file: ${workspace.file_path}/entrypoints/run_model.py
+            python_file: ${workspace.file_path}/job/run_model.py
             source: WORKSPACE
             # Serverless tasks have no spark_env_vars, so parameters travel as
             # KEY=VALUE arguments and the entrypoint exports them.

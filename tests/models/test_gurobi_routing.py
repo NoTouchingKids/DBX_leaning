@@ -331,7 +331,7 @@ def test_the_harness_composes_our_callback_with_its_own_observers(driven):
     solver log lines and sampled MIP progress.
     """
     r, model, result = driven
-    from shared.envelope import RunStatus
+    from job.shared.envelope import RunStatus
 
     assert result.status is RunStatus.SUCCEEDED
 
@@ -394,7 +394,7 @@ def test_results_are_produced_from_an_incumbent_after_a_cancellation():
 
     from job.drivers.gurobi import GurobiDriver
     from job.loader import describe_object
-    from shared.envelope import RunStatus
+    from job.shared.envelope import RunStatus
 
     r = recorder_class()()
     # Deliberately slower than the default: cancellation has to land while the

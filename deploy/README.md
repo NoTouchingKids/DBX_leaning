@@ -12,7 +12,7 @@ resources/model_<name>.job.yml       one file per model — the microservice bou
 resources/app.yml                    the observer, plus DBX_JOB_IDS wiring
 deploy/requirements/<name>.txt       GENERATED per-model deps, exported from uv.lock
 requirements.txt                     GENERATED app deps (Databricks Apps reads this path)
-entrypoints/run_model.py             what every job actually runs
+job/run_model.py             what every job actually runs
 ```
 
 ## Before the first deploy
@@ -196,38 +196,56 @@ DBX_leaning/
 │   ├── app.yaml         command + env, read by the RUNTIME — see below
 │   └── requirements.txt where Databricks Apps looks for it
 ├── job/                 <- the job unit: harness + payload + its own floor
+│   ├── run_model.py     what a task actually runs
 │   ├── models/          eleven model packages, plus _data/
-│   ├── shared/          a tracked copy too — not load-bearing yet, see below
+│   ├── shared/          GENERATED and gitignored — made by the preinit hook
 │   └── requirements.txt the harness's floor; each task installs this + 1 extra
-├── shared/              canonical. job/, job/models/ and tests import this one.
-├── entrypoints/         what a task actually runs
+├── shared/              canonical. app/, job/ and tests all copy or import it.
 └── databricks.yml  resources/  uc_ddl/       the bundle and its DDL
 ```
 
 Three consequences, all of which have bitten this repo:
 
-**`app/shared/` is a copy, and copies drift.** `app/` deploys alone, so
-everything `server/` imports has to be inside it — and `server/` imports
-exactly one first-party package, `shared`. It cannot be a symlink (see below).
-`job/` carries the same copy for symmetry.
-So one directory is canonical and the rest are copies:
+**Both units carry a copy of `shared/`, and copies drift.** Each deploys
+alone, so everything it imports has to be inside it. Neither can be a symlink
+(see below).
 
 ```bash
 uv run python scripts/sync_shared.py           # refresh them
 uv run python scripts/sync_shared.py --check    # are they current?
 ```
 
-`job/shared/` is the same copy, and it is **not load-bearing today**: a job
-task runs `entrypoints/run_model.py` out of the whole synced repo tree, so it
-imports the canonical `shared/` and never reads `job/shared/`. It is there so
-`job/` is already a complete unit the moment it is packaged as a wheel.
+**Only one of the two copies is committed**, and the asymmetry is the point:
 
-`tests/deploy/test_shared_copy.py` fails the moment the two differ, and also
-asserts that tests import the canonical `shared/` rather than the copy —
-because the nasty version of this bug is tests passing against one copy while
-the deployed app runs the other. `pythonpath` in `pyproject.toml` puts the
-repo root ahead of `app/` for exactly that reason. The duplication is scoped
-to this stage; packaging `shared` as a wheel retires it.
+- `app/shared/` is **tracked**. An app can be deployed without this bundle at
+  all — the Apps UI, `databricks apps deploy --source-code-path ...` — and
+  those see only what is in git, so a generated copy would not be there and
+  `server/main.py` would fail on the first line it runs.
+- `job/shared/` is **generated and gitignored**. A job is only ever deployed
+  from this bundle, and `databricks.yml`'s `experimental.scripts.preinit` runs
+  the sync before anything is uploaded. One canonical `shared/` in the repo; a
+  complete `job/` in the workspace.
+
+`job/*.py` imports `.shared` — relative, its own copy — so `job` is one
+importable package from anywhere its parent is on `sys.path`. **A fresh
+checkout therefore cannot import `job` until the copy has been made**:
+
+    ModuleNotFoundError: No module named 'job.shared'
+
+`conftest.py` at the repo root makes it before pytest collects, so the suite
+is unaffected. Anything else — a script, a REPL, a dev stack run — wants
+`uv run python scripts/sync_shared.py` once.
+
+And one consequence that is easy to trip over: `job.shared.envelope` and
+`shared.envelope` are byte-identical source but **distinct types**, so
+`MessageType.LOG is MessageType.LOG` is False across them. The two never meet
+in a real process — the job emits bytes, the app parses them — but a test that
+drives job code has to build its envelopes with `job.shared`.
+
+`tests/deploy/test_shared_copy.py` fails the moment a copy differs, the moment
+`app/shared/` stops being tracked, the moment `job/shared/` starts being, and
+if the preinit hook goes missing. The duplication is scoped to this stage;
+packaging `shared` as a wheel retires it.
 
 **`app/dist/` is committed.** Build output in git is unusual. It is here
 because a deploy driven from *inside* Databricks — a Git folder, a notebook —
@@ -633,8 +651,9 @@ designed state, not a broken one.
 ## What deploys, and how it gets there
 
 **Code travels by workspace file sync**, not as a wheel. Each job runs
-`entrypoints/run_model.py` from the synced tree, which puts the repo root on
-`sys.path` and hands the harness its parameters. Moving to a wheel later
+`job/run_model.py` from the synced tree, which puts the repo root on
+`sys.path` — so `import job` finds the whole unit, `job/shared/` included —
+and hands the harness its parameters. Moving to a wheel later
 changes the task definition and nothing else — the entrypoint contract is the
 same either way.
 

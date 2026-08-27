@@ -22,11 +22,10 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from shared.downsample import downsample_rows
-from shared.envelope import PREVIEW_MAX_POINTS, Message, MessageType, make_message
-from shared.seq import SeqCounter
-
 from .relay import LiveRelay
+from .shared.downsample import downsample_rows
+from .shared.envelope import PREVIEW_MAX_POINTS, Message, MessageType, make_message
+from .shared.seq import SeqCounter
 from .sink import DurableSink
 
 log = logging.getLogger(__name__)

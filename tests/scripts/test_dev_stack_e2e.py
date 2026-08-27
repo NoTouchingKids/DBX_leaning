@@ -3,7 +3,7 @@
 What this drives, end to end:
 
     POST /api/runs  ->  PostgresRunStore.claim_slot  ->  the launcher
-      ->  entrypoints/run_model.py in its own OS process  ->  job/ harness
+      ->  job/run_model.py in its own OS process  ->  job/ harness
       ->  a real model  ->  WebSocket (or HTTP push) into app/server/routes/ingest
       ->  hub.ingest  ->  SSE out of app/server/routes/stream
 

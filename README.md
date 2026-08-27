@@ -58,7 +58,7 @@ lakebase_ddl/          Postgres DDL (run state) — applied at startup too
 databricks.yml         Asset bundle: eleven jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
-entrypoints/           What a Databricks job actually runs
+job/run_model.py       What a Databricks job actually runs
 app/                   The deployed app: server/ (FastAPI), client/ (React
                        source), dist/ (built SPA), shared/ (a tracked copy)
 tests/                 ~790 tests, none needing a Databricks connection

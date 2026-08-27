@@ -8,7 +8,7 @@
 # the duplication is what lets them diverge.
 #
 # Code reaches the workspace by **file sync**, not as a wheel. Each job runs
-# entrypoints/run_model.py from the synced tree. When that changes to a wheel
+# job/run_model.py from the synced tree. When that changes to a wheel
 # later, the task definition changes and nothing else does.
 
 bundle:
@@ -122,7 +122,7 @@ variables:
 
 # The workspace sync is what puts the tree in the workspace;
 # `resources/app.yml` then hands Databricks Apps the `app/` subfolder of it,
-# and each job task runs `entrypoints/run_model.py` out of the same tree.
+# and each job task runs `job/run_model.py` out of the same tree.
 #
 # Two of these excludes are not tidiness. The App export rejects symlinks and
 # fails on the FIRST one it meets, so the count is beside the point: `.venv/bin`
@@ -134,6 +134,21 @@ variables:
 # workspace with no Node runtime, and the build output is not in that
 # directory anyway — `vite.config.ts` writes `../dist`, i.e. `app/dist`, which
 # is committed and syncs like any other tracked file.
+# Runs before the bundle is loaded, on `validate` and `deploy` alike.
+#
+# `job/` is a self-contained deployable unit and carries its own copy of
+# `shared/` — but that copy is gitignored, because a job is only ever deployed
+# from here and this is the hook that makes it. One canonical `shared/` in the
+# repo; a complete `job/` in the workspace.
+#
+# `preinit` and not the top-level `scripts:` block: in CLI v1.13.0 only
+# `experimental.scripts` actually fires. Verified against a scratch bundle
+# rather than assumed, because a hook that silently does not run would deploy
+# a `job/` with no `shared/` in it and fail at import time in the workspace.
+experimental:
+  scripts:
+    preinit: uv run python scripts/sync_shared.py
+
 sync:
   exclude:
     - .venv/**

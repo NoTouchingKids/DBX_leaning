@@ -47,7 +47,7 @@ the status note below says which of this document's premises that broke.
 >    file, and prefer `scripts/probe_sample_data.py` over both.
 > 4. **`databricks.yml` is no longer "still unbuilt".** It exists, with one
 >    job per model, and deploys by workspace-file sync running
->    `entrypoints/run_model.py` — not by wheel. Moving to the per-model wheels
+>    `job/run_model.py` — not by wheel. Moving to the per-model wheels
 >    this document argues for is therefore a change to a working bundle, and
 >    needs one thing this doc does not cover: the generated wheel has no
 >    console entry point, so a `python_wheel_task` has nothing to call. Note
@@ -189,7 +189,7 @@ needs `shared/` + `app/` + the `app` extra, and never imports anything from
 **This is no longer greenfield advice.** The bundle exists (`databricks.yml`
 plus one `resources/model_<name>.job.yml` per model), and it took the *other*
 route: code reaches the workspace by file sync, each job runs
-`entrypoints/run_model.py` from the synced tree with a `spark_python_task`,
+`job/run_model.py` from the synced tree with a `spark_python_task`,
 and per-model *dependencies* come from `deploy/requirements/<name>.txt`
 exported from `uv.lock`. So dependency scoping is solved and source scoping
 is not — every job's synced tree still contains every model's source. That

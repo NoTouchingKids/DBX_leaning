@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 
 from job.relay import LiveRelay
-from shared.envelope import make_message
+from job.shared.envelope import make_message
 
 
 def log(seq: int, **kw):

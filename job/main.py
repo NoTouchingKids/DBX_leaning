@@ -12,10 +12,9 @@ import logging
 import signal
 import sys
 
-from shared.envelope import RunStatus
-
 from .config import JobConfig
 from .runner import JobHarness
+from .shared.envelope import RunStatus
 
 log = logging.getLogger("job")
 

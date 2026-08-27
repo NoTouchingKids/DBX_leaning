@@ -169,6 +169,7 @@ app/            THE DEPLOYED APP — everything it needs, nothing else. This
                 else — without it, "No command to run"
   requirements.txt  App deps, where Databricks Apps looks for them
 job/            THE JOB UNIT — the harness plus its payload, its own floor
+  run_model.py  What a Databricks task runs (workspace-file sync, not a wheel)
   (harness)     WS client, HTTP push, Delta writer, model loader
   models/           One package per model — eleven of them: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
@@ -177,10 +178,12 @@ job/            THE JOB UNIT — the harness plus its payload, its own floor
                 samples-catalog loaders — ortools_jobshop and panel_fit
                 bring their own). Registered in [tool.dbx-leaning.models]
                 in pyproject.toml
-  shared/       A TRACKED COPY, like app/shared/ — NOT load-bearing today: a
-                task runs entrypoints/run_model.py from the whole synced tree
-                and imports the canonical shared/. It is here so job/ is
-                already a complete unit when it becomes a wheel
+  shared/       A GENERATED copy, gitignored — `scripts/sync_shared.py` makes
+                it and the bundle's preinit hook runs that before every sync.
+                LOAD-BEARING: job/*.py imports `.shared`, relative, so `job` is
+                one complete package from anywhere its parent is on sys.path.
+                A fresh checkout cannot import job until it has been made;
+                conftest.py does it before tests
   requirements.txt  The harness's floor. Each task installs
                 deploy/requirements/<model>.txt, which is this plus one extra
 shared/         The message envelope + protocol helpers, imported by both
@@ -190,7 +193,6 @@ uc_ddl/         Unity Catalog DDL (telemetry + per-model results tables)
 lakebase_ddl/   Postgres DDL (run_status), applied at app startup
 schema/         Generated JSON Schema for the wire protocol
 scripts/        Registry, requirements/schema export, licence + sample probes
-entrypoints/    What a Databricks job runs (workspace-file sync, not a wheel)
 resources/      One job definition per model, plus the app — see below
 deploy/         Generated per-model requirements, and the deployment guide
 tests/          Offline; nothing here needs a Databricks connection
@@ -210,19 +212,36 @@ outside it travels**, which is why `shared/` has a tracked copy at
 
 The copies are copies rather than symlinks because **the workspace export
 rejects symlinks** — the same rule that keeps `.venv` and
-`app/client/node_modules` out of the sync. Nothing is staged or assembled at
-deploy time; both folders are real directories, made by
-`scripts/sync_shared.py` and committed.
+`app/client/node_modules` out of the sync.
 
-Only `app/shared/` is load-bearing today. A job task runs
-`entrypoints/run_model.py` out of the whole synced tree, so it imports the
-canonical `shared/` and never reads `job/shared/`; that copy is there so the
-folder is already complete when it becomes a wheel.
+**Both copies are load-bearing, and only one is committed.**
+
+- `app/shared/` is **tracked**, and has to be. An app can be deployed without
+  this bundle at all — the Apps UI, `databricks apps deploy
+  --source-code-path ...` — and those see only what is in git.
+- `job/shared/` is **generated and gitignored**. A job is only ever deployed by
+  `databricks bundle deploy`, and `databricks.yml`'s `experimental.scripts.preinit`
+  runs `scripts/sync_shared.py` before the sync. One canonical `shared/` in the
+  repo; a complete `job/` in the workspace.
+
+`job/*.py` imports `.shared` — **relative, its own copy** — so `job` is one
+importable package from anywhere its parent is on `sys.path`, which is what
+`job/run_model.py` arranges. The consequence: **a fresh checkout cannot import
+`job` until the copy has been made.** `conftest.py` at the repo root does it
+before collection; anything else wants `uv run python scripts/sync_shared.py`.
+
+A second consequence, and it is the one that bites: `job.shared.envelope` and
+`shared.envelope` are byte-identical source but **distinct types**, so
+`MessageType.LOG is MessageType.LOG` is False across them. The two never meet
+in a real process — the job emits bytes and the app parses them — but a test
+that drives job code must build envelopes with `job.shared`. Tests under
+`tests/job/`, `tests/integration/` and `tests/models/` do.
 
 The duplication is a known compromise, scoped to this stage — packaging
 `shared` as a wheel retires it. `tests/deploy/test_shared_copy.py` is what
-makes it safe in the meantime: it fails the moment a copy differs, and it
-asserts that tests import the canonical `shared/`, never a copy.
+makes it safe in the meantime: it fails the moment a copy differs, the moment
+`app/shared/` stops being tracked, the moment `job/shared/` starts being, and
+if the preinit hook goes missing.
 
 ## Deployment shape: a model is a microservice
 

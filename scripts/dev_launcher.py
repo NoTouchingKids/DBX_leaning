@@ -21,7 +21,7 @@ a real bug:
   that accepted anything would let that contract rot.
 - **Parameters travel as ``KEY=VALUE`` argv**, in the order the bundle declares
   them, empty values included — exactly what ``resources/*.job.yml`` does, so
-  ``entrypoints/run_model.py`` is exercised rather than bypassed.
+  ``job/run_model.py`` is exercised rather than bypassed.
 - **A cancel is a SIGTERM**, which is what ``databricks jobs cancel-run`` does
   and what ``job/main.py`` turns into a cooperative cancel.
 
@@ -309,7 +309,7 @@ class LocalJobLauncher:
         empty value is load-bearing: an unset ``DBX_APP_URL`` has to mean "no
         app", not "an app at ''".
         """
-        entrypoint = REPO_ROOT / "entrypoints" / "run_model.py"
+        entrypoint = REPO_ROOT / "job" / "run_model.py"
         return [
             self.python,
             str(entrypoint),

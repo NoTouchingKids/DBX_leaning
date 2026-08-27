@@ -233,3 +233,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GENERATED, not committed: job/ is a self-contained deployable unit and
+# carries its own copy of shared/, but a job is only ever deployed by
+# `databricks bundle deploy`, whose preinit hook runs scripts/sync_shared.py
+# before the sync. So the copy exists in the workspace, not in the history.
+#
+# app/shared/ is TRACKED and must stay so — an app can be deployed without
+# this bundle (the Apps UI, `databricks apps deploy --source-code-path ...`),
+# and those see only committed files.
+#
+# A fresh checkout cannot `import job` until this has been made. conftest.py
+# does it before tests; otherwise: uv run python scripts/sync_shared.py
+/job/shared/

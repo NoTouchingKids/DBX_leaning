@@ -15,7 +15,7 @@ import pytest
 from job.config import JobConfig
 from job.delta import JsonlWriter
 from job.runner import JobHarness
-from shared.envelope import MessageAdapter, RunStatus
+from job.shared.envelope import MessageAdapter, RunStatus
 
 
 @pytest.fixture

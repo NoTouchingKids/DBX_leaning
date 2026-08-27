@@ -47,7 +47,7 @@ async def test_exit_code_treats_cancellation_as_a_clean_outcome(
 ):
     from job import main as main_module
     from job.runner import RunOutcome
-    from shared.envelope import RunStatus
+    from job.shared.envelope import RunStatus
 
     monkeypatch.setenv("DBX_MODEL", "job.models.scenario")
     monkeypatch.setenv("DBX_WRITER", "jsonl")

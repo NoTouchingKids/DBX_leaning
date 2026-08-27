@@ -105,7 +105,7 @@ def test_every_declared_parameter_is_forwarded_to_the_entrypoint(jobs):
 def test_every_job_runs_the_shared_entrypoint(jobs):
     for model in MODELS:
         task = jobs[f"model_{model}"]["tasks"][0]["spark_python_task"]
-        assert task["python_file"].endswith("/entrypoints/run_model.py")
+        assert task["python_file"].endswith("/job/run_model.py")
         assert task["source"] == "WORKSPACE"  # file sync, not a wheel — for now
 
 
@@ -173,9 +173,7 @@ def test_the_app_may_actually_run_every_job_it_knows_about(bundle):
     fails the first time someone presses Run.
     """
     app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
-    granted = {
-        r["job"]["id"]: r["job"]["permission"] for r in app["resources"] if "job" in r
-    }
+    granted = {r["job"]["id"]: r["job"]["permission"] for r in app["resources"] if "job" in r}
 
     for model in MODELS:
         reference = f"${{resources.jobs.model_{model}.id}}"
