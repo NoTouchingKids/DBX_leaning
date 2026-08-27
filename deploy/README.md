@@ -35,9 +35,32 @@ results, `003` is the app's volume. See `uc_ddl/README.md` for what skipping
 each one costs, and for the `ALTER TABLE` note — `CREATE TABLE IF NOT EXISTS`
 does not add a column to a table that already exists.
 
-**2. The ingress secret.** The token a job presents to the app. The app reads
-it from a secret; the job never stores it at all — the app passes it per run
-as a job parameter at trigger time.
+**2. The ingress secret.**
+
+> **A workspace secret scope is not a Unity Catalog object.** They are two
+> unrelated stores and only one of them works here. A secret created in UC
+> appears in the catalog tree under a catalog and schema — `main.dbx_leaning`
+> — and the app cannot read it: `resources/app.yml` resolves
+> `secret: { scope, key }` against the **workspace** secret namespace, which
+> is FLAT. `app_secret_scope: dbx-leaning` means a workspace scope literally
+> named `dbx-leaning`, not the `dbx_leaning` schema, and the resemblance
+> between those two names is the whole trap.
+>
+> The Secrets API says so itself — `create-scope --scope-backend-type` takes
+> only `DATABRICKS` or `AZURE_KEYVAULT`. There is no UC backend.
+>
+> Putting it in the wrong store fails the deploy, not the app:
+>
+> ```
+> Invalid secret resource app-token: Secret with scope dbx-leaning and key
+> app-token does not exist. (404 NOT_FOUND)
+> ```
+>
+> `databricks secrets list-scopes` is the check.
+
+The token a job presents to the app. The app reads it from a secret; the job
+never stores it at all — the app passes it per run as a job parameter at
+trigger time.
 
 ```bash
 databricks secrets create-scope dbx-leaning

@@ -49,6 +49,15 @@ resources:
       # The token a job presents on the WS/HTTP ingress. Held as a secret and
       # injected here; the *job* never stores it — the app passes it per run
       # as a job parameter at trigger time (app/server/routes/runs.py).
+      # `scope` here is a WORKSPACE secret scope — a flat namespace with no
+      # catalog and no schema. It is not Unity Catalog, and a secret created
+      # in UC (which appears in the catalog tree under `main.dbx_leaning`)
+      # cannot be read from here. The names differing by one character is the
+      # trap: `dbx-leaning` the scope, `dbx_leaning` the schema.
+      #
+      # Wrong store fails the DEPLOY, not the app:
+      #   Invalid secret resource app-token: Secret with scope dbx-leaning
+      #   and key app-token does not exist. (404 NOT_FOUND)
       resources:
         - name: app-token
           description: Shared secret authenticating a job's ingress connection.
