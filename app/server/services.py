@@ -115,6 +115,7 @@ class ServiceHub:
             token_provider=self.token_provider,
             wait_timeout_s=cfg.sql_wait_timeout_s,
             timeout_s=cfg.sql_timeout_s,
+            statement_deadline_s=cfg.sql_statement_deadline_s,
         )
         if sql.available:
             self.sql = sql

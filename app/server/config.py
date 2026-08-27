@@ -36,6 +36,12 @@ class AppConfig:
     #: rather than a poll loop. 5-50s per the API.
     sql_wait_timeout_s: int = 30
     sql_timeout_s: float = 60.0
+    #: Total time one statement may take — the API's own wait plus the client's
+    #: polling. Generous on purpose: what it is usually waiting for is a
+    #: warehouse cold start, and auto-stop is 10 minutes, so the first read of
+    #: the day nearly always pays it. Failing at 30s instead is what produced
+    #: "statement CANCELED: no detail" across every route at once.
+    sql_statement_deadline_s: float = 180.0
 
     #: SSE keepalive. Comment-only lines, frequent enough to tell an idle
     #: timeout from a duration cap if the ingress cuts us (see /spike-sse).
@@ -159,6 +165,7 @@ class AppConfig:
             token=(e.get("DATABRICKS_TOKEN") or "").strip() or None,
             sql_wait_timeout_s=int(e.get("DBX_SQL_WAIT_TIMEOUT_S", "30")),
             sql_timeout_s=float(e.get("DBX_SQL_TIMEOUT_S", "60")),
+            sql_statement_deadline_s=float(e.get("DBX_SQL_STATEMENT_DEADLINE_S", "180")),
             sse_keepalive_s=float(e.get("DBX_SSE_KEEPALIVE_S", "10")),
             sse_queue_max=int(e.get("DBX_SSE_QUEUE_MAX", "1000")),
             backfill_page_size=int(e.get("DBX_BACKFILL_PAGE_SIZE", "5000")),
