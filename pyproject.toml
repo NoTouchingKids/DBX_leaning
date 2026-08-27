@@ -107,7 +107,21 @@ models = [
 # development, and nothing that installs the package can pull them in.
 dev = [
     "jsonschema>=4.26.0",
-    "pgserver>=0.1.4",
+    # Embedded Postgres for tests/app/test_run_store.py, and the one dependency
+    # here that does not exist everywhere: it publishes wheels for linux x86_64,
+    # macOS, and Windows amd64, and none for aarch64 Linux. Unmarked, `uv sync`
+    # is unsatisfiable on an ARM Linux box — which includes a Databricks
+    # machine, so a deploy driven from inside the workspace failed on a test
+    # dependency it had no reason to install:
+    #
+    #   × No solution found when resolving dependencies:
+    #   ╰─▶ Because pgserver==0.1.4 has no wheels with a matching platform tag
+    #       (e.g., `manylinux_2_39_aarch64`)
+    #
+    # The marker makes it absent rather than fatal there. The test already
+    # `pytest.importorskip`s it, so the suite reports a skip and everything
+    # else runs.
+    "pgserver>=0.1.4; (sys_platform == 'linux' and platform_machine == 'x86_64') or sys_platform == 'darwin' or (sys_platform == 'win32' and platform_machine == 'AMD64')",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "pyyaml>=6.0.3",

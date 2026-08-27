@@ -145,9 +145,26 @@ variables:
 # `experimental.scripts` actually fires. Verified against a scratch bundle
 # rather than assumed, because a hook that silently does not run would deploy
 # a `job/` with no `shared/` in it and fail at import time in the workspace.
+#
+# `python3`, NOT `uv run` — and this is the one line in the repo where the
+# project's own "use uv" rule is deliberately not followed.
+#
+# `uv run` resolves and syncs the project environment before it runs anything,
+# and `[tool.uv] default-groups = ["dev"]` puts the dev group in that
+# resolution. A deploy driven from INSIDE Databricks runs on aarch64, where
+# `pgserver` — an embedded Postgres for one test file — publishes no wheel:
+#
+#   × No solution found when resolving dependencies:
+#   ╰─▶ Because pgserver==0.1.4 has no wheels with a matching platform tag
+#       (e.g., `manylinux_2_39_aarch64`) ... your requirements are unsatisfiable
+#
+# So the deploy died on a test dependency it had no reason to install. The
+# script is stdlib-only (argparse, filecmp, pathlib, shutil, sys) precisely so
+# the hook can run on whatever interpreter is already there and install
+# nothing. `tests/deploy/test_shared_copy.py` holds both halves of that.
 experimental:
   scripts:
-    preinit: uv run python scripts/sync_shared.py
+    preinit: python3 scripts/sync_shared.py
 
 sync:
   exclude:

@@ -129,6 +129,57 @@ def test_the_bundle_makes_the_generated_copy_before_it_syncs():
     )
 
 
+def test_the_preinit_hook_installs_nothing_to_run():
+    """`python3`, never `uv run`.
+
+    `uv run` resolves and syncs the project environment before running
+    anything, and `[tool.uv] default-groups = ["dev"]` puts the dev group in
+    that resolution. A deploy driven from INSIDE Databricks runs on aarch64,
+    where `pgserver` — an embedded Postgres used by one test file — publishes
+    no wheel, so the deploy died on a test dependency it had no reason to
+    install:
+
+        × No solution found when resolving dependencies:
+        ╰─▶ Because pgserver==0.1.4 has no wheels with a matching platform tag
+            (e.g., `manylinux_2_39_aarch64`)
+
+    This is the one place the repo's "always uv" rule is deliberately not
+    followed, and it only holds while the script stays stdlib-only — which the
+    next test is for.
+    """
+    import yaml
+
+    bundle = yaml.safe_load((ROOT / "databricks.yml").read_text())
+    preinit = bundle["experimental"]["scripts"]["preinit"]
+
+    assert not preinit.startswith("uv "), (
+        f"preinit is {preinit!r}; `uv run`/`uv sync` resolves the dev group and "
+        "fails on any platform without a pgserver wheel — run it on the "
+        "interpreter that is already there"
+    )
+    assert preinit.split()[0] in {"python", "python3"}, preinit
+
+
+def test_the_hook_script_imports_only_the_standard_library():
+    """What makes the line above safe. An import of anything installed would
+    put the hook back to needing a resolved environment, on a machine whose
+    only job is to upload files."""
+    import ast
+
+    source = (ROOT / "scripts" / "sync_shared.py").read_text()
+    imported = {
+        (node.module or "").split(".")[0]
+        if isinstance(node, ast.ImportFrom)
+        else node.names[0].name.split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    }
+    assert imported <= set(sys.stdlib_module_names) | {"__future__"}, (
+        f"scripts/sync_shared.py imports {imported - set(sys.stdlib_module_names)}, "
+        "which the preinit hook has no environment to provide"
+    )
+
+
 def test_a_fresh_checkout_can_still_import_the_job():
     """`conftest.py` at the repo root makes the missing copy before collection.
 
