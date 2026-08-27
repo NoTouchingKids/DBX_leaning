@@ -76,7 +76,19 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: true,
     assetsDir: "assets",
-    sourcemap: true,
+    // "hidden", not true: emit the .map files but NOT the
+    // `//# sourceMappingURL=` comment that points at them.
+    //
+    // The maps are gitignored — 5.1 MB against 1.2 MB for the bundle — so
+    // they do not deploy, but with `true` the comment shipped anyway and
+    // every page load asked for four maps that are not there:
+    //
+    //   GET /assets/index-DALehavr.js.map HTTP/1.1  404 Not Found
+    //   GET /assets/three-DwIcnsOs.js.map  HTTP/1.1  404 Not Found
+    //
+    // "hidden" keeps them on disk for anyone debugging a local build and
+    // leaves nothing to 404 in production.
+    sourcemap: "hidden",
     rolldownOptions: {
       output: {
         // `three` gets its own chunk, and it must stay that way.
