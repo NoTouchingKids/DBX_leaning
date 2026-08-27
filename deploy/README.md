@@ -129,6 +129,52 @@ The app applies that schema at startup too, but a deploy that cannot reach the
 instance reports `degraded: lakebase` rather than failing — so do not use
 startup as proof the schema is there.
 
+### `run_status` lives in `dbx_leaning`, not `public`
+
+Both the DDL file and `ensure_schema()` create a schema first:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS dbx_leaning;
+CREATE TABLE IF NOT EXISTS dbx_leaning.run_status (...);
+```
+
+This is not tidiness. **Since PostgreSQL 15, `public` no longer grants CREATE
+to `PUBLIC`**, so a role that does not own the database — which the app's
+service principal generally does not — gets `permission denied for schema
+public` the first time the app applies its DDL. The app would come up
+reporting `degraded: lakebase` for a reason nobody would guess from the
+message. Every statement in `app/server/store.py` qualifies the table too,
+rather than setting a `search_path`: the store opens a connection per
+operation, and a search path that silently reverted to `public` would find a
+*different, empty* table instead of failing.
+
+The name is `databricks.yml`'s `lakebase_schema` (and `DBX_LAKEBASE_SCHEMA` in
+`app/app.yaml`); `tests/deploy/test_app_yaml.py` keeps the two equal.
+
+**Creating a schema needs CREATE on the database**, which Postgres grants to
+the owner and not to `PUBLIC`. If the app reports
+
+    degraded: lakebase — permission denied for database databricks_postgres
+
+then the service principal cannot create it, and the fix is to create it once
+as the instance owner and hand it over:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS dbx_leaning AUTHORIZATION "<sp-application-id>";
+```
+
+Owning the schema is what lets `ensure_schema()` stay idempotent on every
+subsequent start. If handing over ownership is not wanted, grant instead —
+`GRANT USAGE, CREATE ON SCHEMA dbx_leaning TO "<sp-application-id>"` — which
+is enough for the table and index DDL that follows.
+
+The role name is the service principal's **application id**, the same value as
+`lakebase_user` and `oauth_client_id`. Lakebase names the role after the
+principal whose OAuth token is presented, so connecting as one while
+presenting the other's token fails as an ordinary authentication error;
+`/healthz` reports `degraded: lakebase_identity` when those two variables
+disagree, before any connection is attempted.
+
 ## Layout: `app/` is the whole app
 
 The shape the [Databricks app template][t] uses — `server/` for the FastAPI
