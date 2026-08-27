@@ -257,6 +257,103 @@ If a previous run put `.venv` in the workspace, delete it there once:
 databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
 ```
 
+## Permission to run a job
+
+Knowing a job id is not permission to run it. `DBX_JOB_IDS` tells the app
+*which* job runs which model; without a grant, `POST /api/runs` reaches
+Databricks and is refused:
+
+```
+run-now failed for job 123: HTTP 403 {"error_code": "PERMISSION_DENIED",
+"message": "User ... does not have Manage Run or Owner permissions on job 123"}
+```
+
+`app/server/jobs_api.py` passes that through verbatim, so the 403 is visible
+rather than mysterious — but only once someone presses Run.
+
+**Which principal needs the grant is the whole question**, and it depends on
+one variable:
+
+| `oauth_client_id` | the app authenticates as | grant to it by |
+| --- | --- | --- |
+| empty (default) | the service principal Databricks Apps created for this app | the `job` resources in `resources/app.yml` — nothing else to do |
+| set | that service principal | an explicit grant, below |
+
+### The default: the app's own service principal
+
+Already declared, one per model, in `resources/app.yml`:
+
+```yaml
+- name: job-scenario
+  description: Trigger the scenario model.
+  job:
+    id: ${resources.jobs.model_scenario.id}
+    permission: CAN_MANAGE_RUN
+```
+
+An app resource can only grant to the app's *own* identity, which is what
+makes this the low-friction path: `bundle deploy` creates the job and grants
+the app the right to run it in the same step, and the id is interpolated so it
+cannot go stale. `CAN_MANAGE_RUN` starts and cancels runs; `CAN_MANAGE` would
+also let the app rewrite the job definition, which the bundle owns.
+
+`tests/deploy/test_bundle.py` fails if a model is in `DBX_JOB_IDS` and not in
+this list, or the reverse — the two halves are added together or not at all.
+
+The same block grants `CAN_USE` on the warehouse, for the read path (backfill,
+history, startup reconciliation). Lakebase is there too, commented out: a
+declared resource is validated at *deploy* time, so naming an instance that
+does not exist fails the whole deploy — the trap `oauth-client-secret` fell
+into once. Uncomment it when the instance exists, and note that
+`instance_name` is the instance's **name**, not the `read_write_dns` hostname
+that `lakebase_host` takes. Its `CAN_CONNECT_AND_CREATE` is also what lets
+`ensure_schema()` issue `CREATE SCHEMA`, which Postgres allows the database
+owner alone.
+
+### Running as your own service principal
+
+Setting `oauth_client_id` (and the matching secret) points the app at a
+principal of your own, and **the app resources above stop applying to it** —
+they grant to the app's identity, and it is no longer using that one. Grant
+each job explicitly instead.
+
+Once, from the CLI, per job:
+
+```bash
+SP=<the SP's application id>
+for id in $(databricks jobs list -o json | \
+            jq -r '.[] | select(.settings.tags.project == "dbx-leaning") | .job_id'); do
+  databricks permissions update jobs "$id" --json "{
+    \"access_control_list\": [
+      {\"service_principal_name\": \"$SP\", \"permission_level\": \"CAN_MANAGE_RUN\"}
+    ]
+  }"
+done
+```
+
+Every job carries `tags: {project: dbx-leaning, model: <name>}`, which is what
+makes that selection safe to run in a workspace with other jobs in it.
+
+Or declaratively, so a re-created job keeps the grant — a bundle-level
+`permissions:` block applies to every resource in the bundle:
+
+```yaml
+# databricks.yml, top level
+permissions:
+  - level: CAN_MANAGE_RUN
+    service_principal_name: <the SP's application id>
+```
+
+This is not in the bundle by default because it cannot be conditional: with
+`oauth_client_id` empty there is no principal to name, and an empty
+`service_principal_name` fails the deploy.
+
+That principal needs the rest of what the app does, too — `CAN_USE` on the
+warehouse, `READ VOLUME`/`WRITE VOLUME` on the app volume, and the Lakebase
+role. The Postgres role is named after the principal, which is why
+`lakebase_user` must be the same application id; `/healthz` reports
+`lakebase_identity` when the two disagree, before any connection is attempted.
+
 ## Two ways to deploy, two files
 
 `app/app.yaml` and `resources/app.yml` declare the same command and env, and

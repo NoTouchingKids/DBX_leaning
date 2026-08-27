@@ -119,6 +119,127 @@ resources:
             securable_full_name: ${var.catalog}.${var.schema}.${var.app_volume}
             permission: WRITE_VOLUME
 
+        # --- the jobs this app triggers --------------------------------
+        #
+        # DBX_JOB_IDS below tells the app WHICH job runs which model. It does
+        # not give it the right to run one. Without these, `POST /api/runs`
+        # reaches Databricks and is refused:
+        #
+        #   run-now failed for job 123: HTTP 403 {"error_code":
+        #   "PERMISSION_DENIED", "message": "User ... does not have Manage Run
+        #   or Owner permissions on job 123"}
+        #
+        # which the trigger route surfaces verbatim. The two have to be
+        # declared together, and `tests/deploy/test_bundle.py` fails if a
+        # model is in one and not the other.
+        #
+        # WHO THIS GRANTS TO: the service principal Databricks Apps created
+        # for this app — NOT the `oauth_client_id` principal. An app resource
+        # can only grant to the app's own identity. If you point the app at a
+        # principal of your own, that one needs the grant separately; see
+        # "Running as your own service principal" in deploy/README.md.
+        #
+        # CAN_MANAGE_RUN, not CAN_MANAGE: enough to start and cancel a run,
+        # not to edit the job definition. The bundle owns the definition.
+        #
+        # Unlike the secret resource above, declaring these cannot 404 the
+        # deploy — this same bundle creates the jobs, so the ids always
+        # resolve to something that exists.
+        - name: job-gurobi-scheduling
+          description: Trigger the gurobi_scheduling model.
+          job:
+            id: ${resources.jobs.model_gurobi_scheduling.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-gurobi-routing
+          description: Trigger the gurobi_routing model.
+          job:
+            id: ${resources.jobs.model_gurobi_routing.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-scenario
+          description: Trigger the scenario model.
+          job:
+            id: ${resources.jobs.model_scenario.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-forecasting
+          description: Trigger the forecasting model.
+          job:
+            id: ${resources.jobs.model_forecasting.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-mcmc
+          description: Trigger the mcmc model.
+          job:
+            id: ${resources.jobs.model_mcmc.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-bayesian-ab
+          description: Trigger the bayesian_ab model.
+          job:
+            id: ${resources.jobs.model_bayesian_ab.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-annealing
+          description: Trigger the annealing model.
+          job:
+            id: ${resources.jobs.model_annealing.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-neural-net
+          description: Trigger the neural_net model.
+          job:
+            id: ${resources.jobs.model_neural_net.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-streaming-results
+          description: Trigger the streaming_results model.
+          job:
+            id: ${resources.jobs.model_streaming_results.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-ortools-jobshop
+          description: Trigger the ortools_jobshop model.
+          job:
+            id: ${resources.jobs.model_ortools_jobshop.id}
+            permission: CAN_MANAGE_RUN
+        - name: job-panel-fit
+          description: Trigger the panel_fit model.
+          job:
+            id: ${resources.jobs.model_panel_fit.id}
+            permission: CAN_MANAGE_RUN
+
+        # The warehouse the read path uses — backfill, history and startup
+        # reconciliation. Nothing WRITES through it (see docs/architecture.md);
+        # telemetry goes to Delta from the job. CAN_USE is run-queries-on,
+        # not administer.
+        #
+        # This one is validated at deploy time like any resource, so a
+        # `warehouse_id` naming a warehouse that does not exist fails the
+        # deploy rather than 403-ing at run time. That is the better end of
+        # the trade, but it does mean the id has to be right before deploying.
+        - name: sql-warehouse
+          description: Read path — backfill, history and reconciliation.
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+
+        # --- Lakebase, when you have an instance ------------------------
+        #
+        # COMMENTED OUT for the same reason the SP secret above is: a declared
+        # resource is validated at DEPLOY time, so naming an instance that
+        # does not exist fails the whole deploy before anything is uploaded.
+        # `lakebase_host` defaults to empty, and an empty deployment is a
+        # supported (degraded) one.
+        #
+        # Uncomment once the instance exists, and set `instance_name` to the
+        # instance's NAME — not the `read_write_dns` hostname `lakebase_host`
+        # takes.
+        #
+        # CAN_CONNECT_AND_CREATE is the only permission this resource offers,
+        # and CREATE is the half that matters: `ensure_schema()` issues
+        # `CREATE SCHEMA IF NOT EXISTS dbx_leaning`, and Postgres grants CREATE
+        # on a database to its owner alone.
+        #
+        # - name: lakebase
+        #   description: Run state — the run_status table.
+        #   database:
+        #     instance_name: dbx-leaning
+        #     database_name: ${var.lakebase_database}
+        #     permission: CAN_CONNECT_AND_CREATE
+
       config:
         # Mirrors `app/app.yaml`, which is what the runtime reads when the
         # app is deployed any way OTHER than by this bundle — the Apps UI, or

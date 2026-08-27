@@ -159,6 +159,68 @@ def test_the_app_knows_about_every_job(bundle):
         )
 
 
+def test_the_app_may_actually_run_every_job_it_knows_about(bundle):
+    """Knowing a job id is not permission to run it.
+
+    DBX_JOB_IDS and the app's `job` resources are two halves of one thing: the
+    first tells the app which job runs a model, the second is what stops
+    Databricks refusing `run-now` with
+
+        HTTP 403 PERMISSION_DENIED: ... does not have Manage Run or Owner
+        permissions on job <id>
+
+    A model added to one and not the other passes every other test here and
+    fails the first time someone presses Run.
+    """
+    app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+    granted = {
+        r["job"]["id"]: r["job"]["permission"] for r in app["resources"] if "job" in r
+    }
+
+    for model in MODELS:
+        reference = f"${{resources.jobs.model_{model}.id}}"
+        assert reference in granted, (
+            f"{model} is in DBX_JOB_IDS but the app has no `job` resource for it, "
+            f"so run-now will be refused with 403"
+        )
+        # CAN_MANAGE_RUN starts and cancels runs. CAN_MANAGE would also let the
+        # app rewrite the job definition, which the bundle owns.
+        assert granted[reference] == "CAN_MANAGE_RUN", (
+            f"{model}: {granted[reference]} is more than triggering needs"
+        )
+
+    assert len(granted) == len(MODELS), "a job is granted that no model claims"
+
+
+def test_the_read_path_may_use_the_warehouse(bundle):
+    """Backfill, history and startup reconciliation all query through it, and
+    a missing grant shows up as a 403 at run time rather than at deploy."""
+    app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+    warehouse = next(r for r in app["resources"] if "sql_warehouse" in r)["sql_warehouse"]
+    assert warehouse["id"] == "${var.warehouse_id}", "grant the warehouse the app is told to use"
+    assert warehouse["permission"] == "CAN_USE", "running queries, not administering"
+
+
+def test_no_resource_is_declared_that_a_deploy_cannot_validate(bundle):
+    """A declared app resource is checked at DEPLOY time, so one naming
+    something absent fails the whole deploy before anything is uploaded —
+    which is how `oauth-client-secret` once 404'd a deploy for being an opt-in
+    feature nobody had opted into.
+
+    Everything declared here must therefore be something the deploy is certain
+    to find: a job this same bundle creates, the volume, the ingress secret, or
+    the warehouse the app cannot work without anyway. Lakebase is the one that
+    may legitimately not exist yet (`lakebase_host` defaults to empty), so it
+    stays commented out.
+    """
+    app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
+    kinds = {k for r in app["resources"] for k in r if k not in {"name", "description"}}
+    assert "database" not in kinds and "postgres" not in kinds, (
+        "a Lakebase resource fails the deploy when no instance exists; keep it "
+        "opt-in, like the SP secret"
+    )
+
+
 def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
     app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
     env = {e["name"]: e for e in app["config"]["env"]}
