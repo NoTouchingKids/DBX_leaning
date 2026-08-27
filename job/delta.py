@@ -103,6 +103,9 @@ class SparkWriter:
             raise RuntimeError("no Spark session, and none could be created")
         self._spark = spark
         self._lock = threading.Lock()
+        #: table -> its Delta schema, read once. A metadata round trip per
+        #: flush would be wasteful and the schema does not change under us.
+        self._schemas: dict[str, Any] = {}
 
     @staticmethod
     def _session() -> Any | None:
@@ -148,11 +151,53 @@ class SparkWriter:
                 return session
         return None
 
+    def _schema(self, table: str) -> Any:
+        """The target table's real schema, cached.
+
+        Read from Unity Catalog rather than inferred, because inference cannot
+        see what a batch does not contain — see `write_batch`.
+        """
+        if table not in self._schemas:
+            self._schemas[table] = self._spark.table(table).schema
+        return self._schemas[table]
+
     def write_batch(self, table: str, rows: list[dict[str, Any]]) -> int:
+        """Append `rows` to `table`, against the table's own schema.
+
+        NOT `createDataFrame(rows)`. Inference works from the batch alone, and
+        a column that is null in every row of a batch has no type to infer:
+
+            [CANNOT_DETERMINE_TYPE] Some of types cannot be determined after
+            inferring.
+
+        That is not an edge case here. `run_progress.percent_complete` is null
+        for the whole of a MILP run — genuinely unknowable, and the DDL says so
+        — and `primary_metric_label` is null for any model that does not set
+        one. So the first flush of a Gurobi run failed, took the results table
+        with it, and the harness correctly refused to report SUCCEEDED over a
+        lost write. Every model would hit it; this one got there first.
+
+        The table already exists with an authoritative schema, so use it. Rows
+        become tuples in the schema's field order, which also means a key the
+        table does not have fails here, named, rather than being silently
+        dropped by a dict-to-column match.
+        """
         if not rows:
             return 0
         with self._lock:
-            df = self._spark.createDataFrame(rows)
+            schema = self._schema(table)
+            names = [field.name for field in schema.fields]
+            known = set(names)
+            for row in rows:
+                unexpected = set(row) - known
+                if unexpected:
+                    raise ValueError(
+                        f"{table} has no column(s) {sorted(unexpected)}; "
+                        f"it has {names}. A row that does not fit the table is a "
+                        f"schema mismatch, not something to write around."
+                    )
+            ordered = [tuple(row.get(name) for name in names) for row in rows]
+            df = self._spark.createDataFrame(ordered, schema=schema)
             df.write.mode("append").saveAsTable(table)
         return len(rows)
 

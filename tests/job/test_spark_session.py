@@ -155,3 +155,128 @@ class TestWithoutPyspark:
 
         with pytest.raises(RuntimeError, match="no durable writer available"):
             select_writer("auto", local_root=str(tmp_path))
+
+
+class Field:
+    def __init__(self, name):
+        self.name = name
+
+
+class Schema:
+    def __init__(self, *names):
+        self.fields = [Field(n) for n in names]
+
+
+class FakeTable:
+    def __init__(self, schema):
+        self.schema = schema
+
+
+class RecordingSpark:
+    """Enough Spark to see exactly what write_batch builds."""
+
+    def __init__(self, schemas):
+        self._schemas = schemas
+        self.created: list[tuple] = []
+        self.saved: list[str] = []
+        self.table_lookups: list[str] = []
+
+    def table(self, name):
+        self.table_lookups.append(name)
+        if name not in self._schemas:
+            raise RuntimeError(f"[TABLE_OR_VIEW_NOT_FOUND] {name}")
+        return FakeTable(self._schemas[name])
+
+    def createDataFrame(self, data, schema=None):  # noqa: N802 - Spark's name
+        self.created.append((data, schema))
+        return self
+
+    @property
+    def write(self):
+        return self
+
+    def mode(self, _how):
+        return self
+
+    def saveAsTable(self, name):  # noqa: N802 - Spark's name
+        self.saved.append(name)
+
+
+PROGRESS = Schema(
+    "run_id", "seq", "ts", "elapsed_seconds", "percent_complete",
+    "primary_metric", "primary_metric_label", "payload_json",
+)
+
+
+class TestWritingAgainstTheTablesOwnSchema:
+    """`createDataFrame(rows)` infers from the batch alone, and a column that
+    is null in every row of a batch has no type to infer:
+
+        [CANNOT_DETERMINE_TYPE] Some of types cannot be determined after
+        inferring.
+
+    Not an edge case: `run_progress.percent_complete` is null for the whole of
+    a MILP run, so the first flush of a Gurobi run failed and took the results
+    table with it.
+    """
+
+    def test_a_batch_whose_column_is_null_throughout_still_writes(self):
+        spark = RecordingSpark({"main.dbx_leaning.run_progress": PROGRESS})
+        rows = [
+            {
+                "run_id": "r1", "seq": i, "ts": 1, "elapsed_seconds": 0.5,
+                "percent_complete": None,        # a MILP cannot know this
+                "primary_metric": 129.5,
+                "primary_metric_label": None,    # nor did this model set one
+                "payload_json": "{}",
+            }
+            for i in range(3)
+        ]
+
+        written = SparkWriter(spark).write_batch("main.dbx_leaning.run_progress", rows)
+
+        assert written == 3
+        data, schema = spark.created[0]
+        assert schema is PROGRESS, "the table's schema, not inference"
+        assert spark.saved == ["main.dbx_leaning.run_progress"]
+
+    def test_rows_are_ordered_to_match_the_schema(self):
+        """A dict has no order. Passing tuples in field order removes any
+        question of which value lands in which column."""
+        spark = RecordingSpark({"t": Schema("a", "b", "c")})
+        SparkWriter(spark).write_batch("t", [{"c": 3, "a": 1, "b": 2}])
+
+        data, _ = spark.created[0]
+        assert data == [(1, 2, 3)]
+
+    def test_a_column_the_row_omits_becomes_null(self):
+        spark = RecordingSpark({"t": Schema("a", "b")})
+        SparkWriter(spark).write_batch("t", [{"a": 1}])
+
+        data, _ = spark.created[0]
+        assert data == [(1, None)]
+
+    def test_a_key_the_table_does_not_have_is_refused_by_name(self):
+        """Silently dropping it would lose data while reporting success."""
+        spark = RecordingSpark({"t": Schema("a")})
+        with pytest.raises(ValueError, match=r"no column\(s\) \['typo'\]"):
+            SparkWriter(spark).write_batch("t", [{"a": 1, "typo": 2}])
+
+    def test_the_schema_is_read_once_per_table(self):
+        spark = RecordingSpark({"t": Schema("a")})
+        writer = SparkWriter(spark)
+        for _ in range(4):
+            writer.write_batch("t", [{"a": 1}])
+
+        assert spark.table_lookups == ["t"], "a metadata round trip per flush is waste"
+
+    def test_an_empty_batch_touches_nothing(self):
+        spark = RecordingSpark({"t": Schema("a")})
+        assert SparkWriter(spark).write_batch("t", []) == 0
+        assert spark.table_lookups == [] and spark.created == []
+
+    def test_a_missing_table_fails_loudly(self):
+        """Rather than being inferred into existence with the wrong types."""
+        spark = RecordingSpark({})
+        with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
+            SparkWriter(spark).write_batch("main.dbx_leaning.nope", [{"a": 1}])
