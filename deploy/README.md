@@ -285,10 +285,18 @@ resources/app.yml  (the bundle declares)   ->  value_from
 ```
 
 **`DBX_JOB_IDS` is only in the bundle.** Job ids do not exist until the bundle
-creates the jobs, so a hand deploy cannot have them: `/healthz` reports "no
-DBX_JOB_IDS configured; no model can be triggered from this app", and
-everything else — observing runs someone else triggered, streaming, history,
-results — works normally. Use `databricks bundle deploy` to get triggering.
+creates the jobs, so a hand deploy cannot have them, and this is the symptom:
+
+```
+GET /api/models  ->  {"models": [], "default_job_id": null}
+```
+
+`/healthz` names it — `degraded.job_ids`: "no DBX_JOB_IDS configured; no model
+can be triggered from this app" — and everything else (observing runs someone
+else triggered, streaming, history, results) works normally.
+
+The cure is `databricks bundle run dbx_leaning`, not another `bundle deploy`.
+See the next section for why those are two steps.
 
 **Bind `$DATABRICKS_APP_PORT`, never a literal.** Apps assigns the port. Bind
 anything else and the platform's health check never connects, so the
@@ -320,8 +328,27 @@ own tables.
 ```bash
 cd app/client && bun install && bun run build && cd ../..   # only if the SPA changed
 databricks bundle validate                           # schema and references
-databricks bundle deploy -t dev
+databricks bundle deploy -t dev                      # jobs + app SOURCE
+databricks bundle run    dbx_leaning -t dev          # the app DEPLOYMENT
 ```
+
+**Both commands, every time the app changes.** They do different things, and
+the second is the one that is easy to forget:
+
+- `bundle deploy` creates and updates the *resources* — the eleven jobs, and
+  the app object — and uploads `app/` to the workspace. It does not create an
+  app deployment, so the running app keeps serving whatever it was serving.
+- `bundle run <app key>` creates the app deployment from what was uploaded and
+  starts it. `dbx_leaning` is the resource key in `resources/app.yml`, not the
+  app's `name:` (`dbx-leaning`, with a hyphen).
+
+Deploy without run and the app looks deployed: `bundle deploy` reports its
+resources updated, the app answers, and it is running the *previous*
+deployment's code and env. If that previous deployment came from the Apps UI,
+its env came from `app/app.yaml`, which deliberately has no `DBX_JOB_IDS` — so
+`/api/models` is empty and no model can be triggered. `databricks apps get
+dbx-leaning -o json` is how to see it: an absent or stale `active_deployment`
+is exactly this.
 
 The build step is only needed when `app/client/` has changed since `app/dist/`
 was last committed, because `app/dist/` is in git — which is also what makes
