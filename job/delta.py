@@ -92,25 +92,61 @@ class DeltaRsWriter:
 
 
 class SparkWriter:
-    """Fallback, and a legitimate one. Uses the session the job already has."""
+    """The write path. Uses the session the job already has, or asks for one."""
 
     name = "spark"
 
     def __init__(self, spark: Any | None = None) -> None:
         if spark is None:
-            spark = self._active_session()
+            spark = self._session()
         if spark is None:
-            raise RuntimeError("no active Spark session")
+            raise RuntimeError("no Spark session, and none could be created")
         self._spark = spark
         self._lock = threading.Lock()
 
     @staticmethod
-    def _active_session() -> Any | None:
-        try:
-            from pyspark.sql import SparkSession
-        except ImportError:
-            return None
-        return SparkSession.getActiveSession()
+    def _session() -> Any | None:
+        """Get a session, creating or attaching to one if there is none here.
+
+        Three routes, cheapest first, because `getActiveSession()` alone is not
+        enough and the reason is easy to miss:
+
+        **`getActiveSession()` is THREAD-LOCAL.** A serverless task execs the
+        entrypoint inside an ipykernel that already runs an event loop, so
+        `job/main.py::_run` puts the harness on a worker thread — and a worker
+        thread has no active session even when the process plainly has one. It
+        looked exactly like a runtime with no Spark at all:
+
+            no durable writer available: there is no active Spark session
+
+        `getOrCreate()` reads the *default* session, which is process-wide, so
+        it finds what the kernel already built and creates nothing. Only where
+        there is genuinely nothing does it build one.
+
+        `DatabricksSession` comes first of the two because on serverless the
+        session is a Spark Connect client, and databricks-connect is the thing
+        that knows how to make one. It is absent on a classic runtime, where
+        plain pyspark is right.
+
+        None of this can fire by accident off a workspace: pyspark is
+        deliberately absent from this project's dependency set (see the note in
+        pyproject.toml), so every import below raises ImportError locally and
+        the caller falls through to JSONL.
+        """
+        for describe, build in (
+            ("the active session", _active_session),
+            ("databricks-connect", _databricks_connect_session),
+            ("pyspark's default session", _default_session),
+        ):
+            try:
+                session = build()
+            except Exception as exc:  # noqa: BLE001 - each route is optional
+                log.info("no Spark from %s: %s", describe, exc)
+                continue
+            if session is not None:
+                log.info("Spark session from %s", describe)
+                return session
+        return None
 
     def write_batch(self, table: str, rows: list[dict[str, Any]]) -> int:
         if not rows:
@@ -122,6 +158,30 @@ class SparkWriter:
 
     def close(self) -> None:
         return None
+
+
+def _active_session() -> Any | None:
+    """Thread-local, and free. Right whenever the caller is on the thread that
+    made the session — which the harness is not, on serverless."""
+    from pyspark.sql import SparkSession
+
+    return SparkSession.getActiveSession()
+
+
+def _databricks_connect_session() -> Any | None:
+    """Serverless: the session is a Spark Connect client, and this is what
+    knows how to build one. Absent on a classic runtime."""
+    from databricks.connect import DatabricksSession
+
+    return DatabricksSession.builder.getOrCreate()
+
+
+def _default_session() -> Any | None:
+    """Process-wide rather than thread-local, so it finds a session another
+    thread created. Builds one only where there is genuinely none."""
+    from pyspark.sql import SparkSession
+
+    return SparkSession.builder.getOrCreate()
 
 
 class JsonlWriter:
@@ -227,8 +287,9 @@ def select_writer(
         return JsonlWriter(local_root)
 
     raise RuntimeError(
-        "no durable writer available: there is no active Spark session, and "
-        "delta-rs is not implemented (see DELTA_RS_UNIMPLEMENTED). Run on a "
-        "cluster with Spark, or set DBX_ALLOW_LOCAL_WRITER=1 to write local "
+        "no durable writer available: no Spark session could be found or "
+        "created (the log above says what each of the three routes reported), "
+        "and delta-rs is not implemented (see DELTA_RS_UNIMPLEMENTED). Run "
+        "somewhere with Spark, or set DBX_ALLOW_LOCAL_WRITER=1 to write local "
         "JSONL for development."
     )

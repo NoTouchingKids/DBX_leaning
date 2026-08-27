@@ -155,7 +155,7 @@ def test_auto_never_picks_delta_rs():
 
     # No Spark session here and no local opt-in, so auto has nothing to choose
     # — and the error must name Spark, not fall through to delta-rs.
-    with pytest.raises(RuntimeError, match="no active Spark session"):
+    with pytest.raises(RuntimeError, match="no Spark session could be found or created"):
         select_writer("auto")
 
 
