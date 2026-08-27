@@ -241,8 +241,19 @@ export const SSE_EVENTS = ["log", "progress", "status", "result"] as const;
  * ------------------------------------------------------------------ */
 
 export interface ModelsResponse {
-  models: Array<{ name: string; job_id: string }>;
-  default_job_id: string | null;
+  models: Array<{ name: string; job_id: number }>;
+  default_job_id: number | null;
+  /** Where the server's job map came from.
+   *
+   *  `"config"` is the normal path — `DBX_JOB_IDS`, interpolated by the
+   *  bundle. `"discovered"` means it was absent and the server asked the
+   *  workspace instead: triggering works, but the live app deployment was not
+   *  created by `databricks bundle run`, so nothing else the bundle sets
+   *  reached the app either. `"none"` is an empty `models`, and `detail` then
+   *  carries the reason. */
+  source: "config" | "discovered" | "none";
+  /** Only present when `models` is empty — why it is. */
+  detail?: string;
 }
 
 export interface WhoamiResponse {

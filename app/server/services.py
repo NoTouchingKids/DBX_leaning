@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from shared.tables import TableSet
 
 from .broadcaster import Broadcaster, InProcessBroadcaster
 from .config import AppConfig
+from .discovery import map_jobs_to_models
 from .jobs_api import JobsApi
 from .oauth import OAuthTokenProvider
 from .repository import RunRepository
@@ -83,6 +85,13 @@ class ServiceHub:
         #: warehouse-backed one — see app/server/store.py for why it moved.
         self.store: RunStore | None = None
         self.degraded: dict[str, str] = {}
+        #: Where `config.job_ids` came from — "config" when DBX_JOB_IDS was
+        #: set, "discovered" when the workspace was asked instead, "none" when
+        #: neither worked. Reported on `/healthz` and `/api/models`, because
+        #: "discovered" means the live app deployment was not created by the
+        #: bundle, and so nothing else in `resources/app.yml` reached the app
+        #: either — the app volume, the ingress token, the Lakebase host.
+        self.job_ids_source: str = "none"
         #: The app's durable filesystem, or None when unconfigured or
         #: unreachable. A route needing it should 503 rather than fall back
         #: to local disk, which disappears with the container.
@@ -131,12 +140,77 @@ class ServiceHub:
             )
             log.warning(self.degraded["jobs_api"])
 
-        if not cfg.job_ids and cfg.default_job_id is None:
-            self.degraded["job_ids"] = (
-                "no DBX_JOB_IDS configured; no model can be triggered from this app"
-            )
-
+        await self._resolve_job_ids(cfg)
         self._check_volume(cfg)
+
+    async def _resolve_job_ids(self, cfg: AppConfig) -> None:
+        """Make sure the app knows which job runs which model.
+
+        `DBX_JOB_IDS` is the normal answer and always wins — it is the
+        allow-list as well as the map, so a deployment that names three models
+        means three, not "and whatever else is in the workspace".
+
+        Absent, ask the workspace. The env var only reaches the app when the
+        LIVE app deployment was created by the bundle; a deploy that skipped
+        `bundle run`, or a redeploy from the Apps UI, leaves the app running an
+        environment built from `app/app.yaml`, which cannot have job ids
+        because a hand deploy has no bundle to interpolate them from. That
+        produced an app where everything worked except that `/api/models` was
+        empty, with nothing on the app itself to point at.
+
+        Discovery is best-effort by construction: it needs the Jobs API, which
+        needs a host and a credential, and any of those missing lands in the
+        same degraded state as before. It never raises into startup.
+        """
+        if cfg.job_ids or cfg.default_job_id is not None:
+            self.job_ids_source = "config"
+            return
+
+        if self.jobs_api is None:
+            self.degraded["job_ids"] = (
+                "no DBX_JOB_IDS configured and no Jobs API to discover them from; "
+                "no model can be triggered from this app"
+            )
+            log.warning(self.degraded["job_ids"])
+            return
+
+        try:
+            # Bounded: startup must not hang on a slow or wedged workspace.
+            jobs = await asyncio.wait_for(self.jobs_api.list_jobs(), timeout=30)
+        except Exception as exc:  # noqa: BLE001 - a failed lookup is degraded, not fatal
+            self.degraded["job_ids"] = (
+                f"no DBX_JOB_IDS configured and discovering jobs failed ({exc}); "
+                "no model can be triggered from this app"
+            )
+            log.warning(self.degraded["job_ids"], exc_info=True)
+            return
+
+        found = map_jobs_to_models(jobs)
+        if not found.job_ids:
+            self.degraded["job_ids"] = (
+                f"no DBX_JOB_IDS configured, and none of the {len(jobs)} jobs visible to "
+                "this app are tagged project=dbx-leaning or named '... dbx-leaning · <model>'; "
+                "no model can be triggered from this app"
+            )
+            log.warning(self.degraded["job_ids"])
+            return
+
+        self.config = replace(cfg, job_ids=found.job_ids)
+        self.job_ids_source = "discovered"
+        log.warning(
+            "DBX_JOB_IDS was not set; discovered %d job(s) from the workspace: %s. "
+            "This works, but it means the live app deployment was not created by "
+            "`databricks bundle run`, so nothing else in resources/app.yml reached "
+            "the app either.",
+            len(found.job_ids),
+            ", ".join(found.job_ids),
+        )
+        if found.ambiguous:
+            self.degraded["job_ids_ambiguous"] = (
+                "more than one job claims the same model, so the highest id won: "
+                + "; ".join(f"{m}: {ids}" for m, ids in found.ambiguous.items())
+            )
+            log.warning(self.degraded["job_ids_ambiguous"])
 
     def _check_volume(self, cfg: AppConfig) -> None:
         """Is the app's durable filesystem actually there?

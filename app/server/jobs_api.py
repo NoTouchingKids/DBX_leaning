@@ -123,6 +123,42 @@ class JobsApi:
             return None
         return resp.json()
 
+    async def list_jobs(self, *, page_limit: int = 20) -> list[dict[str, Any]]:
+        """Every job in the workspace, paged.
+
+        Used only at startup, and only to find this platform's own jobs when
+        the environment did not name them (see `discovery.py`). Raises, unlike
+        `get_run`: the caller decides whether an unreachable Jobs API is fatal,
+        and here it is not — it degrades to "nothing can be triggered", which
+        is the state discovery was trying to get out of.
+
+        `page_limit` bounds the walk rather than the result. A workspace with
+        more jobs than this many pages will not have ours found, which beats
+        an app that never finishes starting.
+        """
+        if not self.available:
+            raise JobsApiUnavailable("no workspace host configured (DATABRICKS_HOST)")
+
+        http = await self._http()
+        headers = await bearer_headers(self.token, self.token_provider)
+        jobs: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"limit": 100, "expand_tasks": "false"}
+
+        for _ in range(page_limit):
+            resp = await http.get(f"{self.host}/api/2.2/jobs/list", params=params, headers=headers)
+            if resp.status_code >= 400:
+                raise JobsApiError(f"jobs/list failed: HTTP {resp.status_code} {resp.text[:400]}")
+            payload = resp.json()
+            jobs.extend(payload.get("jobs") or [])
+            token = payload.get("next_page_token")
+            if not token:
+                break
+            params = {**params, "page_token": token}
+        else:
+            log.warning("stopped listing jobs after %s pages; some may be missing", page_limit)
+
+        return jobs
+
     @staticmethod
     def terminal_status(run: dict[str, Any]) -> str | None:
         """The run's final status, or None if it is still going."""

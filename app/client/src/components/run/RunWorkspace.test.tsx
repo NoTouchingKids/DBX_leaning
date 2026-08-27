@@ -37,7 +37,7 @@ function fakeServer({ live }: { live: boolean }) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
     const body = url.startsWith("/api/models")
-      ? { models: [{ name: "mcmc", job_id: "1" }], default_job_id: null }
+      ? { models: [{ name: "mcmc", job_id: 1 }], default_job_id: null, source: "config" }
       : url.startsWith(`/api/runs/${RUN_ID}/messages`)
         ? { run_id: RUN_ID, after_seq: -1, count: 0, messages: [], more: false, next_after_seq: -1 }
         : url.startsWith(`/api/runs/${RUN_ID}`)

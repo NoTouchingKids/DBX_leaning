@@ -41,6 +41,14 @@ async def healthz(hub: Hub) -> dict:
             "kind": getattr(hub.store, "name", None),
             "server_version": getattr(hub.store, "server_version", None),
         },
+        # Where the job map came from. "discovered" is a working app AND a
+        # warning: it means the live app deployment was not created by
+        # `databricks bundle run`, so nothing else in resources/app.yml
+        # reached it either — the volume, the ingress token, the Lakebase host.
+        "job_ids": {
+            "source": hub.job_ids_source,
+            "count": len(hub.config.job_ids),
+        },
         "live_jobs": len(hub.job_sockets.run_ids),
         "messages_ingested": hub.messages_ingested,
     }
@@ -84,6 +92,14 @@ async def models(hub: Hub) -> dict:
             for name in hub.config.triggerable_models
         ],
         "default_job_id": hub.config.default_job_id,
+        # An empty list is the one answer here that needs explaining, and it
+        # used to arrive bare: `{"models": [], "default_job_id": null}` says
+        # nothing about whether the app was misconfigured, unlucky, or simply
+        # not finished starting. `source` and `detail` are what turn it into a
+        # report — "config" means DBX_JOB_IDS was set, "discovered" means the
+        # workspace was asked because it was not, and "none" carries the reason.
+        "source": hub.job_ids_source,
+        **({"detail": hub.degraded["job_ids"]} if "job_ids" in hub.degraded else {}),
     }
 
 
