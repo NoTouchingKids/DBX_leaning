@@ -42,10 +42,20 @@ that work rather than tuned values.
 
 ## The one auth question that goes with this
 
-A job reaching a Databricks App needs a credential the app accepts on the
-handshake. `app/server/routes/ingest.py` checks a shared `DBX_APP_TOKEN` on both the
-WS and HTTP-push ingress, and skips the check entirely when none is
-configured (development posture). Whether that is the right mechanism — or
-whether the job should present an OAuth token for its service principal —
-is a deployment decision, not an ingress one, and belongs with the bundle
-config rather than here.
+**Answered: it needs both, on different headers.**
+
+`app/server/routes/ingest.py` checks a shared `DBX_APP_TOKEN`, which authenticates the
+job *process* and skips entirely when none is configured (development
+posture). That is not a Databricks identity, and the Apps proxy in front of
+the app lets nothing through without one — so a job presenting the shared
+secret in `Authorization` never reaches the app at all.
+
+So the job presents an OAuth token for a service principal in
+`Authorization`, and the shared secret in `X-DBX-App-Token`. `job/auth.py`
+finds an identity from whatever the runtime offers — an explicit token,
+client credentials for the same principal the app uses, a PAT, or the job's
+own `dbutils` identity — and that principal needs `CAN_USE` on the app.
+See "How a job reaches the app" in `deploy/README.md`.
+
+A job with no identity runs unobserved rather than failing, which is the
+same state as the app being down.

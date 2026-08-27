@@ -57,6 +57,14 @@ class JobConfig:
     app_url: str | None = None
     app_token: str | None = None
 
+    #: The workspace, for the OAuth exchange in `job/auth.py`.
+    #:
+    #: `app_token` is the app's OWN check and is not a Databricks identity;
+    #: the Apps proxy in front of the app rejects anything that is not an OAuth
+    #: token, so the two travel on different headers. Absent, the job falls
+    #: back to whatever identity the runtime already gives it.
+    workspace_host: str | None = None
+
     catalog: str = "main"
     schema: str = "dbx_leaning"
     #: Where this model's result rows go. Unqualified names get the
@@ -113,6 +121,8 @@ class JobConfig:
             job_run_id=(e.get("DATABRICKS_JOB_RUN_ID") or "").strip() or None,
             app_url=app_url.rstrip("/") if app_url else None,
             app_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
+            workspace_host=(e.get("DATABRICKS_HOST") or e.get("DBX_WORKSPACE_HOST") or "").strip()
+            or None,
             catalog=e.get("DBX_CATALOG", "main"),
             schema=e.get("DBX_SCHEMA", "dbx_leaning"),
             results_table=(e.get("DBX_RESULTS_TABLE") or "").strip() or None,

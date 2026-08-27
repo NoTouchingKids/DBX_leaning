@@ -11,6 +11,7 @@ design, not by omission.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 
@@ -24,13 +25,29 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["ingest"])
 
 
-def _authorised(hub: ServiceHub, presented: str | None) -> bool:
-    """The job's own credential, distinct from user auth.
+#: Where a job presents the app's own shared secret.
+#:
+#: NOT `Authorization`. That header belongs to the Databricks Apps proxy,
+#: which sits in front of this app and lets nothing through without a
+#: Databricks OAuth token — so a job that put the shared secret there had its
+#: handshake rejected before this code ran, and the run went unobserved with
+#: nothing in the app's log to say so. See `job/auth.py`.
+APP_TOKEN_HEADER = "x-dbx-app-token"
 
-    Whether a job can even reach this endpoint through the Databricks Apps
-    ingress — and with what auth context — is one of the open questions
-    /spike-ws exists to answer. This check is what the app controls.
+
+def _presented(headers: Any) -> str | None:
+    """The shared secret, from its own header or the legacy one.
+
+    `Authorization` is still read so the local dev stack — which has no proxy
+    in front of it, and no OAuth to present — keeps working unchanged, and so
+    a job synced before the header moved still authenticates.
     """
+    return headers.get(APP_TOKEN_HEADER) or headers.get("authorization")
+
+
+def _authorised(hub: ServiceHub, presented: str | None) -> bool:
+    """The job process's own credential, distinct from user auth and from the
+    Databricks identity the proxy already checked."""
     expected = hub.config.job_token
     if not expected:
         return True  # nothing configured: development posture
@@ -46,7 +63,7 @@ async def job_socket(websocket: WebSocket, run_id: str) -> None:
     if hub is None:
         await websocket.close(code=1011, reason="services not initialised")
         return
-    if not _authorised(hub, websocket.headers.get("authorization")):
+    if not _authorised(hub, _presented(websocket.headers)):
         await websocket.close(code=1008, reason="unauthorised")
         return
 
@@ -102,7 +119,7 @@ async def _handle_control(
 async def http_push(run_id: str, request: Request) -> dict:
     """One-way fallback ingest. Cannot carry a reply, and does not pretend to."""
     hub = get_hub(request)
-    if not _authorised(hub, request.headers.get("authorization")):
+    if not _authorised(hub, _presented(request.headers)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "unauthorised")
 
     body = await request.json()

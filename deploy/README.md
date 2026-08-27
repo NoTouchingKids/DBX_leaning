@@ -275,6 +275,67 @@ If a previous run put `.venv` in the workspace, delete it there once:
 databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
 ```
 
+## How a job reaches the app
+
+Two different authentications happen on one request, and there is only one
+`Authorization` header — which is what made this subtle.
+
+| What | Authenticates | Header |
+| --- | --- | --- |
+| Databricks Apps proxy | *who is calling* — a service principal | `Authorization: Bearer <OAuth>` |
+| The app's own ingress check | *the job process* | `X-DBX-App-Token: <shared secret>` |
+
+The app sits behind the Apps proxy, which lets nothing through without a
+Databricks OAuth token. The shared `DBX_APP_TOKEN` the app hands each run at
+trigger time is **not** a Databricks identity, so a job presenting it in
+`Authorization` has its handshake rejected before the app sees anything — a run
+that goes unobserved with nothing in the app's log to say why. `job/auth.py`
+supplies the OAuth half and the shared secret moved to its own header.
+`app/server/routes/ingest.py` still reads `Authorization` as well, so the local dev
+stack (no proxy, no OAuth) works unchanged.
+
+### Which identity the job uses
+
+Any of these, in order, because a job can legitimately have any of them:
+
+1. `DBX_APP_OAUTH_TOKEN` — handed in directly. An escape hatch.
+2. `DBX_OAUTH_CLIENT_ID`/`DBX_OAUTH_CLIENT_SECRET` (or the `DATABRICKS_`
+   spellings), exchanged at `/oidc/v1/token`. **This is the "same principal as
+   the app" case** — the same exchange `app/server/oauth.py` does.
+3. `DATABRICKS_TOKEN`.
+4. **The job's own runtime identity**, via `dbutils`. No secret to distribute
+   anywhere: it is the principal the task already runs as, and it is the
+   option to prefer unless you specifically want app and job to be one
+   identity.
+
+Whichever answers, the job logs which one it was. Nothing here is fatal: a job
+with no Databricks identity runs unobserved, exactly as it does when the app is
+simply down, and the durable path never depended on the app being reachable.
+
+### The grant that makes it work
+
+**That principal needs `CAN_USE` on the app.** Without it the proxy refuses the
+handshake no matter how good the token is:
+
+```bash
+databricks apps set-permissions dbx-leaning --json '{
+  "access_control_list": [
+    {"service_principal_name": "<the principal the job runs as>",
+     "permission_level": "CAN_USE"}
+  ]
+}'
+```
+
+For option 4 that principal is the job's `run_as` — the deploying user by
+default, or whatever `run_as` the bundle sets. For option 2 it is the
+`oauth_client_id` service principal, which needs the same grant even though it
+already has one on the jobs.
+
+If this is missing, the symptom is a run that completes normally with
+`observed=False` in its log and no live telemetry in the UI, while every row
+still lands in Delta. Check the job log for the line naming the credential
+source, then the app's own log for an attach that never arrives.
+
 ## Permission to run a job
 
 Knowing a job id is not permission to run it. `DBX_JOB_IDS` tells the app

@@ -160,3 +160,45 @@ def test_an_unauthorised_websocket_is_closed_rather_than_served(app_and_hub, con
             with client.websocket_connect("/ws/job/r1") as ws:
                 ws.receive_bytes()
     assert not hub.job_sockets.is_connected("r1")
+
+
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        # The header a job uses now. `Authorization` belongs to the Databricks
+        # Apps proxy, which lets nothing through without a Databricks OAuth
+        # token — a job that put the shared secret there had its handshake
+        # rejected before this app saw anything.
+        ({"X-DBX-App-Token": "s3cret"}, 202),
+        ({"X-DBX-App-Token": "Bearer s3cret"}, 202),
+        ({"X-DBX-App-Token": "wrong"}, 401),
+        # Still read, so the local dev stack (no proxy, no OAuth) works
+        # unchanged and a job synced before the header moved still attaches.
+        ({"Authorization": "Bearer s3cret"}, 202),
+        # Both, as a real deployment sends them: OAuth for the proxy, the
+        # shared secret for this check. The proxy's token is not ours.
+        (
+            {"Authorization": "Bearer some-oauth-token", "X-DBX-App-Token": "s3cret"},
+            202,
+        ),
+        # And the reverse must not pass: an OAuth token is not the app's secret.
+        ({"Authorization": "Bearer some-oauth-token"}, 401),
+    ],
+)
+def test_the_shared_secret_has_its_own_header_and_the_old_one_still_works(
+    app_and_hub, config, headers, expected
+):
+    app, _ = app_and_hub(config(job_token="s3cret"))
+    with TestClient(app) as client:
+        resp = client.post("/api/runs/r1/push", json={"messages": []}, headers=headers)
+    assert resp.status_code == expected
+
+
+def test_a_websocket_authenticates_on_the_same_header(app_and_hub, config):
+    app, hub = app_and_hub(config(job_token="s3cret"))
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/ws/job/r1",
+            headers={"Authorization": "Bearer an-oauth-token", "X-DBX-App-Token": "s3cret"},
+        ):
+            assert hub.job_sockets.is_connected("r1")

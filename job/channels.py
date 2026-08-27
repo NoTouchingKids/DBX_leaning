@@ -16,6 +16,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
+from .auth import AppCredential, ingress_headers
 from .shared.codec import to_jsonable
 from .shared.envelope import Message
 from .shared.protocol import ControlFrame, ControlKind, hello, pack_frame, pong, unpack_frame
@@ -71,6 +72,7 @@ class WebSocketChannel:
         run_id: str,
         *,
         token: str | None = None,
+        credential: AppCredential | None = None,
         on_control: Callable[[ControlFrame], None] | None = None,
         next_seq: Callable[[], int] | None = None,
         reconnect_s: float = 30.0,
@@ -80,6 +82,9 @@ class WebSocketChannel:
         self.url = url
         self.run_id = run_id
         self.token = token
+        #: The Databricks identity the Apps proxy demands. Distinct from
+        #: `token`, which is the app's own check — see `job/auth.py`.
+        self.credential = credential
         self.on_control = on_control
         self.next_seq = next_seq or (lambda: 0)
         self.reconnect_s = reconnect_s
@@ -141,7 +146,12 @@ class WebSocketChannel:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - never propagate into the run
-                log.info("ws session ended (%s); retrying in %ss", exc, self.reconnect_s)
+                log.info(
+                    "ws session ended (%s); retrying in %ss%s",
+                    exc,
+                    self.reconnect_s,
+                    _diagnosis(exc),
+                )
             self._ws = None
             if self._stopped:
                 return
@@ -153,7 +163,7 @@ class WebSocketChannel:
     async def _session(self) -> None:
         connect = self._connect or _default_connect
         self.connect_attempts += 1
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = await ingress_headers(self.token, self.credential)
         async with connect(self.url, additional_headers=headers) as ws:
             self._ws = ws
             self.connects += 1
@@ -205,6 +215,29 @@ async def _safe_send(ws: WebSocketLike, data: bytes) -> None:
         pass
 
 
+def _diagnosis(exc: Exception) -> str:
+    """Translate the one failure that does not say what it means.
+
+    An unauthenticated handshake does not come back 401. The Databricks Apps
+    proxy answers it with a 302 to the OAuth login page, the client follows
+    the redirect, and the error is about the URL it landed on:
+
+        ws session ended (https://.../oidc/oauth2/v2.0/authorize?...
+        isn't a valid URI: scheme isn't ws or wss)
+
+    Nothing in that names the cause. It is not a bad URL — it is the proxy
+    asking a machine to log in through a browser.
+    """
+    text = str(exc)
+    if "/oidc/" not in text and "authorize" not in text:
+        return ""
+    return (
+        " — that redirect is the Databricks Apps proxy rejecting the handshake: "
+        "no Databricks OAuth token was accepted. See job/auth.py; the principal "
+        "this job runs as needs CAN_USE on the app"
+    )
+
+
 def _default_connect(url: str, **kwargs: Any) -> Any:
     # Returns websockets' own connect object, which satisfies ConnectLike in
     # practice without being structurally identical to it. The Protocol is
@@ -224,12 +257,14 @@ class HttpPushChannel:
         url: str,
         *,
         token: str | None = None,
+        credential: AppCredential | None = None,
         timeout_s: float = 10.0,
         client: HttpClientLike | None = None,
         failure_backoff_s: float = 15.0,
     ) -> None:
         self.url = url
         self.token = token
+        self.credential = credential
         self.timeout_s = timeout_s
         self._client: HttpClientLike | None = client
         self._owns_client = client is None
@@ -255,7 +290,7 @@ class HttpPushChannel:
         client = self._client
         if client is None:  # start() could not build one
             return False
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = await ingress_headers(self.token, self.credential)
         payload = {"messages": [to_jsonable(m) for m in msgs]}
         try:
             resp = await client.post(self.url, json=payload, headers=headers)

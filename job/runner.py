@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from .auth import AppCredential
 from .cancellation import CancellationToken
 from .channels import HttpPushChannel, WebSocketChannel
 from .config import JobConfig
@@ -79,11 +80,16 @@ class JobHarness:
             # Normal case, not an error: apps run ~8h/day, jobs do not.
             log.info("no DBX_APP_URL — running unobserved, durable path only")
             return []
+        # One credential, shared by both channels: the token exchange is per
+        # principal, not per connection, and the push channel would otherwise
+        # do one on every flush.
+        credential = AppCredential(host=self.cfg.workspace_host)
         return [
             WebSocketChannel(
                 ws_url,
                 self.cfg.run_id,
                 token=self.cfg.app_token,
+                credential=credential,
                 on_control=self._on_control,
                 next_seq=lambda: self.seq.issued,
                 reconnect_s=self.cfg.ws_reconnect_s,
@@ -92,6 +98,7 @@ class JobHarness:
             HttpPushChannel(
                 push_url,
                 token=self.cfg.app_token,
+                credential=credential,
                 timeout_s=self.cfg.http_timeout_s,
             ),
         ]
