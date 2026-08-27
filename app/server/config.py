@@ -12,6 +12,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .store import DEFAULT_SCHEMA as DEFAULT_LAKEBASE_SCHEMA
+
 __all__ = ["AppConfig"]
 
 
@@ -66,6 +68,13 @@ class AppConfig:
     #: thing here. Absent means fall back to the warehouse-backed store, so a
     #: deployment is never blocked on provisioning a database.
     lakebase_dsn: str | None = None
+
+    #: The Postgres schema `run_status` lives in. Deliberately not `public`:
+    #: since PostgreSQL 15 that schema no longer grants CREATE to `PUBLIC`, so
+    #: a role that does not own the database cannot create a table there. The
+    #: default is imported from `store.py` rather than retyped, so the two
+    #: cannot drift.
+    lakebase_schema: str = DEFAULT_LAKEBASE_SCHEMA
 
     #: Shared secret a job presents on the WS/push ingress. Distinct from any
     #: user auth: the platform proxy authenticates humans, this authenticates
@@ -157,6 +166,7 @@ class AppConfig:
             default_job_id=int(default_job) if default_job else None,
             public_url=public_url,
             lakebase_dsn=lakebase_dsn,
+            lakebase_schema=(e.get("DBX_LAKEBASE_SCHEMA") or "").strip() or DEFAULT_LAKEBASE_SCHEMA,
             max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
             job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),

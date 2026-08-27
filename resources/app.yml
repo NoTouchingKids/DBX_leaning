@@ -191,6 +191,9 @@ resources:
             value: ${var.lakebase_port}
           - name: DBX_LAKEBASE_USER
             value: ${var.lakebase_user}
+          # Not `public` — see the variable's description in databricks.yml.
+          - name: DBX_LAKEBASE_SCHEMA
+            value: ${var.lakebase_schema}
 
           # --- who the app authenticates as ------------------------------
           #

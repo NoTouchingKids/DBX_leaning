@@ -38,6 +38,7 @@ complexity, not before.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -46,12 +47,16 @@ from shared.envelope import TERMINAL_STATUSES, RunStatus, now_ms
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_SCHEMA",
     "RunRecord",
     "RunStore",
     "PostgresRunStore",
     "WarehouseRunStore",
     "SlotDenied",
     "DuplicateRun",
+    "UnsafeSchemaName",
+    "qualified",
+    "schema_sql",
     "TERMINAL_SQL_LIST",
 ]
 
@@ -175,8 +180,50 @@ class RunStore(Protocol):
 # Postgres / Lakebase
 # --------------------------------------------------------------------------
 
-SCHEMA_SQL = f"""
-CREATE TABLE IF NOT EXISTS run_status (
+#: Postgres identifier, for the one thing here that cannot be a bound
+#: parameter. A schema name is an identifier, not a value.
+_PG_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: Where `run_status` lives inside the Lakebase database.
+#:
+#: NOT `public`, and that is not tidiness. Since PostgreSQL 15 the `public`
+#: schema no longer grants CREATE to `PUBLIC`, so a role that is not the
+#: database owner — which the app's service principal generally is not — gets
+#: `permission denied for schema public` the first time `ensure_schema()`
+#: runs. Owning a schema of its own is the difference between a deploy that
+#: works and one that reports `lakebase` degraded for a reason nobody expects.
+#:
+#: It also mirrors the Unity Catalog side, where everything is in
+#: `<catalog>.dbx_leaning` rather than loose in `default`.
+DEFAULT_SCHEMA = "dbx_leaning"
+
+
+class UnsafeSchemaName(ValueError):
+    """A schema name that will not be interpolated into SQL."""
+
+
+def qualified(schema: str) -> str:
+    """`schema.run_status`, vetted.
+
+    Every statement qualifies the table rather than relying on `search_path`.
+    A search path is per-session state: it would have to be set on each of the
+    connections this store opens per operation, and one that silently reverts
+    to `public` finds a DIFFERENT, empty table rather than failing — which is
+    a far worse outcome than an error.
+    """
+    if not _PG_IDENTIFIER.match(schema):
+        raise UnsafeSchemaName(
+            f"{schema!r} is not a plain Postgres identifier; refusing to build SQL from it"
+        )
+    return f"{schema}.run_status"
+
+
+def schema_sql(schema: str) -> str:
+    table = qualified(schema)
+    return f"""
+CREATE SCHEMA IF NOT EXISTS {schema};
+
+CREATE TABLE IF NOT EXISTS {table} (
     run_id       TEXT PRIMARY KEY,
     job_run_id   TEXT,
     model        TEXT   NOT NULL,
@@ -191,11 +238,12 @@ CREATE TABLE IF NOT EXISTS run_status (
 -- runs that have not finished, and finished runs are the overwhelming
 -- majority once this has been live for a while.
 CREATE INDEX IF NOT EXISTS run_status_active_idx
-    ON run_status (updated_ts DESC)
+    ON {table} (updated_ts DESC)
     WHERE status NOT IN ({TERMINAL_SQL_LIST});
 
-CREATE INDEX IF NOT EXISTS run_status_recent_idx ON run_status (updated_ts DESC);
+CREATE INDEX IF NOT EXISTS run_status_recent_idx ON {table} (updated_ts DESC);
 """
+
 
 #: One well-known lock id, so every ceiling check serialises against the
 #: others. Arbitrary but fixed; changing it would let two app versions race.
@@ -208,8 +256,15 @@ class PostgresRunStore:
 
     name = "postgres"
 
-    def __init__(self, dsn: str, *, password_provider=None, connect=None) -> None:
+    def __init__(
+        self, dsn: str, *, schema: str = DEFAULT_SCHEMA, password_provider=None, connect=None
+    ) -> None:
         self._dsn = dsn
+        #: Vetted at construction, not at first use: a bad schema name should
+        #: fail while the app is starting and can report it, not on the first
+        #: trigger of the day.
+        self._schema = schema
+        self._table = qualified(schema)
         #: Awaited on every connection, when set. Lakebase's password is a
         #: short-lived OAuth token, so it cannot live in the DSN: baked in at
         #: startup it works for about an hour, and this app runs for up to 24.
@@ -243,7 +298,7 @@ class PostgresRunStore:
     async def ensure_schema(self) -> None:
         conn = await self._conn()
         try:
-            await conn.execute(SCHEMA_SQL)
+            await conn.execute(schema_sql(self._schema))
             self.server_version = await self._read_server_version(conn)
         finally:
             await conn.close()
@@ -273,7 +328,7 @@ class PostgresRunStore:
                 await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_CEILING_LOCK_ID,))
 
                 await cur.execute(
-                    f"SELECT COUNT(*) FROM run_status WHERE status NOT IN ({TERMINAL_SQL_LIST})"
+                    f"SELECT COUNT(*) FROM {self._table} WHERE status NOT IN ({TERMINAL_SQL_LIST})"
                 )
                 active = int((await cur.fetchone())[0])
                 if active >= ceiling:
@@ -281,8 +336,8 @@ class PostgresRunStore:
                     raise SlotDenied(active, ceiling)
 
                 await cur.execute(
-                    """
-                    INSERT INTO run_status
+                    f"""
+                    INSERT INTO {self._table}
                         (run_id, job_run_id, model, status, detail,
                          started_ts, updated_ts, requested_by)
                     VALUES (%s, NULL, %s, %s, NULL, %s, %s, %s)
@@ -310,7 +365,7 @@ class PostgresRunStore:
         conn = await self._conn()
         try:
             await conn.execute(
-                "UPDATE run_status SET job_run_id = %s, updated_ts = %s WHERE run_id = %s",
+                f"UPDATE {self._table} SET job_run_id = %s, updated_ts = %s WHERE run_id = %s",
                 (str(job_run_id), now_ms(), run_id),
             )
         finally:
@@ -322,7 +377,7 @@ class PostgresRunStore:
             # Only a run that never started: never delete one that has begun
             # reporting, or a late status write would resurrect a ghost row.
             await conn.execute(
-                "DELETE FROM run_status WHERE run_id = %s AND status = %s",
+                f"DELETE FROM {self._table} WHERE run_id = %s AND status = %s",
                 (run_id, RunStatus.QUEUED.value),
             )
         finally:
@@ -335,8 +390,8 @@ class PostgresRunStore:
         conn = await self._conn()
         try:
             await conn.execute(
-                """
-                INSERT INTO run_status
+                f"""
+                INSERT INTO {self._table}
                     (run_id, model, status, detail, started_ts, updated_ts)
                 VALUES (%s, '', %s, %s, %s, %s)
                 ON CONFLICT (run_id) DO UPDATE
@@ -353,7 +408,9 @@ class PostgresRunStore:
         conn = await self._conn()
         try:
             async with conn.cursor() as cur:
-                await cur.execute(f"SELECT {_COLUMNS} FROM run_status WHERE run_id = %s", (run_id,))
+                await cur.execute(
+                    f"SELECT {_COLUMNS} FROM {self._table} WHERE run_id = %s", (run_id,)
+                )
                 row = await cur.fetchone()
                 return RunRecord.from_row(_zip(row)) if row else None
         finally:
@@ -372,7 +429,8 @@ class PostgresRunStore:
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT {_COLUMNS} FROM run_status {where} ORDER BY updated_ts DESC LIMIT %s",
+                    f"SELECT {_COLUMNS} FROM {self._table} {where} "
+                    "ORDER BY updated_ts DESC LIMIT %s",
                     tuple(params),
                 )
                 return [RunRecord.from_row(_zip(r)) for r in await cur.fetchall()]
@@ -384,7 +442,7 @@ class PostgresRunStore:
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT COUNT(*) FROM run_status WHERE status NOT IN ({TERMINAL_SQL_LIST})"
+                    f"SELECT COUNT(*) FROM {self._table} WHERE status NOT IN ({TERMINAL_SQL_LIST})"
                 )
                 return int((await cur.fetchone())[0])
         finally:
@@ -395,7 +453,7 @@ class PostgresRunStore:
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT {_COLUMNS} FROM run_status "
+                    f"SELECT {_COLUMNS} FROM {self._table} "
                     f"WHERE status NOT IN ({TERMINAL_SQL_LIST}) "
                     f"ORDER BY updated_ts DESC LIMIT %s",
                     (limit,),

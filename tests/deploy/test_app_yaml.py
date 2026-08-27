@@ -89,6 +89,7 @@ MIRRORED = {
     "DBX_SCHEMA": "schema",
     "DBX_WAREHOUSE_ID": "warehouse_id",
     "DBX_APP_PUBLIC_URL": "app_public_url",
+    "DBX_LAKEBASE_SCHEMA": "lakebase_schema",
 }
 
 

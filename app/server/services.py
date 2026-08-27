@@ -238,7 +238,9 @@ class ServiceHub:
         if cfg.lakebase_dsn:
             self._check_lakebase_identity(cfg)
             store: RunStore = PostgresRunStore(
-                cfg.lakebase_dsn, password_provider=self.token_provider
+                cfg.lakebase_dsn,
+                schema=cfg.lakebase_schema,
+                password_provider=self.token_provider,
             )
             try:
                 await store.ensure_schema()

@@ -1,10 +1,14 @@
 """The run store, driven against a real Postgres.
 
 Lakebase is standard Postgres, so everything here except how the password is
-obtained behaves identically to the real thing. Tested against PostgreSQL 16
-(what this environment provides); Lakebase runs 18. Nothing used here —
-primary keys, ON CONFLICT, advisory locks, partial indexes — changed between
-those versions, but that is a claim about the feature set, not a test result.
+obtained behaves identically to the real thing. Tested against PostgreSQL 16,
+which is what this environment provides AND what the Lakebase instance created
+on 2026-08-25 came back as — the CLI ignores `pg_version` on create, so 18 is
+reachable only through the workspace UI. Nothing used here — primary keys,
+ON CONFLICT, advisory locks, partial indexes — differs between 16 and 18, but
+that is a claim about the feature set, not a test result. The app asserts
+neither: `ensure_schema()` reads `SHOW server_version` and `/healthz` reports
+what the server actually said.
 """
 
 from __future__ import annotations
@@ -15,9 +19,21 @@ import tempfile
 
 import pytest
 
-from server.store import DuplicateRun, PostgresRunStore, RunRecord, SlotDenied
+from server.store import (
+    DEFAULT_SCHEMA,
+    DuplicateRun,
+    PostgresRunStore,
+    RunRecord,
+    SlotDenied,
+    UnsafeSchemaName,
+    qualified,
+)
 from shared.envelope import RunStatus
 from shared.tables import TableSet
+
+
+def store_table() -> str:
+    return qualified(DEFAULT_SCHEMA)
 
 
 class RecordingSql:
@@ -56,7 +72,11 @@ async def store(postgres):
     await s.ensure_schema()
     conn = await s._conn()
     try:
-        await conn.execute("TRUNCATE run_status")
+        # Qualified, like every statement the store itself issues. An
+        # unqualified name here resolves through `search_path` to a `public`
+        # table that does not exist — which is the exact failure the schema
+        # move was made to prevent, so the test may not depend on it either.
+        await conn.execute(f"TRUNCATE {store_table()}")
     finally:
         await conn.close()
     return s
@@ -359,3 +379,54 @@ async def test_no_provider_means_the_dsn_is_used_unchanged():
     `enable_pg_native_login` on has a real password in the DSN."""
     store = PostgresRunStore("postgresql://pg/db")
     assert store._password_provider is None
+
+
+# --- the schema the table lives in ----------------------------------------
+
+
+async def test_the_table_is_not_in_public(postgres):
+    """`public` is the failure this schema exists to avoid.
+
+    Since PostgreSQL 15 the `public` schema no longer grants CREATE to
+    `PUBLIC`, so a role that does not own the database — which the app's
+    service principal generally does not — gets `permission denied for schema
+    public` the first time `ensure_schema()` runs. The app reports `lakebase`
+    degraded and falls back to the warehouse store, for a reason nobody
+    debugging it would guess.
+    """
+    s = PostgresRunStore(postgres)
+    await s.ensure_schema()
+
+    conn = await s._conn()
+    try:
+        cur = await conn.execute("SELECT schemaname FROM pg_tables WHERE tablename = 'run_status'")
+        schemas = [row[0] for row in await cur.fetchall()]
+    finally:
+        await conn.close()
+
+    assert schemas == [DEFAULT_SCHEMA], f"run_status landed in {schemas}, not {DEFAULT_SCHEMA}"
+
+
+async def test_a_custom_schema_is_honoured(postgres):
+    s = PostgresRunStore(postgres, schema="other_place")
+    await s.ensure_schema()
+    await s.claim_slot("r1", model="scenario", ceiling=5)
+    assert await s.active_count() == 1
+
+    # And it really is a separate table, not the default one under a new name.
+    default = PostgresRunStore(postgres)
+    await default.ensure_schema()
+    assert await default.active_count() == 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["public; DROP TABLE run_status", "has-a-hyphen", "1_starts_with_digit", "", "a b"],
+)
+def test_a_schema_name_that_is_not_an_identifier_is_refused(bad):
+    """The schema reaches SQL by interpolation because an identifier cannot be
+    a bound parameter — the same reason `repository.validate_table_name`
+    exists on the Unity Catalog side. Refused at construction, so a bad value
+    fails while the app is starting and can report it."""
+    with pytest.raises(UnsafeSchemaName):
+        PostgresRunStore("postgresql://pg/db", schema=bad)

@@ -87,6 +87,17 @@ variables:
   lakebase_port:
     description: Lakebase port. TLS is required and assumed.
     default: "5432"
+  lakebase_schema:
+    description: >-
+      Postgres schema `run_status` lives in.
+
+      NOT `public`: since PostgreSQL 15 that schema grants no CREATE to
+      PUBLIC, so a service principal that does not own the database gets
+      `permission denied for schema public` the first time the app applies
+      its DDL, and /healthz reports `lakebase` degraded for a reason nobody
+      expects. The app creates this schema itself at startup
+      (lakebase_ddl/001_run_status.sql is the same DDL, reviewable).
+    default: dbx_leaning
   # There is deliberately NO lakebase_password variable, and there never will
   # be one. An instance created with `enable_pg_native_login: false` — the
   # default, and what this deployment has — accepts only a short-lived

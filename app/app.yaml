@@ -47,6 +47,13 @@ env:
   - name: DBX_APP_PUBLIC_URL
     value: https://dbx-leaning-7474655945367403.aws.databricksapps.com
 
+  # Where run_status lives inside the Lakebase database. Deliberately not
+  # `public`: since PostgreSQL 15 that schema grants no CREATE to PUBLIC, so a
+  # service principal that does not own the database cannot create a table
+  # there. The app creates this schema itself at startup.
+  - name: DBX_LAKEBASE_SCHEMA
+    value: dbx_leaning
+
   # The app's durable filesystem — uc_ddl/003_app_volume.sql. Absent or
   # ungranted, /healthz reports `volume` degraded and nothing on the run path
   # is affected.
