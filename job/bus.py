@@ -136,7 +136,12 @@ class WebSocketBus:
         self._closed = False
 
         self.sent = 0
+        #: Evicted because the queue was full. Recoverable by BACKFILL.
         self.dropped = 0
+        #: Lost to a socket that died mid-batch. Counted apart from `dropped`
+        #: because they mean different things: one is backpressure working as
+        #: designed, the other is the connection failing.
+        self.send_failures = 0
         self.connects = 0
         self.connect_attempts = 0
         self.backfills_served = 0
@@ -208,6 +213,7 @@ class WebSocketBus:
             # is exactly the signal to BACKFILL — and every message in that gap
             # is durable and still in the replay ring.
             forced = await self._force_terminal()
+            left = len(self._q)
             log.info(
                 "%d message(s) unsent after %.1fs drain; terminal status %s, "
                 "the durable copy stands and the app can BACKFILL the rest",
@@ -237,6 +243,10 @@ class WebSocketBus:
         except Exception:  # noqa: BLE001
             return False
         self.sent += 1
+        # Take it out, or the send loop may send it again and the unsent count
+        # reported to the caller includes a message that was delivered.
+        with contextlib.suppress(ValueError):
+            self._q.remove(terminal)
         return True
 
     async def close(self) -> None:
@@ -293,9 +303,16 @@ class WebSocketBus:
                 for msg in batch:
                     await ws.send(pack_frame(msg))
             except Exception:  # noqa: BLE001 - a dead socket is not a run failure
-                log.debug("ws send failed; dropping the connection", exc_info=True)
+                log.debug("ws send failed; ending the session", exc_info=True)
                 self._ws = None
-                self.dropped += len(batch)
+                self.send_failures += len(batch)
+                # Closing is the part that matters. `_maintain` redials only
+                # when `_session` returns, and `_session` is parked on the
+                # INBOUND iterator — which a half-open socket keeps open
+                # indefinitely after the write direction has failed. Marking
+                # `_ws = None` alone would leave this loop spinning on a
+                # connection nothing will ever re-establish.
+                await _safe_close(ws)
                 continue
             self.sent += len(batch)
 
@@ -356,6 +373,11 @@ class WebSocketBus:
             try:
                 await ws.send(pack_frame(ping_frame(self.run_id)))
             except Exception:  # noqa: BLE001
+                # Same reasoning as the send loop: a ping that cannot go out
+                # means the write direction is gone, and only closing makes
+                # the read side end so the session can be redialled.
+                self._ws = None
+                await _safe_close(ws)
                 return
 
     # --- inbound ----------------------------------------------------------
@@ -431,6 +453,13 @@ class WebSocketBus:
 async def _safe_send(ws: WebSocketLike, data: bytes) -> None:
     with contextlib.suppress(Exception):
         await ws.send(data)
+
+
+async def _safe_close(ws: WebSocketLike | None) -> None:
+    if ws is None:
+        return
+    with contextlib.suppress(Exception):
+        await ws.close()
 
 
 def _live_visible(msg: Message) -> bool:

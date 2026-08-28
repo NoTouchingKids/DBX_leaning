@@ -146,8 +146,8 @@ class TestWhereTheIdentityComesFrom:
 
 class TestCaching:
     async def test_the_token_is_not_re_fetched_on_every_call(self):
-        """The push channel sends on every flush; an exchange per flush would
-        be both slow and rude."""
+        """Every reconnect and every status report to Lakebase wants one; a
+        token exchange apiece would be both slow and rude."""
         calls = []
 
         credential = AppCredential(env={}, now=Clock())

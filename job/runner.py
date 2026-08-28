@@ -60,6 +60,10 @@ class RunOutcome:
     #: Left unsent when the drain deadline expired. Durable and BACKFILL-able,
     #: so this is a latency figure, not a loss figure.
     live_undrained: int = 0
+    #: Lost to a socket that died mid-batch, as opposed to `live_dropped`,
+    #: which is the queue shedding under backpressure. Separate because one
+    #: says the connection failed and the other says the design worked.
+    live_send_failures: int = 0
     backfills_served: int = 0
     status_reports: int = 0
     write_failures: int = 0
@@ -231,6 +235,7 @@ class JobHarness:
             result_chunks=emitter.result_chunks,
             live_sent=bus.sent if bus is not None else 0,
             live_dropped=bus.dropped if bus is not None else 0,
+            live_send_failures=bus.send_failures if bus is not None else 0,
             live_undrained=undrained,
             backfills_served=bus.backfills_served if bus is not None else 0,
             status_reports=reporter.writes if reporter is not None else 0,

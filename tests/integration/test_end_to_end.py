@@ -12,10 +12,16 @@ import json
 
 import pytest
 
+from job.bus import WebSocketBus
 from job.config import JobConfig
 from job.delta import JsonlWriter
+from job.record import RunRecord
 from job.runner import JobHarness
 from job.shared.envelope import MessageAdapter, RunStatus
+
+# The harness's own socket fake, rather than a second one here: one place that
+# knows what a websocket looks like to `job.bus`.
+from tests.job.conftest import FakeSocket, connector
 
 
 @pytest.fixture
@@ -155,58 +161,24 @@ async def test_the_gurobi_model_runs_through_the_gurobi_driver(run_config, tmp_p
 async def test_a_live_app_sees_the_same_run_the_durable_store_does(run_config, tmp_path):
     """The live path and the durable path must not diverge — one shape, one
     record, whichever way it travelled."""
-    import asyncio
-
-    from job.bus import WebSocketBus
-    from job.record import RunRecord
-    from job.shared.protocol import ControlFrame, unpack_frame
-
     writer = JsonlWriter(tmp_path / "delta")
-    frames = []
-
-    class Socket:
-        """A socket whose `send` actually awaits.
-
-        The fake this replaced returned without ever awaiting, so the sender
-        never yielded mid-batch and always drained before teardown. That is
-        why a teardown bug — closing the socket before the queue had gone out,
-        which cost a fast run its entire live stream — could sit here
-        undetected. A yield point is the whole point of this class.
-        """
-
-        async def send(self, data):
-            await asyncio.sleep(0)
-            frames.append(unpack_frame(data))
-
-        async def close(self): ...
-
-        def __aiter__(self):
-            async def inbound():
-                await asyncio.Event().wait()  # the app never sends anything back
-                yield b""  # pragma: no cover - unreachable, keeps this a generator
-
-            return inbound()
-
-    socket = Socket()
-
-    class Connect:
-        async def __aenter__(self):
-            return socket
-
-        async def __aexit__(self, *exc):
-            return None
+    # `FakeSocket.send` actually awaits. The fakes this replaced returned
+    # without ever suspending, so the sender never yielded mid-batch and always
+    # emptied before teardown — which is why a teardown that closed before it
+    # drained, costing a fast run its entire live stream, sat here undetected.
+    ws = FakeSocket(send_delay_s=0.001)
 
     cfg = run_config("job.models.scenario", model_config={"progress_every": 30})
     bus = WebSocketBus(
         "wss://test/ws/job/x",
         cfg.run_id,
         record=RunRecord(cfg.run_id),
-        connect=lambda url, **kwargs: Connect(),
+        connect=connector(ws),
     )
     outcome = await JobHarness(cfg, writer=writer, bus=bus).run()
-    seen = [f for f in frames if not isinstance(f, ControlFrame)]
+    seen = ws.messages()
 
-    assert outcome.observed_live is True
+    assert outcome.observed_live is True and outcome.live_undrained == 0
 
     # The direction the old assertion never checked: a run the app watched must
     # actually be told the run ended. This is what the teardown bug broke.

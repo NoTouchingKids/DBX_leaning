@@ -62,8 +62,9 @@ _DEFAULT_TTL_S = 3600.0
 class AppCredential:
     """The OAuth token for the Apps ingress, fetched once and reused.
 
-    Cached rather than fetched per message: the HTTP-push channel sends on
-    every flush, and a token exchange per flush would be both slow and rude.
+    Cached rather than fetched per connection: the WebSocket redials on a
+    timer for the whole life of a run, and the Lakebase status writer posts on
+    every transition. A token exchange each time would be both slow and rude.
     """
 
     def __init__(

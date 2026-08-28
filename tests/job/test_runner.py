@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from job.bus import WebSocketBus
 from job.delta import JsonlWriter
+from job.lakebase import LakebaseStatus
 from job.loader import describe_object
 from job.record import RunRecord
 from job.runner import JobHarness
@@ -288,3 +290,45 @@ async def test_a_backfill_mid_run_is_answered_from_the_harnesss_own_record(cfg, 
     payload = ws.control(ControlKind.BACKFILL_RESULT)[0].payload
     assert [m["type"] for m in payload["messages"]][0] == "status", "the run had already started"
     assert payload["complete"] is True
+
+
+# --- run_status, reported by the job itself --------------------------------
+
+
+async def test_status_transitions_are_reported_live_with_no_socket_at_all(cfg, writer):
+    """The point of the job reporting `run_status` rather than the app doing
+    it from the socket: a run nobody watched still keeps the row current."""
+    posted: list[str] = []
+
+    class Client:
+        async def post(self, url, json=None, headers=None):
+            posted.append(json["parameters"][3])
+            return SimpleNamespace(status_code=200, text="")
+
+        async def aclose(self): ...
+
+    reporter = LakebaseStatus("https://db/statements", client=Client())
+    conf = cfg(app_url=None, model_config={"steps": 1})
+
+    outcome = await JobHarness(conf, writer=writer, status_reporter=reporter).run()
+
+    assert posted == ["RUNNING", "SUCCEEDED"]
+    assert outcome.status_reports == 2
+
+
+async def test_a_status_report_that_cannot_be_delivered_is_not_the_run(cfg, writer):
+    class Client:
+        async def post(self, url, json=None, headers=None):
+            raise ConnectionError("lakebase unreachable")
+
+        async def aclose(self): ...
+
+    reporter = LakebaseStatus("https://db/statements", client=Client())
+    conf = cfg(model_config={"steps": 1})
+
+    outcome = await JobHarness(conf, writer=writer, status_reporter=reporter).run()
+
+    assert outcome.status is RunStatus.SUCCEEDED
+    assert outcome.status_reports == 0 and reporter.failures == 2
+    # run_events is the durable record of the same transitions.
+    assert [r["status"] for r in rows(writer, "run_events")] == ["RUNNING", "SUCCEEDED"]
