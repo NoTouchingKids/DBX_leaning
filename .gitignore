@@ -246,10 +246,3 @@ __marimo__/
 # A fresh checkout cannot `import job` until this has been made. conftest.py
 # does it before tests; otherwise: uv run python scripts/sync_shared.py
 /job/shared/
-
-# GENERATED, not committed: the seeded design canvas is ~2.5 MB, because the
-# editor that runs it is baked into the page. The `.dc.html` artboards and
-# canvas.json beside it are the source, and re-seeding from them is one
-# command — see .design/ws/README.md.
-.design/**/*.html
-!.design/**/*.dc.html
