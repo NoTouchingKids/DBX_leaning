@@ -52,29 +52,53 @@ sources. Design against them; do not build past them speculatively.
 ## Transport architecture (settled — do not redesign without reading `docs/architecture.md` first)
 
 ```
-Live path    (job → app):    WebSocket  →  HTTP push (fallback)
-Live path    (app → client): SSE, one-way
-Durable path (job → UC):     Delta writer, ALWAYS, in parallel with the live path
+Live path    (job → app):      WebSocket, the only one, both directions
+Live path    (app → client):   SSE, one-way
+Durable path (job → UC):       Delta writer, ALWAYS, in parallel with the live path
+Status path  (job → Lakebase): run_status, over the Database REST API
 ```
 
 - **Delta is the floor, not a fallback tier.** It runs regardless of whether
-  a live channel is up. A run observed live must still be fully persisted.
+  the socket is up. A run observed live must still be fully persisted.
 - **The job is autonomous; the app is an optional observer.** Jobs run on
   event/schedule/manual trigger, independent of whether the app is up. If the
   app is up and a `run_id` is live, the job attaches. If not, the run proceeds
   unobserved and stays fully durable — the app backfills from Delta later.
-- **Only WS carries inbound** (cancel commands). HTTP push is one-way. Cancel
-  from the client always goes to the **app**, never a warehouse poll — a
-  status poll would keep the warehouse awake for the run's duration, which is
-  the exact cost mistake the first build made.
-- **Workers = 1 for now.** The relay lives behind a `Broadcaster` interface
-  so swapping in Lakebase `LISTEN`/`NOTIFY` later doesn't touch call sites.
+- **One live channel, not two.** The job's HTTP push fallback is gone
+  (`job/bus.py` replaced `job/channels.py` + `job/relay.py`): the ingress
+  probe settled that the socket survives, and a second one-way path that could
+  carry neither a cancel nor a backfill was a second thing to keep in step for
+  nothing. The app's `/api/runs/{run_id}/push` ingest endpoint is still there;
+  the job no longer uses it.
+- **The socket carries inbound: cancel, and backfill.** Cancel from the client
+  always goes to the **app**, never a warehouse poll — a status poll would keep
+  the warehouse awake for the run's duration, which is the exact cost mistake
+  the first build made. `BACKFILL` is the same mistake refused from the other
+  end: the job answers it from its own replay ring (`job/record.py`), so a
+  browser tab waking up cannot wake the warehouse. **Only the job side of this
+  exists — the app does not send a `BACKFILL` yet.**
+- **The boundary between the two backfills travels on the wire.** The job
+  states `replay_from_seq` (the oldest seq it can still replay) and
+  `flushed_through_seq` (how far Delta has caught up) on `hello` and on every
+  backfill reply. Above the ring's floor, ask the job; below it, it is a full
+  backfill and goes to SQL. Neither side keeps a tuned threshold of its own.
+- **A live drop is recoverable now, so the drop policy got simpler.** The bus
+  queue drops the oldest when full, whatever type it is. The old tiered
+  eviction — logs before progress before status — existed because a dropped
+  message was gone; it is not gone, it is in the durable buffer and in the
+  replay ring. Teardown **drains before it closes** and pushes status and
+  result to the front of what is left: the other order lost a fast run's
+  entire live stream, terminal status included.
+- **Workers = 1 for now.** The app's fan-out to browsers lives behind a
+  `Broadcaster` interface so swapping in Lakebase `LISTEN`/`NOTIFY` later
+  doesn't touch call sites.
 
 ## The message envelope
 
 One schema, one `type` discriminator, for everything: `log`, `progress`,
-`status`, `result`. Same shape whether it travels over WS, HTTP push, or is
-read back from Delta. Full spec: `docs/message-envelope-spec.md`.
+`status`, `result`. Same shape whether it travels over the WebSocket, comes
+back in a backfill reply, or is read back from Delta. Full spec:
+`docs/message-envelope-spec.md`.
 
 - `seq` is a single monotonic counter per run, **assigned by the job**, not
   by a UC identity column — it's the one thing that lets a client dedupe
@@ -117,6 +141,16 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   than advisory. Everything append-only — logs, progress, events, results —
   stays in Delta. See `app/server/store.py`; the warehouse-backed store remains as
   the unconfigured default so a deploy is never blocked on provisioning.
+- **Two writers on that row, one concern each.** The **app** claims the slot —
+  the count-and-claim transaction, and the row's creation at trigger time. The
+  **job** owns the status transitions on it, over the Database REST API
+  (`job/lakebase.py`, `DBX_LAKEBASE_REST_URL`), so `run_status` stays current
+  for a run no socket ever attached to instead of sitting at whatever the app
+  last saw. The job's upsert carries an `updated_ts` guard, so a retry
+  delivered out of order cannot move the row backwards; the app's `set_status`
+  does not, which `docs/architecture.md` records. **The REST request envelope
+  is unverified against a live workspace** — `LakebaseStatus._body()` is the
+  one place it is built, and it needs a single real request to confirm.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -132,15 +166,17 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   not fit has somewhere to go: `job/models/ortools_jobshop` is CP-SAT,
   Apache-2.0, with no licence file, no expiry and no size cap at all.
 - **Delta writes go through Spark**, behind one `write_batch(table, rows)`
-  interface, implementation chosen once at startup. delta-rs remains the
-  target but is **not implemented and must not be selected**: it takes a
-  storage URI, not a UC name, and given a three-part name it writes to a
-  local directory without erroring — a run would report SUCCEEDED with its
-  telemetry in a container that is about to disappear. It raises
-  `NotImplementedError` rather than doing that. Building it needs credential
-  vending; see `job/delta.py`. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
-  end-of-run** — the age bound is what caps data loss on a crash; size alone
-  is not a durability guarantee.
+  interface, implementation chosen once at startup. **delta-rs is gone, not
+  deferred** — the class, the enum member and the sentinel error are all out
+  of `job/delta.py`. It takes a storage URI, not a UC name, and given a
+  three-part name it writes to a local directory without erroring, so a run
+  would report SUCCEEDED with its telemetry in a container about to
+  disappear; keeping a class that could only ever raise was carrying the shape
+  of that mistake around. Building it for real needs credential vending and a
+  table location, which is new work rather than a switch to flip. The other
+  implementation is `JsonlWriter`, for local development. Flush on **size ≥ 1 MB
+  OR age ≥ 30s (configurable) OR end-of-run** — the age bound is what caps
+  data loss on a crash; size alone is not a durability guarantee.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string
   column if the environment doesn't support it cleanly.
 - **A model is a plain Python object, not a class implementing an ABC.**
@@ -170,7 +206,8 @@ app/            THE DEPLOYED APP — everything it needs, nothing else. This
   requirements.txt  App deps, where Databricks Apps looks for them
 job/            THE JOB UNIT — the harness plus its payload, its own floor
   run_model.py  What a Databricks task runs (workspace-file sync, not a wheel)
-  (harness)     WS client, HTTP push, Delta writer, model loader
+  (harness)     WS bus, run record + replay ring, Delta writer, Lakebase
+                status reporter, model loader
   models/           One package per model — eleven of them: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
                 mcmc/, bayesian_ab/, neural_net/, streaming_results/,
@@ -283,7 +320,11 @@ Full procedure: `deploy/README.md`.
    `app/client/README.md`.
 5. **Not done:** `databricks bundle deploy` has never been run against a
    workspace, `scripts/probe_sample_data.py` has never been run end to end on
-   one, and there is no CI. Do not read "built and tested" as "deployed".
+   one, and there is no CI. Two more, both narrow and both in the transport:
+   the app does not yet **send** a `BACKFILL`, so the job's replay ring is
+   built and answered but not asked; and the Database REST API's request
+   envelope in `job/lakebase.py` has not been checked against a live
+   workspace. Do not read "built and tested" as "deployed".
    What *is* confirmed against a real workspace: WebSocket and SSE both
    survive the Apps ingress, the `samples` catalog's table list, and column
    listings for seven of its tables (`docs/sample-data-inventory.md`).

@@ -608,7 +608,7 @@ async def test_the_seq_stream_a_browser_sees_legitimately_has_gaps(live):
 
     `seq` is consumed by every message the job creates, including the ones it
     never sends live: `client_visible=False` filters the *live send* only
-    (job/relay.py::_live_visible), and the durable write already happened. So
+    (job/bus.py::_live_visible), and the durable write already happened. So
     a browser watching a Gurobi run sees 0, 1, 3, 4 with no 2, and that is
     correct rather than a dropped message.
 
@@ -627,7 +627,7 @@ async def test_the_seq_stream_a_browser_sees_legitimately_has_gaps(live):
     # The two copies never meet in a real process: the job emits bytes and the
     # app parses them. They meet here, so this hands the rule a message typed
     # the way the job types its own, and publishes the app-typed one.
-    from job.relay import _live_visible
+    from job.bus import _live_visible
     from job.shared.envelope import MessageAdapter as JobMessage
 
     def as_the_job_sees_it(msg):

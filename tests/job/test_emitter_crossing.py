@@ -10,34 +10,37 @@ import threading
 import pytest
 
 from job.buffer import DurableBuffer
+from job.bus import WebSocketBus
 from job.delta import JsonlWriter
 from job.emitter import Emitter
-from job.relay import LiveRelay
-from job.shared.envelope import LogMessage, MessageType
+from job.record import RunRecord
+from job.shared.envelope import MessageType
 from job.shared.tables import TableSet
 from job.sink import DurableSink
 
 
 def make_emitter(tmp_path, **kw):
     sink = DurableSink(JsonlWriter(tmp_path), TableSet(), buffer=DurableBuffer())
-    relay = LiveRelay([], **{k: v for k, v in kw.items() if k in {"queue_max"}})
+    record = RunRecord("run-1")
+    bus = WebSocketBus("ws://x/ws", "run-1", record=record, queue_max=kw.get("queue_max", 2000))
     emitter = Emitter(
         "run-1",
         sink=sink,
-        relay=relay,
+        record=record,
+        bus=bus,
         results_table=kw.get("results_table", "results_t"),
         preview_axes=kw.get("preview_axes"),
     )
-    return emitter, sink, relay
+    return emitter, sink, bus
 
 
 async def test_burst_from_a_worker_thread_arrives_intact(tmp_path):
     # asyncio.Queue is not thread-safe; this is the crossing that replaces it.
-    emitter, sink, relay = make_emitter(tmp_path, queue_max=100_000)
+    emitter, sink, bus = make_emitter(tmp_path, queue_max=100_000)
     emitter.bind_loop(asyncio.get_running_loop())
 
     received: list[int] = []
-    relay.offer = lambda msg: received.append(msg.seq)  # type: ignore[assignment]
+    bus.offer = lambda msg: received.append(msg.seq)  # type: ignore[assignment]
 
     N, THREADS = 500, 4
     done = threading.Barrier(THREADS + 1)
@@ -60,24 +63,31 @@ async def test_burst_from_a_worker_thread_arrives_intact(tmp_path):
     assert len(received) == N * THREADS, "messages were lost crossing into the loop"
     assert sorted(received) == list(range(N * THREADS)), "seq collided or duplicated"
     assert sink.buffer.appended == N * THREADS, "durable path lost messages"
+    # The replay ring is written on the emitting thread too, so a BACKFILL
+    # arriving mid-burst answers for everything that already exists.
+    assert emitter.record.counts()["log"] == N * THREADS
 
 
-async def test_durable_append_happens_before_the_live_handoff(tmp_path):
-    # Durability must not sit behind the droppable live queue.
-    emitter, sink, relay = make_emitter(tmp_path)
+async def test_the_durable_write_and_the_record_both_precede_the_live_handoff(tmp_path):
+    # Durability must not sit behind the droppable live queue, and the record
+    # has to be true the instant a message exists — it is what answers a
+    # BACKFILL, and the loop may not get round to the live hop for a while.
+    emitter, sink, bus = make_emitter(tmp_path)
     emitter.bind_loop(asyncio.get_running_loop())
     order: list[str] = []
 
     original = sink.append_message
     sink.append_message = lambda m: (order.append("durable"), original(m))[1]  # type: ignore
-    relay.offer = lambda m: order.append("live")  # type: ignore[assignment]
+    observe = emitter.record.observe
+    emitter.record.observe = lambda m: (order.append("record"), observe(m))[1]  # type: ignore
+    bus.offer = lambda m: order.append("live")  # type: ignore[assignment]
 
     await asyncio.to_thread(emitter.emit, "log", message="x")
     for _ in range(20):
         await asyncio.sleep(0.005)
         if "live" in order:
             break
-    assert order == ["durable", "live"]
+    assert order == ["durable", "record", "live"]
 
 
 def test_emitting_without_a_loop_still_works(tmp_path):
@@ -112,42 +122,23 @@ def test_a_malformed_message_raises_into_model_code(tmp_path):
 
 
 def test_transport_failure_never_reaches_the_model(tmp_path):
-    emitter, sink, relay = make_emitter(tmp_path)
+    emitter, sink, bus = make_emitter(tmp_path)
 
     def explode(msg):
-        raise RuntimeError("relay is on fire")
+        raise RuntimeError("the bus is on fire")
 
-    relay.offer = explode  # type: ignore[assignment]
+    bus.offer = explode  # type: ignore[assignment]
+    emitter.record.observe = explode  # type: ignore[assignment]
     sink.append_message = lambda m: (_ for _ in ()).throw(RuntimeError("delta is on fire"))  # type: ignore
 
     msg = emitter.emit("log", message="still fine")
     assert msg.type is MessageType.LOG
 
 
-async def test_client_invisible_logs_are_written_but_not_relayed(tmp_path):
-    emitter, sink, relay = make_emitter(tmp_path)
-    emitter.bind_loop(asyncio.get_running_loop())
+def test_client_invisible_logs_are_written_but_never_sent_live(tmp_path):
+    emitter, sink, bus = make_emitter(tmp_path)
     emitter.emit("log", message="raw solver chatter", client_visible=False)
     emitter.emit("log", message="shown", client_visible=True)
 
-    pump = asyncio.create_task(relay.pump())
-    sent: list[LogMessage] = []
-
-    class Sink:
-        name = "test"
-        is_connected = True
-
-        async def send_many(self, msgs):
-            sent.extend(msgs)
-            return True
-
-        async def start(self): ...
-        async def close(self): ...
-
-    relay.channels.append(Sink())
-    await asyncio.sleep(0.05)
-    await relay.stop()
-    await asyncio.gather(pump, return_exceptions=True)
-
-    assert [m.message for m in sent] == ["shown"]
+    assert [m.message for m in bus._q] == ["shown"]
     assert sink.buffer.appended == 2, "durable path must keep both"

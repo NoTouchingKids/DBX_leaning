@@ -17,10 +17,14 @@ Both probes gate the build-out (`CLAUDE.md`, "How to work in this repo").
 The transport in `docs/architecture.md` is the one being built, not a
 best-effort guess:
 
-- **WebSocket job→app works**, so it is the preferred live channel and
-  **cancel has a real path** — the inbound command in `shared/protocol.py`
-  and `app/server/routes/runs.py` is reachable, not theoretical. HTTP push stays as
-  the documented fallback rather than becoming the only tier.
+- **WebSocket job→app works**, so it is the *only* live channel, and
+  **inbound has a real path** — the cancel command in `shared/protocol.py`
+  and `app/server/routes/runs.py` is reachable, not theoretical, and so is the
+  `BACKFILL` the job answers from its replay ring. The job's HTTP push
+  fallback was removed on the strength of this result: a one-way second path
+  that could carry neither of those was only ever a hedge against this probe
+  failing. The app's `/api/runs/{run_id}/push` endpoint is still there and
+  nothing sends to it.
 - **SSE app→client works**, so `app/server/routes/stream.py` and `EventSource`'s
   native `Last-Event-ID` resume are the design, unchanged.
 
@@ -34,6 +38,7 @@ change specific code, and none of them is recorded yet:
 | Whether the ingress cuts a long-lived stream, and at what elapsed time | The frontend's reconnect-counter design. A counter that does not reset on success would kill a healthy stream within minutes if cuts happen every ~120s. That counter is now built and tested — `app/client/src/transport/hub.ts` counts *consecutive* failures, resets on every successful open, and gives up at 10 — so a real number no longer decides the design; it decides whether 10 is the right cap and whether the retry interval (`retry: 2000`, set in `app/server/routes/stream.py`) is sensible |
 | Whether an *idle* connection is dropped sooner than an active one | `DBX_WS_PING_S` (default 20s) and the SSE keepalive (`DBX_SSE_KEEPALIVE_S`, default 10s). Both are currently set from community reports, not measurement |
 | Whether SSE events are buffered or delivered promptly | Whether `X-Accel-Buffering: no` is doing anything here. If events arrive in held-and-released batches, live progress is not actually live |
+| Round-trip latency job→app through the ingress | `DBX_WS_DRAIN_S` (default 5s), the window teardown gives the send queue before closing the socket. A run that finishes faster than the socket can flush gets its live stream out inside that window or not at all. The figures the default was chosen against — a 300-message queue over a simulated 20ms socket — are local, never measured through a real ingress |
 
 Fill these in as they are observed — the probe commands
 (`.claude/commands/spike-ws.md`, `.claude/commands/spike-sse.md`) describe how

@@ -12,6 +12,13 @@ Two rules follow, and they are the reason this class exists:
    the live hand-off. Durability must not sit behind the same bounded,
    droppable queue as the live path — that is what makes "logs may drop live,
    never durably" true rather than aspirational.
+
+The run record is written on the same thread and for the same reason: it is
+what answers a BACKFILL, so it has to be true the instant a message exists,
+not once the event loop gets round to it.
+
+Order is the whole design: **durable, then record, then live.** Each step is
+allowed to fail without the ones before it being undone.
 """
 
 from __future__ import annotations
@@ -22,7 +29,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from .relay import LiveRelay
+from .bus import WebSocketBus
+from .record import RunRecord
 from .shared.downsample import downsample_rows
 from .shared.envelope import PREVIEW_MAX_POINTS, Message, MessageType, make_message
 from .shared.seq import SeqCounter
@@ -39,7 +47,8 @@ class Emitter:
         run_id: str,
         *,
         sink: DurableSink,
-        relay: LiveRelay,
+        record: RunRecord,
+        bus: WebSocketBus | None = None,
         seq: SeqCounter | None = None,
         results_table: str | None = None,
         preview_axes: tuple[str, str] | None = None,
@@ -48,7 +57,10 @@ class Emitter:
     ) -> None:
         self.run_id = run_id
         self.sink = sink
-        self.relay = relay
+        self.record = record
+        #: None when the run is unobserved — no `DBX_APP_URL`, or no live
+        #: channel wanted. Not an error: apps run ~8h/day, jobs do not.
+        self.bus = bus
         self.seq = seq or SeqCounter()
         self.results_table = results_table
         self.preview_axes = preview_axes
@@ -84,6 +96,11 @@ class Emitter:
             self.sink.append_message(msg)
         except Exception:  # noqa: BLE001 - durability failing must not kill the run
             log.exception("durable append failed for seq=%s", msg.seq)
+
+        try:
+            self.record.observe(msg)
+        except Exception:  # noqa: BLE001 - the record is an aid, not the truth
+            log.exception("run record rejected seq=%s", msg.seq)
 
         self._offer_live(msg)
 
@@ -157,6 +174,8 @@ class Emitter:
     def _offer_live(self, msg: Message) -> None:
         """Hand to the live path. Never raises: a model must not learn that
         nobody is listening, and the durable copy already exists."""
+        if self.bus is None:
+            return
         loop = self._loop
         if loop is None:
             self._offer_now(msg)  # no loop bound: single-threaded/test use
@@ -175,7 +194,9 @@ class Emitter:
             pass
 
     def _offer_now(self, msg: Message) -> None:
+        if self.bus is None:
+            return
         try:
-            self.relay.offer(msg)
+            self.bus.offer(msg)
         except Exception:  # noqa: BLE001 - the live path is never load-bearing
-            log.exception("live relay rejected seq=%s; durable copy stands", msg.seq)
+            log.exception("live bus rejected seq=%s; durable copy stands", msg.seq)

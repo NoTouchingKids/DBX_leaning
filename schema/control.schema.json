@@ -5,6 +5,8 @@
         "hello",
         "hello_ack",
         "cancel",
+        "backfill",
+        "backfill_result",
         "ping",
         "pong",
         "bye"

@@ -93,6 +93,17 @@ class DurableSink:
         self.rows_written += count
         return count
 
+    def flushed_through_seq(self, issued: int) -> int:
+        """The highest seq the durable store can definitely serve.
+
+        ``issued`` is how many seqs have been handed out, so ``issued - 1`` is
+        the newest message that exists. With nothing pending, all of it is
+        durable; otherwise the answer stops one below the oldest row still
+        waiting — see ``DurableBuffer.min_pending_seq``.
+        """
+        pending = self.buffer.min_pending_seq()
+        return issued - 1 if pending is None else pending - 1
+
     @property
     def healthy(self) -> bool:
         """False once anything has been left unwritten.

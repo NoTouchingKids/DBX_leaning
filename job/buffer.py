@@ -100,6 +100,28 @@ class DurableBuffer:
             pending.rows[:0] = rows
             pending.nbytes += size
 
+    def min_pending_seq(self) -> int | None:
+        """Lowest ``seq`` still waiting to be written, across every table.
+
+        This is what makes "how far has Delta caught up" answerable honestly.
+        Tables flush independently, so the highest seq *written* is not it: if
+        ``run_logs`` has gone out to seq 100 while ``run_progress`` still holds
+        seq 50, the warehouse cannot serve 50 and claiming otherwise would
+        send a client to fetch a row that is not there. The high-water mark a
+        reader can trust is one below the lowest thing still pending.
+
+        Result rows carry no ``seq`` — they are model data, not envelope
+        messages — so they are skipped rather than counted as zero.
+        """
+        with self._lock:
+            seqs = [
+                row["seq"]
+                for pending in self._pending.values()
+                for row in pending.rows
+                if isinstance(row.get("seq"), int)
+            ]
+        return min(seqs) if seqs else None
+
     def stats(self) -> BufferStats:
         now = time.monotonic()
         with self._lock:

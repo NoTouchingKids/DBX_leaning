@@ -61,8 +61,11 @@ know whether this gate has been cleared.
 
 Don't try to fix the ingress — that's not something this app controls.
 Report the failure mode clearly (upgrade rejected outright, vs. connects but
-drops at N seconds) and note in `docs/spike-results.md` that `job/` must
-treat WebSocket as unavailable and fall back to HTTP push as the only live
-channel, per `docs/architecture.md`. That fallback already has a documented
-design — this probe result just determines whether it's the *only* path
-rather than the preferred one.
+drops at N seconds) and note it in `docs/spike-results.md`.
+
+Be aware before you start: **this probe has already passed against a real
+workspace**, and the HTTP-push fallback earlier versions of this file pointed
+at has since been removed from `job/`. The socket is now the only live
+channel there is, so a failure here is not "fall back to the other tier" — it
+is a run going unobserved, which the durable path already tolerates. Re-run
+this to measure timings, not to decide the architecture.

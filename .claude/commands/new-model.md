@@ -113,8 +113,7 @@ the model emits, and the two failure modes are not symmetric:
 
 - A column the model never writes is harmless clutter.
 - **A row key with no column is a silently dropped field.** Spark's
-  `saveAsTable` append is the only durable write path (delta-rs raises
-  `NotImplementedError` — see `job/delta.py`), and a mismatch surfaces on a
+  `saveAsTable` append is the only durable write path (see `job/delta.py`), and a mismatch surfaces on a
   workspace, inside a job, at the end of a long run.
 
 So diff them by hand before you finish: every key in the dict the model

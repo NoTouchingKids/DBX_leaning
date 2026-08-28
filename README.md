@@ -139,7 +139,7 @@ production is how "works on my machine" gets built, so:
 | | Local | Deployed |
 |---|---|---|
 | `app/`, `job/`, `shared/`, `job/models/` | the same code | the same code |
-| Live path | real WS ingress, real HTTP-push fallback, real SSE | same |
+| Live path | real WS ingress, real SSE | same |
 | Run registry | embedded Postgres (`pgserver`) via `PostgresRunStore` | Lakebase, same class |
 | Concurrency ceiling | the app's check is real; nothing enforces it behind that | the account's own 5-task limit too |
 | **Trigger** | `scripts/dev_launcher.py` answers `run-now`/`runs/get` and spawns a subprocess; `DATABRICKS_HOST` points at it | the Jobs API |

@@ -49,6 +49,13 @@ resources:
           default: ${var.app_public_url}
         - name: DBX_APP_TOKEN
           default: ""
+        # Deployment config, not run data: the app never overrides these, so
+        # they arrive as defaults. Databricks rejects a run-now parameter a
+        # job has NOT declared; declaring one the app does not send is fine.
+        - name: DBX_LAKEBASE_REST_URL
+          default: ${var.lakebase_rest_url}
+        - name: DBX_LAKEBASE_SCHEMA
+          default: ${var.lakebase_schema}
 
       environments:
         - environment_key: ortools_jobshop
@@ -75,3 +82,5 @@ resources:
               - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
               - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
               - DBX_APP_TOKEN={{job.parameters.DBX_APP_TOKEN}}
+              - DBX_LAKEBASE_REST_URL={{job.parameters.DBX_LAKEBASE_REST_URL}}
+              - DBX_LAKEBASE_SCHEMA={{job.parameters.DBX_LAKEBASE_SCHEMA}}

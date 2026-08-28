@@ -87,7 +87,8 @@ async def _amain() -> int:
     outcome = await harness.run()
     log.info(
         "run %s finished: %s (seq=%d rows_written=%d results=%d chunks=%d "
-        "live_sent=%d live_dropped=%d observed=%s)",
+        "live_sent=%d live_dropped=%d undrained=%d backfills=%d status_reports=%d "
+        "observed=%s)",
         outcome.run_id,
         outcome.status.value,
         outcome.seq_issued,
@@ -96,6 +97,9 @@ async def _amain() -> int:
         outcome.result_chunks,
         outcome.live_sent,
         outcome.live_dropped,
+        outcome.live_undrained,
+        outcome.backfills_served,
+        outcome.status_reports,
         outcome.observed_live,
     )
     if outcome.detail:

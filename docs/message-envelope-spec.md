@@ -17,8 +17,9 @@ ended up with drift between what the socket sent and what the table stored.
 Every record a run produces — a log line, a progress sample, a status
 transition, a result — is the same kind of thing: *something that happened
 during a run, at a point in time, that something downstream wants to see*.
-Giving them one shape means the transport (WebSocket, HTTP push, Delta) never
-needs to know what it's carrying, and the client has exactly one parser.
+Giving them one shape means the transport — the WebSocket, a backfill reply,
+Delta — never needs to know what it's carrying, and the client has exactly one
+parser.
 
 ## Common envelope fields (every message has these)
 
@@ -39,9 +40,16 @@ a seq value; they are not renumbered around.
 are droppable on the live path and `client_visible=false` records are never
 sent live at all, so a live gap is *routine* and the missing records may never
 arrive over that channel. They are always in Delta. So the client's rule is
-"gap → fetch from the durable store when you actually need it", not "gap →
-block until it turns up". The durable record is the one that is gap-free in
-the strong sense; `tests/integration/test_end_to_end.py` asserts that.
+"gap → fetch it when you actually need it", not "gap → block until it turns
+up". The durable record is the one that is gap-free in the strong sense;
+`tests/integration/test_end_to_end.py` asserts that.
+
+**There are two places a backfill can come from, and the job says which.** A
+recent gap is still in the job's own replay ring and is answered over the
+socket for the price of one frame; an older one exists only in Delta and costs
+a warehouse read, which costs uptime. Which is which is not a threshold either
+side keeps — the job publishes `replay_from_seq` and `flushed_through_seq`,
+and the app decides from those. See "Control frames" below.
 
 ## `log`
 
@@ -89,9 +97,11 @@ it: anything else emitting a magic large number has to null it itself.
 
 ## `status`
 
-A lifecycle transition. Not backed by its own table — `run_status` is a
-row that gets `UPDATE`d, and the live status message is a notification of
-that update, not the record of truth.
+A lifecycle transition. Not backed by its own table — `run_status` is one row
+per run, upserted by the job on every transition (`job/lakebase.py`), and the
+live status message is a notification of that update, not the record of truth.
+The append-only durable trace of the transitions themselves goes to
+`run_events`, which is what a run that nothing was watching leaves behind.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -155,6 +165,77 @@ grants, because different models serve different audiences. The `result`
 that model's own table and is read directly, not replayed through this
 envelope.
 
+## Control frames
+
+Envelope messages are what a run produces. **Control frames are what the two
+ends say to each other about the connection.** They travel on the same
+WebSocket and are tagged apart explicitly by `pack_frame`/`unpack_frame`, never
+sniffed apart by which keys happen to be present — implicit typing there is a
+decoding bug waiting on a schema change. They live in `shared/protocol.py`,
+and they are not part of the envelope: nothing here is ever written to Delta.
+
+A control frame is `{kind, run_id, ts, payload}`.
+
+| `kind` | Direction | What it is |
+|---|---|---|
+| `hello` | job → app | First frame on every connect *and* every reconnect. Says where the run is and what the job can still replay — see below |
+| `hello_ack` | app → job | The app acknowledging, and reporting its own view |
+| `cancel` | app → job | The one command that changes what a run does. Sets the harness's `threading.Event`; there is no durable or warehouse-poll fallback for it |
+| `backfill` | app → job | "Send me everything after seq N" |
+| `backfill_result` | job → app | The answer, served from the job's in-memory replay ring — never from the warehouse, which is the entire point |
+| `ping` / `pong` | both | App-level keepalive. Deliberately **not** a WS protocol ping: a proxy can answer one of those without the frame ever reaching the handler, which makes it useless for telling "the ingress dropped this" from "nothing was sent for a while" |
+| `bye` | job → app | The run is over; expect nothing further |
+
+### The three numbers on `hello`
+
+Besides `job_run_id` (Databricks' own run id, for reconciliation against the
+Jobs API), every `hello` carries:
+
+- **`next_seq`** — where this connection picks up. A job that has been running
+  unobserved for an hour attaches at seq 4,000, not 0.
+- **`replay_from_seq`** — the oldest seq the job can still replay from memory.
+  At or above it, ask the job. Below it, only the durable store has it.
+- **`flushed_through_seq`** — everything at or below this has reached Delta.
+  Above it the warehouse *cannot* answer, whatever it is asked.
+
+The last two are why a client needs no tuned constant to decide where to send
+a gap, and why neither side has to keep one in step with the other. They are
+facts the job already knows; it states them rather than making the app guess.
+They are restated on every `backfill_result` too, so a long-lived connection's
+picture does not go stale waiting for the next `hello`.
+
+### `backfill` and `backfill_result`
+
+`backfill` asks for everything after `after_seq`, exclusive, with an optional
+`limit`. The limit is capped at 500 (`DEFAULT_BACKFILL_LIMIT` in `job/bus.py`):
+a single unbounded reply would be a way for one reconnect to allocate the
+job's whole ring into a msgpack buffer, and a client with a bigger gap pages by
+seq instead.
+
+`backfill_result` carries the `messages` it could serve — envelope-shaped,
+identical to what went out live — plus `complete` and both seq bounds.
+
+**`complete: false` means the request reached below `replay_from_seq`**: the
+job served what it had and the rest is the warehouse's to answer. Precisely,
+the job can answer in full when `after_seq >= replay_from_seq - 1` — asking
+for everything *after* the message one below the ring's oldest still lands
+inside the ring. `complete: false` does *not* mean `limit` truncated the page:
+a truncated page is complete as far as it goes, and the caller pages on by
+seq.
+
+The reply withholds `client_visible=false` logs, because the durable backfill
+withholds them too. Two sources answering the same question differently is the
+failure this one-envelope design exists to prevent, and raw solver chatter
+that showed up only when the job happened to still be holding it would be
+exactly that. The seq gaps that leaves are honest and permanent: a client that
+loops "backfill until contiguous" spins forever — see "Why the client keeps
+its own history" in `docs/architecture.md`.
+
+**The app does not send a `backfill` yet.** The frames exist and the job
+answers them; the app's side is unbuilt, and its backfill route reads Unity
+Catalog for every gap. Do not write client code that assumes the reply will
+come.
+
 ## The schema, generated
 
 The tables above are the contract in prose; `schema/envelope.schema.json` is
@@ -214,7 +295,11 @@ A model never imports this spec, msgpack, WebSockets, or anything
 transport-related. It is handed a plain callback (something like
 `emit(type: str, **fields)`) by the job harness and calls it with
 envelope-shaped keyword arguments; the harness is responsible for stamping
-`run_id`/`seq`/`ts` and getting the message onto every active channel. See
+`run_id`/`seq`/`ts` and then, in this order, writing it durably, recording it
+in the run's replay ring, and offering it to the socket if one is attached.
+The order is the design: each step is allowed to fail without undoing the ones
+before it, which is what makes "logs may drop live, never durably" true rather
+than aspirational. See
 the relevant `.claude/agents/model-*.md` file for what a model's actual
 Python surface looks like.
 

@@ -65,9 +65,9 @@ delta-rs would add the column itself with `schema_mode="merge"`, so the
 outcome depended on which writer a deployment happened to select. That is no
 longer true and was never a safety net: **Spark is the only durable write
 path**, `saveAsTable` append fails on a column the table does not have, and
-`DeltaRsWriter` raises `NotImplementedError` rather than doing anything
-(`job/delta.py` — it takes a storage URI, not a UC name, and given a
-three-part name it would write to a local directory without erroring). So the
+delta-rs has since been deleted outright — it took a storage URI, not a UC
+name, and given a three-part name it wrote to a local directory without
+erroring (`job/delta.py`). So the
 DDL is the authority unconditionally: keep it ahead of the models, and apply
 the `ALTER TABLE` wherever it has already run.
 

@@ -147,10 +147,11 @@ loudly rather than silently shipping with no dependencies — confirmed with a
 throwaway `job/models/fake_model/`.
 
 It also excludes `deltalake`/`pyarrow` by default. That is not an oversight:
-`job/delta.py`'s `DeltaRsWriter` raises `NotImplementedError`, so Spark is
-the write path and those two would otherwise ship to every job to satisfy an
-import that never runs. `--with-delta` exists for the change that makes
-delta-rs real.
+Spark is the write path and `job/delta.py` no longer contains a delta-rs
+writer at all, so those two would otherwise ship to every job to satisfy an
+import nothing makes. The `delta` extra and `--with-delta` are kept for the
+work that would build one — which needs UC credential vending first, and is a
+new piece of work rather than a switch to flip.
 
 One naming gotcha worth knowing about going in: the `job/models/` directory
 name and the `pyproject.toml` extra name don't always match

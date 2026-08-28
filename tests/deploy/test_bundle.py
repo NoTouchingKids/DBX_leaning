@@ -75,15 +75,25 @@ def test_each_job_runs_its_own_model(jobs):
         assert params["DBX_MODEL"] == f"job.models.{model}"
 
 
-def test_jobs_declare_exactly_the_parameters_the_app_sends(jobs):
+def test_jobs_declare_every_parameter_the_app_sends(jobs):
     """Databricks rejects a run-now parameter a job has not declared, so this
-    drift would surface as every trigger failing."""
+    drift would surface as every trigger failing.
+
+    A SUBSET check, not equality, and the asymmetry is the point: the rule
+    Databricks actually enforces runs one way. A job declaring a parameter the
+    app never sends is fine — it takes its default, which is how deployment
+    config (the Lakebase REST endpoint, the Postgres schema) reaches a run
+    without the app having to carry a value that has nothing to do with the
+    run. The reverse is what breaks every trigger, so that is what is asserted.
+    """
     from server.routes.runs import JOB_PARAMETER_NAMES
 
     for model in MODELS:
         declared = {p["name"] for p in jobs[f"model_{model}"]["parameters"]}
-        assert declared == set(JOB_PARAMETER_NAMES), (
-            f"model_{model} declares {sorted(declared)}, app sends {sorted(JOB_PARAMETER_NAMES)}"
+        missing = set(JOB_PARAMETER_NAMES) - declared
+        assert not missing, (
+            f"model_{model} does not declare {sorted(missing)}, which the app sends; "
+            f"run-now would be rejected"
         )
 
 

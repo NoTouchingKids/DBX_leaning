@@ -16,9 +16,9 @@ otherwise. Read `CLAUDE.md`,
 The one-way adapter between a model and the outside world. It loads a model
 (by convention/duck-typing — see `docs/architecture.md`, "Why models are
 duck-typed"), drives its execution, and fans every message the model emits
-out to whichever channels are live, while always writing durably. It knows
+out over the WebSocket when one is up, while always writing durably. It knows
 nothing about FastAPI, SSE, or the browser — only about the job's own
-transport (WS client / HTTP push) and the Delta writer.
+transport (`job/bus.py`) and the Delta writer.
 
 Nothing here is model-specific. If you find yourself writing an `if
 model_type ==` branch, that logic belongs in the model, not here.
@@ -70,22 +70,27 @@ or subtly broken.
      periodically (~30–60s) if not currently connected — a run started
      while the app is down should attach automatically once the app comes
      up, with no restart needed.
-   - **HTTP push** fallback if WS isn't available or drops. One-way only —
-     this tier cannot carry inbound cancel commands, which is fine because
-     cancellation is handled separately (see below).
-   - Every message that goes out live also goes into the durable buffer —
-     the live channel is never the only copy.
+   - **There is no second live channel.** The HTTP push fallback used to be
+     one and was removed: it could not carry a cancel, could not answer a
+     backfill, and existed for a socket that has since been proven through
+     the Databricks Apps ingress. The app's `/api/runs/{id}/push` endpoint
+     still exists; the job simply does not use it. Do not reintroduce a
+     channel abstraction to hold one implementation.
+   - Every message that goes out live also goes into the durable buffer AND
+     into the job's replay ring (`job/record.py`) — the live path is never
+     the only copy, which is what makes its drop policy allowed to be
+     "oldest first, no tiers": anything dropped is recoverable by BACKFILL.
+   - **Drain before closing at teardown.** `WebSocketBus.drain()` first, then
+     `close()`. The other order cost a fast run its entire live stream,
+     terminal status included, because the send queue drained into an
+     already-shut socket. `drain()` also hoists status/result to the front,
+     so a socket too slow to clear the backlog still delivers the outcome.
 
 4. **Durable channel — always, regardless of live channel state.**
    - Write via one `write_batch(table, rows)` interface, chosen once at
-     process start and never branched on again. `DBX_WRITER` takes four
+     process start and never branched on again. `DBX_WRITER` takes three
      values (`job/delta.py`, `WriterKind`):
      **`spark`** is the only real path and what `auto` resolves to;
-     **`delta-rs`** is the target and raises `NotImplementedError` — it takes
-     a storage URI, not a UC name, and given a three-part name it writes to a
-     local directory *without erroring*, so a run would report SUCCEEDED with
-     its telemetry in a container about to be discarded. `auto` therefore
-     never picks it;
      **`jsonl`** is a local development writer, and `auto` only falls back to
      it when `DBX_ALLOW_LOCAL_WRITER=1` is set explicitly — otherwise no
      Spark session is a hard `RuntimeError`, because silently writing a

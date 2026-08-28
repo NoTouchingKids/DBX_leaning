@@ -36,7 +36,7 @@ SUBSTITUTED — and each one is a place local behaviour can diverge
     ``DBX_ALLOW_LOCAL_WRITER=1``: telemetry lands in newline-delimited JSON
     under the state directory, **not** in Unity Catalog. ``job/delta.py``
     requires that opt-in precisely so nobody can be confused about which one
-    happened. delta-rs is still unimplemented and still must not be selected.
+    happened. ``DBX_WRITER`` accepts only ``auto``, ``spark`` and ``jsonl``.
   * **No SQL warehouse.** So the app runs with ``sql`` degraded:
     ``GET /api/runs/{id}/messages`` (backfill) and ``GET /api/runs/{id}/results``
     answer 503, and startup reconciliation is skipped. Live streaming, trigger,

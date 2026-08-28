@@ -39,7 +39,7 @@ branch = one Claude Code session.
 
 | Track | Agent brief | Depends on |
 |---|---|---|
-| `job/` harness (WS client, HTTP push, Delta writer, model loader) | `.claude/agents/transport-job.md` | `shared/` |
+| `job/` harness (WS bus, run record, Delta writer, Lakebase status, model loader) | `.claude/agents/transport-job.md` | `shared/` |
 | `app/` (FastAPI, SSE, ServiceHub, whoami) | `.claude/agents/transport-app.md` | `shared/` |
 | `job/models/gurobi_scheduling/` | `.claude/agents/model-gurobi-scheduling.md` | `shared/` (message shape only — a model never imports the job or app) |
 | `job/models/scenario/` | `.claude/agents/model-scenario.md` | `shared/` |

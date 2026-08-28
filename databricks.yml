@@ -87,6 +87,19 @@ variables:
   lakebase_port:
     description: Lakebase port. TLS is required and assumed.
     default: "5432"
+  lakebase_rest_url:
+    description: >-
+      Database REST API endpoint the JOB posts its status transitions to.
+
+      The app reaches Lakebase over Postgres; a job cannot, because a
+      Postgres driver in that process would be paid for by all eleven model
+      environments. So the job goes over HTTP instead, and this is where.
+
+      Empty is a supported deploy: the job simply does not report status live,
+      and `run_events` plus the app's own writes still carry it. This travels
+      as a job-parameter DEFAULT rather than something the app sends at
+      trigger time, because it is a property of the deployment, not of a run.
+    default: ""
   lakebase_schema:
     description: >-
       Postgres schema `run_status` lives in.

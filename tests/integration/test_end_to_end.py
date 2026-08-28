@@ -155,24 +155,64 @@ async def test_the_gurobi_model_runs_through_the_gurobi_driver(run_config, tmp_p
 async def test_a_live_app_sees_the_same_run_the_durable_store_does(run_config, tmp_path):
     """The live path and the durable path must not diverge — one shape, one
     record, whichever way it travelled."""
+    import asyncio
+
+    from job.bus import WebSocketBus
+    from job.record import RunRecord
+    from job.shared.protocol import ControlFrame, unpack_frame
+
     writer = JsonlWriter(tmp_path / "delta")
-    seen = []
+    frames = []
 
-    class Listener:
-        name = "test-listener"
-        is_connected = True
+    class Socket:
+        """A socket whose `send` actually awaits.
 
-        async def start(self): ...
-        async def send_many(self, msgs):
-            seen.extend(msgs)
-            return True
+        The fake this replaced returned without ever awaiting, so the sender
+        never yielded mid-batch and always drained before teardown. That is
+        why a teardown bug — closing the socket before the queue had gone out,
+        which cost a fast run its entire live stream — could sit here
+        undetected. A yield point is the whole point of this class.
+        """
+
+        async def send(self, data):
+            await asyncio.sleep(0)
+            frames.append(unpack_frame(data))
 
         async def close(self): ...
 
+        def __aiter__(self):
+            async def inbound():
+                await asyncio.Event().wait()  # the app never sends anything back
+                yield b""  # pragma: no cover - unreachable, keeps this a generator
+
+            return inbound()
+
+    socket = Socket()
+
+    class Connect:
+        async def __aenter__(self):
+            return socket
+
+        async def __aexit__(self, *exc):
+            return None
+
     cfg = run_config("job.models.scenario", model_config={"progress_every": 30})
-    outcome = await JobHarness(cfg, writer=writer, channels=[Listener()]).run()
+    bus = WebSocketBus(
+        "wss://test/ws/job/x",
+        cfg.run_id,
+        record=RunRecord(cfg.run_id),
+        connect=lambda url, **kwargs: Connect(),
+    )
+    outcome = await JobHarness(cfg, writer=writer, bus=bus).run()
+    seen = [f for f in frames if not isinstance(f, ControlFrame)]
 
     assert outcome.observed_live is True
+
+    # The direction the old assertion never checked: a run the app watched must
+    # actually be told the run ended. This is what the teardown bug broke.
+    terminal = [m for m in seen if m.type.value == "status" and m.status.value == "SUCCEEDED"]
+    assert terminal, "the terminal status must reach a live observer, not just Delta"
+
     live_seqs = {m.seq for m in seen}
     durable_seqs = {
         row["seq"]

@@ -119,8 +119,8 @@ code change at all.
 - **Python `delta-rs` / `deltalake` is not on the documented supported-client
   list.** It may still work for external (non-managed) tables; that is
   unverified, and it is not a blocker, because Spark turned out to be the
-  write path outright rather than the fallback it was designed as (see
-  below).
+  write path outright rather than the fallback it was designed as, and
+  delta-rs has since been removed from `job/delta.py` entirely (see below).
 - **Managed-table writes from external clients are Public Preview**, gated
   behind `catalogManaged` ("catalog commits") and external data access being
   enabled at the metastore level.
@@ -136,10 +136,12 @@ code change at all.
   `"main.dbx_leaning.run_logs"` it does not raise — it creates a *local
   directory* with that literal name and writes there. Verified 2026-08-23. Any
   job doing this would report SUCCEEDED with an accurate `row_count` while its
-  telemetry sat in an ephemeral container filesystem. Making delta-rs usable
+  telemetry sat in an ephemeral container filesystem. This is why there is no
+  delta-rs writer in the repo at all: `DeltaRsWriter` and
+  `WriterKind.DELTA_RS` are deleted rather than stubbed, so the durable-write
+  selector cannot be handed a name for that failure. Making delta-rs usable
   means resolving the table to a storage location and obtaining credentials
-  via UC credential vending; until then `DeltaRsWriter` raises
-  `NotImplementedError` and `select_writer("auto")` never picks it.
+  via UC credential vending — new work, not a switch.
 - **Delta's own conflict rule:** concurrent blind `INSERT`/append operations
   cannot conflict with each other (optimistic concurrency control treats
   disjoint appends as non-overlapping). The one documented exception:

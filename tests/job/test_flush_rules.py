@@ -11,6 +11,7 @@ import time
 
 from job.buffer import DurableBuffer
 from job.delta import JsonlWriter
+from job.shared.envelope import make_message
 from job.shared.tables import TableSet
 from job.sink import DurableSink
 
@@ -127,34 +128,61 @@ async def test_flush_loop_ticks_on_age_alone(tmp_path):
     assert sink.rows_written == 1, "the age bound never fired"
 
 
+# --- how far the durable store has really caught up ------------------------
+
+
+async def test_the_durable_high_water_mark_stops_below_the_lowest_pending_row(tmp_path):
+    """Not the highest seq written — the lowest still waiting, minus one.
+
+    Tables flush independently, so a `run_logs` flush must not claim that an
+    unflushed `run_progress` row is durable. This number goes out on `hello`
+    and on every backfill reply, and a client told the warehouse can serve
+    seq 4 would go and fetch a row that is not there.
+    """
+    writer = JsonlWriter(tmp_path)
+    sink = DurableSink(writer, TableSet(), max_bytes=500, max_age_s=999)
+
+    sink.append_message(make_message("progress", run_id="r", seq=0, elapsed_seconds=1.0))
+    for seq in range(1, 6):
+        sink.append_message(make_message("log", run_id="r", seq=seq, message="x" * 200))
+
+    assert await sink.flush_due() == 5, "only the logs crossed the size bound"
+    assert sink.buffer.min_pending_seq() == 0, "the progress row is still waiting"
+    assert sink.flushed_through_seq(issued=6) == -1
+
+    await sink.flush_all()
+    assert sink.buffer.min_pending_seq() is None
+    assert sink.flushed_through_seq(issued=6) == 5
+
+
+async def test_result_rows_carry_no_seq_and_do_not_drag_the_mark_backwards(tmp_path):
+    """They are model data, not envelope messages. Reading a missing `seq` as
+    zero would pin the mark at -1 for every run that streams results."""
+    sink = DurableSink(JsonlWriter(tmp_path), TableSet(), max_bytes=10**9, max_age_s=10**9)
+    for seq in range(3):
+        sink.append_message(make_message("log", run_id="r", seq=seq, message="x"))
+    await sink.flush_all()
+
+    sink.append_rows("results_t", [{"a": 1}, {"a": 2}])
+
+    assert sink.buffer.min_pending_seq() is None
+    assert sink.flushed_through_seq(issued=3) == 2
+
+
 # --- writer selection ------------------------------------------------------
 
 
-def test_delta_rs_refuses_rather_than_writing_to_a_local_directory():
-    """write_deltalake() takes a URI, not a UC name — and given a three-part
-    name it does not raise, it creates a local directory of that literal name.
-    A deployed run would report SUCCEEDED with its telemetry in a container
-    filesystem that is about to vanish. Refusing is the only honest option
-    until credential vending exists."""
-    import pytest
-
-    from job.delta import DELTA_RS_UNIMPLEMENTED, DeltaRsWriter, select_writer
-
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        DeltaRsWriter()
-    with pytest.raises(NotImplementedError):
-        select_writer("delta-rs")
-    assert "credential vending" in DELTA_RS_UNIMPLEMENTED
-
-
-def test_auto_never_picks_delta_rs():
-    """Picking it automatically is exactly how the silent-local-write returns."""
+def test_auto_refuses_rather_than_quietly_writing_somewhere_local():
+    """The failure this selector exists to prevent already happened once: a
+    writer handed a three-part UC name wrote to a local directory without
+    erroring, so a run reported SUCCEEDED with its telemetry in a container
+    about to be discarded. Failing loudly beats every silent fallback."""
     import pytest
 
     from job.delta import select_writer
 
     # No Spark session here and no local opt-in, so auto has nothing to choose
-    # — and the error must name Spark, not fall through to delta-rs.
+    # — and the error must say so rather than find something to write to.
     with pytest.raises(RuntimeError, match="no Spark session could be found or created"):
         select_writer("auto")
 
@@ -172,21 +200,23 @@ def test_an_unknown_writer_is_rejected_by_name():
 
     from job.delta import select_writer
 
-    with pytest.raises(ValueError, match="expected auto|delta-rs|spark|jsonl"):
+    # Escaped, so this asserts the whole list rather than matching whichever
+    # alternative happens to appear.
+    with pytest.raises(ValueError, match=r"expected one of auto\|spark\|jsonl"):
         select_writer("parquet")
 
 
 def test_the_writer_kinds_are_an_enum_and_the_error_lists_them_all():
     """The valid set exists once.
 
-    `select_writer` used to compare against four string literals and then
-    report the valid set from a hand-written message — two lists kept in step
-    by hand. Deriving the message from the enum is what stops them drifting,
-    the same way `make_message` derives its error from `MessageType`.
+    `select_writer` used to compare against string literals and then report
+    the valid set from a hand-written message — two lists kept in step by
+    hand. Deriving the message from the enum is what stops them drifting, the
+    same way `make_message` derives its error from `MessageType`.
 
     It matters more here than the size suggests: this selector chooses the
     DURABLE write path, and choosing wrong is the failure that already
-    happened once — delta-rs given a three-part UC name wrote to a local
+    happened once — a writer given a three-part UC name wrote to a local
     directory without erroring, so a run reported SUCCEEDED with its telemetry
     in a container about to be discarded.
     """
@@ -210,4 +240,4 @@ def test_the_writer_kind_survives_what_an_env_var_really_contains():
     assert WriterKind.parse(None) is WriterKind.AUTO
     assert WriterKind.parse("") is WriterKind.AUTO
     assert WriterKind.parse("  SPARK ") is WriterKind.SPARK
-    assert WriterKind.parse("Delta-RS") is WriterKind.DELTA_RS
+    assert WriterKind.parse("Jsonl") is WriterKind.JSONL

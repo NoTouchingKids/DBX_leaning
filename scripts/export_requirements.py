@@ -35,9 +35,9 @@ OUT_DIR = ROOT / "deploy" / "requirements"
 #: Every job carries `job` (the harness's own transport) plus its own model
 #: extra, and nothing else.
 #:
-#: Notably NOT `delta`: the durable writer is Spark, which the runtime already
-#: provides, and the delta-rs writer is not implemented (see job/delta.py).
-#: Add it back in the same commit that makes DeltaRsWriter real.
+#: There is deliberately no `delta` extra to exclude any more: the durable
+#: writer is Spark, which the runtime already provides, and the delta-rs
+#: writer was deleted rather than left unimplemented (see job/delta.py).
 ENVIRONMENTS: dict[str, list[str]] = {
     model: ["job", extra] for model, extra in sorted(model_extras().items())
 }

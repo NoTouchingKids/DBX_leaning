@@ -24,12 +24,6 @@ Usage::
 Requires ``uv`` on PATH (already the project's build/dependency tool —
 see ``CLAUDE.md``, "uv, and the lockfile is the source of truth").
 
-Note on the Delta writer: ``deltalake``/``pyarrow`` are **excluded by
-default**. ``job/delta.py``'s ``DeltaRsWriter`` raises ``NotImplementedError``
-(it cannot address a Unity Catalog table by name and writes to a local
-directory instead of failing), so Spark is the write path and those two
-packages would otherwise ship to every job to satisfy an import that never
-runs. ``--with-delta`` is there for the change that makes delta-rs real.
 """
 
 from __future__ import annotations
@@ -84,13 +78,12 @@ def _dedup(items: list[str]) -> list[str]:
     return out
 
 
-def resolve_dependencies(root: dict, *, model_extra: str, include_delta: bool) -> list[str]:
+def resolve_dependencies(root: dict, *, model_extra: str) -> list[str]:
     project = root["project"]
     optional = project.get("optional-dependencies", {})
 
     core = list(project.get("dependencies", []))
     job = list(optional.get("job", []))
-    delta = list(optional.get("delta", [])) if include_delta else []
     try:
         model = list(optional[model_extra])
     except KeyError:
@@ -99,7 +92,7 @@ def resolve_dependencies(root: dict, *, model_extra: str, include_delta: bool) -
             f"extra; available: {sorted(optional)}"
         ) from None
 
-    return _dedup(core + job + delta + model)
+    return _dedup(core + job + model)
 
 
 def render_pyproject(
@@ -139,7 +132,6 @@ def stage_and_build(
     model_dir_name: str,
     *,
     out_dir: Path,
-    include_delta: bool = False,
     keep_tmp: bool = False,
 ) -> Path:
     root = load_root_pyproject()
@@ -154,7 +146,7 @@ def stage_and_build(
         extra = extra_for(model_dir_name)
     except UnregisteredModel as exc:
         raise BuildError(str(exc)) from None
-    dependencies = resolve_dependencies(root, model_extra=extra, include_delta=include_delta)
+    dependencies = resolve_dependencies(root, model_extra=extra)
 
     stage = REPO_ROOT / ".build" / f"wheel-{model_dir_name}"
     if stage.exists():
@@ -211,14 +203,6 @@ def main(argv: list[str] | None = None) -> int:
         help="output root (default: build/wheels/)",
     )
     parser.add_argument(
-        "--with-delta",
-        action="store_true",
-        help="include the delta-rs extra (deltalake/pyarrow). OFF by default: "
-        "job/delta.py's DeltaRsWriter raises NotImplementedError, so those two "
-        "packages would ship to every job to satisfy an import that never runs. "
-        "Turn this on in the same change that makes delta-rs real.",
-    )
-    parser.add_argument(
         "--keep-tmp",
         action="store_true",
         help="leave the staged .build/wheel-<model>/ directory for inspection",
@@ -241,9 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in targets:
         print(f"--- building {name} ---")
         try:
-            out = stage_and_build(
-                name, out_dir=args.out_dir, include_delta=args.with_delta, keep_tmp=args.keep_tmp
-            )
+            out = stage_and_build(name, out_dir=args.out_dir, keep_tmp=args.keep_tmp)
         except BuildError as exc:
             print(f"error: {exc}", file=sys.stderr)
             failures.append(name)

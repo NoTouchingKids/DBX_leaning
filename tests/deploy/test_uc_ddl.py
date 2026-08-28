@@ -10,7 +10,7 @@ read `001_core_tables.sql`.
 That is the same shape as the bug that prompted this audit — a settings file
 nothing checked, quietly disagreeing with the code that read it. Here the cost
 is higher than a degraded fallback: Spark's `saveAsTable` append is the only
-durable write path (`job/delta.py`; delta-rs raises rather than pretending),
+durable write path (`job/delta.py` — the only one there is),
 so a column the DDL lacks fails the write on a workspace, inside a job, at the
 end of a long run. A column the DDL has and `to_row` never fills is the
 cheaper direction and still worth knowing about, because it accumulates.

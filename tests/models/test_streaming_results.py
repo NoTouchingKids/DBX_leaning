@@ -104,6 +104,7 @@ def test_the_harness_still_supports_repeated_result_emissions():
     giving each emission its own chunk_index and its own per-chunk row_count,
     fail here and loudly rather than in a deployed run's results table."""
     from job.emitter import Emitter
+    from job.record import RunRecord
 
     emitted = []
 
@@ -116,11 +117,12 @@ def test_the_harness_still_supports_repeated_result_emissions():
         def append_rows(self, table, rows):
             pass
 
-    class _Relay:
-        def offer(self, msg):
-            pass
-
-    emitter = Emitter("run-1", sink=_Sink(), relay=_Relay(), results_table="results_streaming")
+    emitter = Emitter(
+        "run-1",
+        sink=_Sink(),
+        record=RunRecord("run-1"),
+        results_table="results_streaming",
+    )
     model = build_model({"n": 300, "step": 60})
     model.emit = emitter.emit
     model.should_cancel = lambda: False

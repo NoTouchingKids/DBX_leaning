@@ -17,7 +17,7 @@ from typing import Any
 
 __all__ = ["JobConfig", "WriterKind"]
 
-WriterKind = str  # "auto" | "delta-rs" | "spark" | "jsonl"
+WriterKind = str  # "auto" | "spark" | "jsonl"
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -71,6 +71,11 @@ class JobConfig:
     #: catalog/schema above.
     results_table: str | None = None
 
+    #: Where run status is reported live, over the Database REST API. Absent
+    #: = no live status reporting; the end-of-run Delta write still lands.
+    lakebase_rest_url: str | None = None
+    lakebase_schema: str = "dbx_leaning"
+
     writer: WriterKind = "auto"
     #: Only used by the jsonl writer (local development and tests).
     local_root: str = ".delta-local"
@@ -81,13 +86,17 @@ class JobConfig:
     flush_max_age_s: float = 30.0
     flush_tick_s: float = 1.0
 
-    #: Live path only. Full queue drops logs (best-effort by contract);
-    #: progress/status/result are never dropped. Durable writes do not pass
-    #: through here at all.
+    #: Live path only, and now recoverable: a message dropped here is still
+    #: in the durable buffer and in the job's replay ring, so the app can ask
+    #: for it back over the socket instead of it being lost.
     live_queue_max: int = 2000
     ws_reconnect_s: float = 30.0
     ws_ping_s: float = 20.0
-    http_push_batch: int = 50
+    ws_send_batch: int = 50
+    #: How long teardown waits for the send queue to empty before shutting
+    #: the socket. The bound is what stops a wedged socket holding a finished
+    #: run open; anything still unsent is durable and BACKFILL-able.
+    ws_drain_s: float = 5.0
     http_timeout_s: float = 10.0
 
     #: How often the model's blocking call should look at the cancel flag.
@@ -126,6 +135,8 @@ class JobConfig:
             catalog=e.get("DBX_CATALOG", "main"),
             schema=e.get("DBX_SCHEMA", "dbx_leaning"),
             results_table=(e.get("DBX_RESULTS_TABLE") or "").strip() or None,
+            lakebase_rest_url=(e.get("DBX_LAKEBASE_REST_URL") or "").strip() or None,
+            lakebase_schema=e.get("DBX_LAKEBASE_SCHEMA", "dbx_leaning"),
             writer=e.get("DBX_WRITER", "auto"),
             local_root=e.get("DBX_LOCAL_ROOT", ".delta-local"),
             flush_max_bytes=_env_int(e, "DBX_FLUSH_MAX_BYTES", 1_000_000),
@@ -134,7 +145,8 @@ class JobConfig:
             live_queue_max=_env_int(e, "DBX_LIVE_QUEUE_MAX", 2000),
             ws_reconnect_s=_env_float(e, "DBX_WS_RECONNECT_S", 30.0),
             ws_ping_s=_env_float(e, "DBX_WS_PING_S", 20.0),
-            http_push_batch=_env_int(e, "DBX_HTTP_PUSH_BATCH", 50),
+            ws_send_batch=_env_int(e, "DBX_WS_SEND_BATCH", 50),
+            ws_drain_s=_env_float(e, "DBX_WS_DRAIN_S", 5.0),
             http_timeout_s=_env_float(e, "DBX_HTTP_TIMEOUT_S", 10.0),
             cancel_poll_s=_env_float(e, "DBX_CANCEL_POLL_S", 0.5),
         )
@@ -146,6 +158,3 @@ class JobConfig:
         base = self.app_url.replace("https://", "wss://").replace("http://", "ws://")
         return f"{base}/ws/job/{self.run_id}"
 
-    @property
-    def push_url(self) -> str | None:
-        return f"{self.app_url}/api/runs/{self.run_id}/push" if self.app_url else None

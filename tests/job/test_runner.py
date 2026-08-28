@@ -8,12 +8,15 @@ import time
 
 import pytest
 
+from job.bus import WebSocketBus
 from job.delta import JsonlWriter
 from job.loader import describe_object
+from job.record import RunRecord
 from job.runner import JobHarness
-from job.shared.envelope import RunStatus
+from job.shared.envelope import RunStatus, StatusMessage
+from job.shared.protocol import ControlKind, backfill, pack_frame
 
-from .conftest import BlockingModel, ChunkedModel, FakeModel
+from .conftest import BlockingModel, ChunkedModel, FakeModel, FakeSocket, connector, until
 
 
 def rows(writer: JsonlWriter, table: str) -> list[dict]:
@@ -226,3 +229,62 @@ async def test_the_durable_record_is_complete_at_any_size(cfg, writer, steps):
     assert outcome.unflushed_rows == 0
     assert len(rows(writer, "run_progress")) == steps
     assert len(rows(writer, "results_fake")) == steps
+
+
+# --- the live bus, attached ------------------------------------------------
+
+
+def bus_over(ws: FakeSocket, run_id: str, **kw) -> WebSocketBus:
+    # `record=` is required; the harness swaps in its own on the way in, so
+    # what a backfill answers with is the run's real replay ring.
+    return WebSocketBus("ws://x/ws", run_id, record=RunRecord(run_id), connect=connector(ws), **kw)
+
+
+async def test_a_run_that_outruns_its_socket_still_delivers_the_terminal_status(cfg, writer):
+    """The drain regression, and the reason this fake's `send` awaits.
+
+    Teardown used to close the socket and *then* let the queue drain into it,
+    so a run that finishes faster than the socket can flush lost its whole
+    live stream — terminal status included. It was invisible for a year of
+    tests because every fake returned from `send` without ever suspending: the
+    pump ran to completion in one uninterrupted pass and the queue was always
+    empty by the time anything closed.
+    """
+    ws = FakeSocket(send_delay_s=0.001)
+    conf = cfg(model_config={"steps": 300})
+    bus = bus_over(ws, conf.run_id)
+
+    outcome = await JobHarness(conf, writer=writer, bus=bus).run()
+
+    assert outcome.status is RunStatus.SUCCEEDED
+    assert outcome.observed_live is True
+    assert outcome.live_undrained == 0, "the drain gave up with the run still queued"
+
+    statuses = [m for m in ws.messages() if isinstance(m, StatusMessage)]
+    assert [m.status for m in statuses] == [RunStatus.RUNNING, RunStatus.SUCCEEDED]
+    assert outcome.live_sent == outcome.seq_issued, "the live stream lost messages"
+
+
+async def test_a_backfill_mid_run_is_answered_from_the_harnesss_own_record(cfg, writer):
+    """A bus assembled elsewhere must still serve the run's real replay ring —
+    otherwise a reconnecting client gets an empty answer and no error."""
+    model = BlockingModel({"poll_s": 0.01})
+    conf = cfg(model_spec="tests.job.conftest:BlockingModel")
+    ws = FakeSocket()
+    bus = bus_over(ws, conf.run_id)
+    harness = JobHarness(conf, writer=writer, bus=bus, handle=describe_object(model, "blocking"))
+
+    async def ask_then_stop():
+        await until(lambda: bus.is_connected)
+        ws.push(pack_frame(backfill(conf.run_id, after_seq=-1)))
+        await until(lambda: bool(ws.control(ControlKind.BACKFILL_RESULT)))
+        harness.token.cancel("stop")
+
+    asyncio.create_task(ask_then_stop())
+    outcome = await harness.run()
+
+    assert outcome.status is RunStatus.CANCELLED
+    assert outcome.backfills_served == 1
+    payload = ws.control(ControlKind.BACKFILL_RESULT)[0].payload
+    assert [m["type"] for m in payload["messages"]][0] == "status", "the run had already started"
+    assert payload["complete"] is True

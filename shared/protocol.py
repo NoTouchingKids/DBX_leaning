@@ -30,6 +30,8 @@ __all__ = [
     "cancel",
     "ping",
     "pong",
+    "backfill",
+    "backfill_result",
 ]
 
 
@@ -38,9 +40,17 @@ class ControlKind(str, Enum):
     HELLO = "hello"
     #: app -> job, acknowledges the hello (and reports the app's view)
     HELLO_ACK = "hello_ack"
-    #: app -> job. The *only* inbound command. Sets the harness's
-    #: threading.Event; there is no durable/warehouse-poll fallback for it.
+    #: app -> job. Sets the harness's threading.Event; there is no
+    #: durable/warehouse-poll fallback for it.
     CANCEL = "cancel"
+    #: app -> job: "send me everything after seq N". Answered from the job's
+    #: own in-memory replay ring, never from the warehouse — which is the
+    #: point. A gap the ring cannot cover comes back `complete: false` with
+    #: `replay_from_seq`, and *that* is when the app goes to SQL.
+    BACKFILL = "backfill"
+    #: job -> app, the answer. Carries the messages it could serve plus the
+    #: two seq bounds that let the app decide whether it still needs SQL.
+    BACKFILL_RESULT = "backfill_result"
     #: App-level keepalive, both directions. Not a WS protocol ping — those
     #: can be answered by a proxy without ever reaching the handler, which
     #: makes them useless for telling "the ingress dropped this" from
@@ -89,14 +99,75 @@ def unpack_frame(raw: bytes) -> Frame:
     raise ValueError(f"unknown frame discriminator {kind!r}")
 
 
-def hello(run_id: str, *, job_run_id: str | None = None, next_seq: int = 0) -> ControlFrame:
-    """First frame from a job. ``next_seq`` tells the app where this
-    connection picks up — a job that has been running unobserved for an hour
-    attaches at seq 4,000, not 0."""
+def hello(
+    run_id: str,
+    *,
+    job_run_id: str | None = None,
+    next_seq: int = 0,
+    replay_from_seq: int | None = None,
+    flushed_through_seq: int | None = None,
+) -> ControlFrame:
+    """First frame from a job.
+
+    ``next_seq`` says where this connection picks up — a job that has been
+    running unobserved for an hour attaches at seq 4,000, not 0.
+
+    The two bounds are what make BACKFILL decidable without a tuned constant
+    on either side:
+
+    - ``replay_from_seq`` — the oldest seq the job can still replay from
+      memory. Above it, ask the job. Below it, only the warehouse has it.
+    - ``flushed_through_seq`` — everything at or below this has reached Delta.
+      Above it the warehouse *cannot* answer, whatever it is asked.
+
+    Both are facts the job already knows, so neither side has to agree a
+    threshold in advance and keep it in step.
+    """
     return ControlFrame(
         kind=ControlKind.HELLO,
         run_id=run_id,
-        payload={"job_run_id": job_run_id, "next_seq": next_seq},
+        payload={
+            "job_run_id": job_run_id,
+            "next_seq": next_seq,
+            "replay_from_seq": replay_from_seq,
+            "flushed_through_seq": flushed_through_seq,
+        },
+    )
+
+
+def backfill(run_id: str, *, after_seq: int, limit: int | None = None) -> ControlFrame:
+    """app -> job: everything after ``after_seq``, exclusive."""
+    return ControlFrame(
+        kind=ControlKind.BACKFILL,
+        run_id=run_id,
+        payload={"after_seq": after_seq, "limit": limit},
+    )
+
+
+def backfill_result(
+    run_id: str,
+    *,
+    after_seq: int,
+    messages: list[dict[str, Any]],
+    complete: bool,
+    replay_from_seq: int,
+    flushed_through_seq: int,
+) -> ControlFrame:
+    """job -> app: the answer, and enough to know whether it is the whole one.
+
+    ``complete=False`` means the request reached below ``replay_from_seq``:
+    the job served what it had, and the rest is the warehouse's to answer.
+    """
+    return ControlFrame(
+        kind=ControlKind.BACKFILL_RESULT,
+        run_id=run_id,
+        payload={
+            "after_seq": after_seq,
+            "messages": messages,
+            "complete": complete,
+            "replay_from_seq": replay_from_seq,
+            "flushed_through_seq": flushed_through_seq,
+        },
     )
 
 

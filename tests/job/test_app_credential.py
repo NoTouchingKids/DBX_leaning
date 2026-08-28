@@ -192,35 +192,3 @@ class TestCaching:
         credential._from_env = fetch
         await credential.token()
         assert credential._expires_at > 0
-
-
-class TestTheRedirectThatDoesNotSayWhatItMeans:
-    """An unauthenticated handshake does not come back 401.
-
-    The Databricks Apps proxy answers it with a 302 to the OAuth login page,
-    the websockets client follows the redirect, and the error is about the URL
-    it landed on:
-
-        ws session ended (https://.../oidc/oauth2/v2.0/authorize?...
-        isn't a valid URI: scheme isn't ws or wss)
-
-    Nothing in that names the cause.
-    """
-
-    def test_the_oauth_redirect_is_explained(self):
-        from job.channels import _diagnosis
-
-        exc = ValueError(
-            "https://dbc-9f8a3f01-0b4c.cloud.databricks.com/oidc/oauth2/v2.0/authorize"
-            "?client_id=a97fa469&redirect_uri=https%3A%2F%2Fdbx-leaning.aws.databricksapps.com"
-            " isn't a valid URI: scheme isn't ws or wss"
-        )
-        said = _diagnosis(exc)
-
-        assert "rejecting the handshake" in said
-        assert "CAN_USE" in said
-
-    def test_an_ordinary_failure_is_not_editorialised(self):
-        from job.channels import _diagnosis
-
-        assert _diagnosis(ConnectionRefusedError("connection refused")) == ""

@@ -31,9 +31,10 @@ Then, before writing or editing anything, state back in your own words:
    relevant to the track you're about to work on** — e.g. if you're building
    a model, the 2000-variable Gurobi cap or the concurrent-job-task ceiling;
    if you're building `job/`, the flush cadence and the fact that **Spark is
-   the only durable write path** (delta-rs is unimplemented and raises rather
-   than silently writing a three-part UC name to a local directory — it is
-   not a fallback tier to design around); if you're building `app/`, the
+   the only durable write path** (delta-rs was deleted rather than left
+   unimplemented — handed a three-part UC name it wrote to a local directory
+   without erroring, so there is no fallback tier to design around); if
+   you're building `app/`, the
    SSE/warehouse-cost interaction and which run store is live.
 
 Keep this to a few short paragraphs, not an essay — the goal is a quick,
