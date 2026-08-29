@@ -1,11 +1,21 @@
-"""Where a job's messages come in: WebSocket first, HTTP push as fallback.
+"""Where a job's messages come in: the WebSocket, and one HTTP endpoint beside
+it that the job itself no longer uses.
 
-Both land in the same ``hub.ingest`` — the two channels must not diverge, or a
-run observed over one path would look different from the same run observed
-over the other.
+HTTP push was the live path's fallback and is gone from `job/bus.py`: a second
+one-way channel could carry neither a cancel nor a backfill, and the ingress
+probes settled that the socket survives. `/api/runs/{run_id}/push` stays
+because `scripts/dev_launcher.py` reports an orphaned local run through it —
+a real envelope message on the real ingress, rather than a write into the
+registry behind the app's back.
 
-Only the WebSocket carries anything *back* (cancel). HTTP push is one-way by
-design, not by omission.
+Both land in the same ``hub.ingest`` — the two must not diverge, or a run
+observed over one path would look different from the same run observed over
+the other.
+
+Only the WebSocket carries anything *back*, and there are two things it
+carries: `cancel`, and the `backfill` request that answers a browser's gap
+from the job's own memory instead of waking the SQL warehouse. HTTP push is
+one-way by design, not by omission.
 """
 
 from __future__ import annotations
@@ -90,7 +100,9 @@ async def job_socket(websocket: WebSocket, run_id: str) -> None:
     except WebSocketDisconnect:
         log.info("job detached from run %s", run_id)
     except Exception:  # noqa: BLE001
-        log.exception("job socket for %s failed")
+        # The run id was missing from this line: `%s` with nothing to fill it,
+        # so the one log written when a job's socket dies did not say whose.
+        log.exception("job socket for %s failed", run_id)
     finally:
         hub.job_sockets.unregister(run_id, websocket)
 
@@ -99,6 +111,12 @@ async def _handle_control(
     hub: ServiceHub, websocket: WebSocket, run_id: str, frame: ControlFrame
 ) -> None:
     if frame.kind is ControlKind.HELLO:
+        # Recorded, not just logged. `replay_from_seq` and `flushed_through_seq`
+        # in this payload are what let `/api/runs/{id}/messages` tell a gap the
+        # job can serve from memory from one only Unity Catalog has. Logging
+        # them and dropping them — which is what this did — meant every
+        # backfill, however small, woke the warehouse.
+        hub.job_sockets.record_bounds(run_id, frame.payload)
         log.info("job hello for %s: %s", run_id, frame.payload)
         await websocket.send_bytes(
             pack_frame(
@@ -109,6 +127,13 @@ async def _handle_control(
                 )
             )
         )
+    elif frame.kind is ControlKind.BACKFILL_RESULT:
+        # Wakes whoever is parked in `JobConnections.backfill`. Nobody waiting
+        # is a normal outcome, not an error: it is a reply that arrived after
+        # its requester gave up and went to SQL. The bounds on it are recorded
+        # on the way past either way.
+        if not hub.job_sockets.resolve_backfill(run_id, frame.payload):
+            log.info("backfill_result for %s had no waiter; dropped", run_id)
     elif frame.kind is ControlKind.PING:
         await websocket.send_bytes(pack_frame(pong(run_id)))
     elif frame.kind is ControlKind.BYE:

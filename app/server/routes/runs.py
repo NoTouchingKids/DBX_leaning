@@ -15,13 +15,26 @@ from pydantic import BaseModel, Field
 
 from shared.protocol import cancel as cancel_frame
 
-from ..deps import Hub, Repo, Store
+from ..deps import Hub, Repo, Store, get_repo
 from ..jobs_api import JobsApiError
 from ..repository import UnsafeTableName, validate_table_name
+from ..services import BACKFILL_TIMEOUT_S
 from ..store import DuplicateRun, SlotDenied
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
+
+#: The most this will ask a job for in one backfill reply. It mirrors
+#: ``DEFAULT_BACKFILL_LIMIT`` in ``job/bus.py``, where the job caps its own
+#: reply, and it must never exceed it.
+#:
+#: The reason is ``more``. A page shorter than what was asked for reads as
+#: "that is all there is", so asking a job for 5,000 and being handed its
+#: capped 500 would tell a client to stop paging in the middle of its gap —
+#: messages silently missing, with a `more: false` saying there are none. Ask
+#: for no more than the job will send and a short page means what it says.
+#: ``tests/app/test_backfill_routing.py`` pins the two together.
+JOB_REPLY_LIMIT = 500
 
 #: What an operator does when a job is running with no live channel to it.
 #: Documented rather than built around — the app cannot reach a job it has no
@@ -199,22 +212,22 @@ async def get_run(run_id: str, store: Store, hub: Hub) -> dict:
     }
 
 
-@router.get("/{run_id}/messages")
-async def backfill(
+def _backfill_page(
     run_id: str,
-    repo: Repo,
-    hub: Hub,
-    after_seq: int = Query(-1, ge=-1, description="exclusive lower bound on seq"),
-    limit: int | None = Query(None, ge=1, le=50_000),
+    after_seq: int,
+    messages: list[dict[str, Any]],
+    *,
+    page: int,
+    source: str,
 ) -> dict:
-    """Explicit, client-triggered backfill from Unity Catalog.
+    """One response shape, whichever source answered.
 
-    Called when a client knows it has a real gap — not automatically on every
-    reconnect. A finished run is immutable, so a client that has fetched one
-    can cache it forever.
+    A client cannot be made to care where its messages came from: the same
+    envelope-shaped dicts, paged the same way by ``next_after_seq``. ``source``
+    is the single exception, and it is here because "did that read wake the
+    warehouse" is the question this whole routing exists to answer, and it
+    should be observable in a response rather than only in the app's log.
     """
-    page = limit or hub.config.backfill_page_size
-    messages = await repo.messages_since(run_id, after_seq, page)
     return {
         "run_id": run_id,
         "after_seq": after_seq,
@@ -223,7 +236,71 @@ async def backfill(
         # A full page probably means there is more; the client pages by seq.
         "more": len(messages) >= page,
         "next_after_seq": messages[-1]["seq"] if messages else after_seq,
+        "source": source,
     }
+
+
+@router.get("/{run_id}/messages")
+async def backfill(
+    run_id: str,
+    hub: Hub,
+    after_seq: int = Query(-1, ge=-1, description="exclusive lower bound on seq"),
+    limit: int | None = Query(None, ge=1, le=50_000),
+) -> dict:
+    """Explicit, client-triggered backfill: the job first, Unity Catalog if it
+    cannot answer.
+
+    Called when a client knows it has a real gap — not automatically on every
+    reconnect. A finished run is immutable, so a client that has fetched one
+    can cache it forever.
+
+    **Ask the job first, and only then SQL.** A tab backgrounded for thirty
+    seconds reconnects with a gap of a few dozen messages. Served from Unity
+    Catalog that is a SELECT, which means the warehouse is awake, which means
+    flicking between tabs is a way to spend money — warehouse cost is uptime,
+    not statement count. Served from the job's replay ring it is one WebSocket
+    frame and no warehouse at all.
+
+    Where the boundary sits is a fact on the wire, not a constant kept here:
+    the job states the oldest seq it can still replay, and a gap that reaches
+    below it is the warehouse's to answer.
+
+    The job's other bound, `flushed_through_seq`, needs no branch of its own.
+    What Delta cannot serve yet is the newest messages, and those are always
+    inside the ring — so a client paging up from below the floor crosses into
+    the job's range on a later page and the job answers exactly those.
+    """
+    page = limit or hub.config.backfill_page_size
+
+    if hub.job_sockets.can_serve(run_id, after_seq):
+        asked = min(page, JOB_REPLY_LIMIT)
+        reply = await hub.job_sockets.backfill(
+            run_id, after_seq=after_seq, limit=asked, timeout_s=BACKFILL_TIMEOUT_S
+        )
+        if reply is not None and reply.get("complete"):
+            messages = [m for m in reply.get("messages") or [] if isinstance(m, dict)]
+            return _backfill_page(run_id, after_seq, messages, page=asked, source="job")
+        if reply is not None:
+            # `complete: false` — the ring evicted past this cursor between
+            # the bounds we had and the reply. Its partial page is discarded
+            # rather than stitched onto the SQL one: two sources merged into a
+            # single page is a dedupe problem, and the warehouse can serve the
+            # whole gap on its own.
+            log.info(
+                "job for %s could not cover a backfill after seq %d (replayable from %s); "
+                "reading it from the warehouse",
+                run_id,
+                after_seq,
+                reply.get("replay_from_seq"),
+            )
+
+    # No socket, no answer, or not the whole answer. Only *now* is the read
+    # path required, which is why `repo` is resolved here rather than injected:
+    # a deployment with Lakebase and no warehouse can still serve a live run's
+    # recent gap, and must not be 503'd for a question the job just answered.
+    repo = get_repo(hub)
+    messages = await repo.messages_since(run_id, after_seq, page)
+    return _backfill_page(run_id, after_seq, messages, page=page, source="warehouse")
 
 
 @router.get("/{run_id}/results")

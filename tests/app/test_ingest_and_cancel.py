@@ -1,4 +1,10 @@
-"""The job's ingress, and the one command that travels back to it."""
+"""The job's ingress, and what travels back down it: cancel, and a backfill.
+
+Both directions matter here. The inbound half is the run's telemetry; the
+outbound half is the only way anything reaches a running job, which is why
+cancel is not a flag in a table someone polls and why a small gap is asked of
+the job rather than read out of the warehouse.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,15 @@ from fastapi.testclient import TestClient
 
 from shared.codec import to_jsonable
 from shared.envelope import make_message
-from shared.protocol import ControlFrame, ControlKind, hello, pack_frame, ping, unpack_frame
+from shared.protocol import (
+    ControlFrame,
+    ControlKind,
+    backfill_result,
+    hello,
+    pack_frame,
+    ping,
+    unpack_frame,
+)
 
 
 def test_a_job_attaches_over_websocket_and_is_acknowledged(app_and_hub):
@@ -19,6 +33,60 @@ def test_a_job_attaches_over_websocket_and_is_acknowledged(app_and_hub):
             assert isinstance(ack, ControlFrame) and ack.kind is ControlKind.HELLO_ACK
             assert hub.job_sockets.is_connected("r1")
     assert not hub.job_sockets.is_connected("r1"), "the socket should be forgotten on disconnect"
+
+
+def test_a_hello_records_what_the_job_says_it_can_still_replay(app_and_hub):
+    """The two bounds on `hello` are the whole basis for deciding whether a
+    gap can be served from the job's memory or has to wake the SQL warehouse.
+    They were logged and dropped, which sent every backfill to SQL."""
+    app, hub = app_and_hub()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/job/r1") as ws:
+            ws.send_bytes(
+                pack_frame(
+                    hello("r1", next_seq=4000, replay_from_seq=3500, flushed_through_seq=3400)
+                )
+            )
+            unpack_frame(ws.receive_bytes())  # the ack: the hello has been handled
+
+            bounds = hub.job_sockets.bounds("r1")
+            assert bounds is not None
+            assert (bounds.replay_from_seq, bounds.flushed_through_seq) == (3500, 3400)
+            assert hub.job_sockets.can_serve("r1", 3600) is True
+            assert hub.job_sockets.can_serve("r1", 10) is False, "that gap is the warehouse's"
+
+    assert hub.job_sockets.bounds("r1") is None, "bounds belong to the connection that stated them"
+
+
+def test_a_backfill_result_nobody_asked_for_is_dropped_without_dropping_the_socket(app_and_hub):
+    """A reply that outlived its request is the ordinary shape of a slow job:
+    the requester timed out and went to SQL. Losing the connection over it
+    would turn a slow answer into an unobserved run."""
+    app, hub = app_and_hub()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/job/r1") as ws:
+            ws.send_bytes(pack_frame(hello("r1", replay_from_seq=0, flushed_through_seq=0)))
+            unpack_frame(ws.receive_bytes())
+
+            ws.send_bytes(
+                pack_frame(
+                    backfill_result(
+                        "r1",
+                        after_seq=7,
+                        messages=[],
+                        complete=True,
+                        replay_from_seq=700,
+                        flushed_through_seq=690,
+                    )
+                )
+            )
+            ws.send_bytes(pack_frame(ping("r1")))
+            assert unpack_frame(ws.receive_bytes()).kind is ControlKind.PONG
+
+            bounds = hub.job_sockets.bounds("r1")
+            assert (bounds.replay_from_seq, bounds.flushed_through_seq) == (700, 690), (
+                "an unwanted reply still carries current bounds, and they are worth keeping"
+            )
 
 
 def test_messages_from_the_job_reach_subscribers(app_and_hub):
