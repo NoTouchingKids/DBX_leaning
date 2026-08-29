@@ -388,9 +388,13 @@ CREATE TABLE IF NOT EXISTS {table} (
 );
 
 -- Retries are idempotent: the job may report the same status message twice
--- after a reconnect, and `seq` identifies it uniquely within a run. Partial,
--- because a writer with no envelope message behind it (the app, at slot-claim
--- time) has no seq and must still be able to append.
+-- after a reconnect, and `seq` identifies it uniquely within a run.
+--
+-- Partial so that a writer with no envelope message behind it can still
+-- append, having no seq to be identified by. Nothing does today: the app
+-- claims the slot without appending here, so a run's history starts at the
+-- job's first report and QUEUED is never in it. That is a gap, recorded in
+-- docs/architecture.md, not a description of what happens.
 CREATE UNIQUE INDEX IF NOT EXISTS run_status_history_seq_idx
     ON {table} (run_id, seq) WHERE seq IS NOT NULL;
 
