@@ -202,8 +202,8 @@ class LakebaseStatus:
             return True
         self.failures += 1
         log.info(
-            "could not report %s -> %s to Lakebase (%s); run_events and the "
-            "end-of-run Delta write still carry it",
+            "could not report %s -> %s to Lakebase (%s); the run_events row "
+            "on the durable path still carries it",
             summary["run_id"],
             summary["status"],
             self.last_error,
