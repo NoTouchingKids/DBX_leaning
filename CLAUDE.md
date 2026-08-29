@@ -8,11 +8,11 @@ map, not the territory. If something here conflicts with a file in `docs/`,
 
 A reusable internal platform on **Databricks Free Edition**: a React SPA +
 async FastAPI app triggers and observes long-running analytical models —
-ten of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
+eleven of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
 CP-SAT job shop, scenario modelling, ML forecasting, MCMC, a conjugate
 Bayesian A/B comparison, a small torch classifier, a simulated-annealing
-knapsack and a bank of per-group curve fits over panel data — that run as
-independent Databricks Jobs. Live progress, logs and results stream back to
+knapsack, a bank of per-group curve fits over panel data, and a heartbeat
+that computes nothing — that run as independent Databricks Jobs. Live progress, logs and results stream back to
 the browser. Durable state lands in Unity Catalog via Delta.
 
 This is a **rewrite**, not the first attempt. Two earlier builds exist in
@@ -205,6 +205,17 @@ back in a backfill reply, or is read back from Delta. Full spec:
   data loss on a crash; size alone is not a durability guarantee.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string
   column if the environment doesn't support it cleanly.
+- **`heartbeat` is the diagnostic model, and the only one that computes
+  nothing.** It emits logs, progress and phase changes on a wall clock for a
+  duration the caller picks — ten minutes by default, capped at thirty — so the
+  live path has a run that is *still alive* by the time a browser has attached.
+  Every other model finishes while the serverless session is still starting, so
+  watching the socket, a backfill or a cancel meant getting lucky with timing.
+  It is exempt from two rules that hold everywhere else, both by name in a test
+  rather than by silence: it declares **no results table** (nothing to write, so
+  no Delta write and no Unity Catalog dependency to fail on — a diagnostic that
+  can fail for unrelated reasons is worse than none), and it has **no per-model
+  view** in the SPA (its whole purpose is to exercise the generic run page).
 - **A model is a plain Python object, not a class implementing an ABC.**
   Duck-typed discovery (look for a known set of method/attribute names) over
   an inheritance hierarchy — see `docs/architecture.md` for why. A model
@@ -234,10 +245,10 @@ job/            THE JOB UNIT — the harness plus its payload, its own floor
   run_model.py  What a Databricks task runs (workspace-file sync, not a wheel)
   (harness)     WS bus, run record + replay ring, Delta writer, Lakebase
                 status reporter, model loader
-  models/           One package per model — ten of them: gurobi_scheduling/,
+  models/           One package per model — eleven: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
-                mcmc/, bayesian_ab/, neural_net/, annealing/, panel_fit/
-                (plus _data/, the shared samples-catalog loaders —
+                mcmc/, bayesian_ab/, neural_net/, annealing/, panel_fit/ and
+                heartbeat/ (plus _data/, the shared samples-catalog loaders —
                 ortools_jobshop and panel_fit bring their own). Registered
                 in [tool.dbx-leaning.models] in pyproject.toml
   shared/       A GENERATED copy, gitignored — `scripts/sync_shared.py` makes

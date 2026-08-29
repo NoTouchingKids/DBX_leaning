@@ -18,14 +18,24 @@ describe("model view registry", () => {
     expect(new Set(seen).size).toBe(seen.length);
   });
 
-  it("covers every model in MODEL_SPECS", () => {
+  it("covers every model in MODEL_SPECS, bar the deliberate exception", () => {
     // Not a structural requirement — the generic run page is correct for a
     // model with no view, which is why it was built first. It is a
     // completeness check: this is the assertion that fails when a tenth model
     // is added, and failing here is much cheaper than noticing on a
     // deployed page that one model looks unlike the other nine.
+    //
+    // `heartbeat` is exempt, and it is the one model that should be. It is the
+    // diagnostic soak run — no algorithm, no dataset, nothing model-specific
+    // to draw — and its entire purpose is to exercise the GENERIC run page
+    // over a long-lived socket. Giving it a bespoke view would mean the
+    // surface being tested is not the surface being shipped. The exemption is
+    // a list rather than a flag so a second entry has to be argued for.
+    const EXEMPT = new Set(["heartbeat"]);
     const covered = new Set(MODEL_VIEWS.map((view) => view.model));
-    const missing = MODEL_SPECS.filter((spec) => !covered.has(spec.name)).map((s) => s.name);
+    const missing = MODEL_SPECS.filter(
+      (spec) => !covered.has(spec.name) && !EXEMPT.has(spec.name),
+    ).map((s) => s.name);
     expect(missing).toEqual([]);
   });
 

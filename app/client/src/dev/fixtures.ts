@@ -240,6 +240,19 @@ interface ModelScript {
   preview: (rng: Rng, chunk: number) => Array<Record<string, unknown>>;
   /** Rows written durably by a complete run. */
   rowCount: number;
+  /**
+   * False for a model that emits NO `result` message at all, ever — not one
+   * with `row_count: 0`, which means "got there and wrote nothing". `rowCount`
+   * cannot express this: the emitter floors it at 1 so a planned chunk is
+   * never silently empty.
+   *
+   * `heartbeat` is the only one. It declares no `results_table` and no
+   * `results()`, so `job/runner.py::_collect_results` returns without
+   * emitting. A fixture that invented a result for it would teach every view
+   * that a run always ends with one, which is the reading this model exists to
+   * disprove.
+   */
+  producesResults?: boolean;
   fetchHint: (runId: string) => Record<string, unknown>;
   detail: Partial<Record<RunStatus, string>>;
 }
@@ -1132,6 +1145,73 @@ const PANEL_FIT_SCRIPT: ModelScript = {
   },
 };
 
+/* ---------------------------------------------------------------- *
+ * heartbeat
+ * ---------------------------------------------------------------- */
+
+/**
+ * The diagnostic soak run, and the only script here that emits no result.
+ *
+ * Everything about it is a clock. `percent_complete` is exact — elapsed over
+ * duration, the one model where it is not an estimate — and rises linearly, so
+ * a view that treats a smooth ramp as suspicious is wrong here. The metric is
+ * `tick_lag_seconds`, how late each tick landed: near zero, occasionally not,
+ * and LOWER IS BETTER, which is the reverse of every other script in this file
+ * and the reason a generic "metric went up, good" reading is unsafe.
+ *
+ * The natural count is a default run: 600s at one progress tick every 10s.
+ */
+const HEARTBEAT_SCRIPT: ModelScript = {
+  naturalCount: 60,
+  metricLabel: "tick_lag_seconds",
+  durationS: 600,
+  progress: (count, rng) => {
+    const phases = ["warmup", "steady", "cooldown"];
+    let logs = 0;
+    return (i) => {
+      // Two logs per progress tick at the defaults (5s against 10s).
+      logs += 2;
+      const fraction = (i + 1) / count;
+      const phaseIndex = Math.min(Math.floor(fraction * phases.length), phases.length - 1);
+      return {
+        percent_complete: round(100 * fraction, 2),
+        // Mostly punctual, with the occasional late tick — a lag that only
+        // ever reads 0.000 would make the one number worth watching look
+        // like a constant.
+        primary_metric: round(rng() < 0.85 ? rng() * 0.02 : 0.05 + rng() * 0.4, 4),
+        payload: {
+          tick: i + 1,
+          phase: phases[phaseIndex]!,
+          phase_index: phaseIndex,
+          phase_count: phases.length,
+          wave: round(Math.sin(2 * Math.PI * fraction + 7), 6),
+          logs_emitted: logs,
+          duration_planned_seconds: 600,
+          percent_of: "elapsed wall clock over duration_seconds",
+        },
+      };
+    };
+  },
+  logs: [
+    { level: "INFO", phase: "steady", text: (i) => `heartbeat ${i + 1} at ${i * 5}s / 600s` },
+    { level: "DEBUG", phase: "steady", text: "still here" },
+    { level: "INFO", phase: "steady", text: "entering phase 'cooldown'" },
+  ],
+  logSource: "model",
+  // Never called — `producesResults: false` — but the interface requires them,
+  // and a shape that would be wrong if it ever WERE called is worse than one
+  // that is merely unused.
+  preview: () => [],
+  rowCount: 0,
+  producesResults: false,
+  fetchHint: () => ({}),
+  detail: {
+    RUNNING: "240s of 600s, phase 'steady'",
+    SUCCEEDED: "completed 600s, 60 progress ticks",
+    CANCELLED: "cancelled after 187.4s of 600s and 19 progress ticks",
+  },
+};
+
 const SCRIPTS: Record<string, ModelScript> = {
   gurobi_scheduling: GUROBI_SCHEDULING_SCRIPT,
   gurobi_routing: GUROBI_ROUTING_SCRIPT,
@@ -1143,6 +1223,7 @@ const SCRIPTS: Record<string, ModelScript> = {
   neural_net: NEURAL_NET_SCRIPT,
   ortools_jobshop: ORTOOLS_JOBSHOP_SCRIPT,
   panel_fit: PANEL_FIT_SCRIPT,
+  heartbeat: HEARTBEAT_SCRIPT,
 };
 
 /** Whether this model has a hand-written script or falls back to
@@ -1281,7 +1362,8 @@ function assemble(model: string, fixture: FixtureName, state: UiRunState): Assem
   const cut = Math.round(plan.entries.length * recipe.fraction);
   const visible = plan.entries.slice(0, cut);
   const resultEntries = visible.filter((e) => e.kind === "result");
-  const keepPlannedResults = recipe.results === "planned";
+  const producesResults = script.producesResults !== false;
+  const keepPlannedResults = producesResults && recipe.results === "planned";
   const lastPlannedChunk = resultEntries.at(-1)?.chunk ?? -1;
 
   for (const entry of visible) {
@@ -1357,7 +1439,7 @@ function assemble(model: string, fixture: FixtureName, state: UiRunState): Assem
     messages.push(msg);
   }
 
-  if (recipe.results === "incumbent" || recipe.results === "empty") {
+  if (producesResults && (recipe.results === "incumbent" || recipe.results === "empty")) {
     const empty = recipe.results === "empty";
     const msg: ResultMessage = {
       ...common(recipe.fraction),

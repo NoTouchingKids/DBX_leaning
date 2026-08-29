@@ -333,6 +333,16 @@ const VALIDATORS: Record<string, (p: Payload, i: number) => void> = {
     num(p, "chunks_emitted");
     boolOrNull(p, "data_synthetic");
   },
+  heartbeat: (p) => {
+    num(p, "tick");
+    str(p, "phase");
+    num(p, "phase_index");
+    num(p, "phase_count");
+    num(p, "wave");
+    num(p, "logs_emitted");
+    num(p, "duration_planned_seconds");
+    str(p, "percent_of");
+  },
 };
 
 describe("per-model progress payloads match their declared interfaces", () => {

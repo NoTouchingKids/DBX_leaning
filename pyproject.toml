@@ -107,6 +107,13 @@ scenario = ["numpy>=1.26"]
 # verified, not assumed. If anything ever needs adding here, the model has
 # lost its reason to exist and should be reconsidered rather than grown.
 annealing = []
+# Also deliberately empty, and NOT a reuse of `annealing` above even though the
+# two lists are identical. Sharing one extra couples two models that have
+# nothing to do with each other: the day annealing needs a library, heartbeat
+# would silently get it, and heartbeat's whole claim is that a soak run costs
+# the harness and nothing else. `gurobi_routing` shares `gurobi` because the two
+# models genuinely share a solver; these two share only a coincidence.
+heartbeat = []
 # Convenience for developing against every model at once. It deliberately
 # EXCLUDES `nn`: torch and its CUDA stack are ~4GB, and dragging that into
 # `pip install dbx-leaning[models]` would defeat the per-model split for
@@ -170,6 +177,9 @@ bayesian_ab = "bayesian"
 neural_net = "nn"
 # Maps to an intentionally empty extra — see the note above it.
 annealing = "annealing"
+# The diagnostic one: no algorithm, no data, no dependencies. Runs for a
+# duration you choose so the live path has something slow enough to watch.
+heartbeat = "heartbeat"
 # The open-source scheduler. Same problem domain as gurobi_scheduling, a
 # different solver paradigm and no size cap.
 ortools_jobshop = "ortools"

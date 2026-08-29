@@ -1,5 +1,5 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["assets/three-DwIcnsOs.js","assets/rolldown-runtime-hePW80VL.js"])))=>i.map(i=>d[i]);
-import{r as e}from"./rolldown-runtime-hePW80VL.js";import{f as t,h as n,p as r,s as i}from"./index-CRhYgdfR.js";var a=e(n(),1),o=r(),ee=11,s=7,te=58,ne=700,c=5166,l=18,re=.28,u=33,d=6.4,ie=46,ae=Math.tan(ie/2*(Math.PI/180)),f=2.399963,p=.962,oe=1-p*s%1,se=`--c-accent`,ce=`--c-accent-ink`,le=`#3d87ff`,ue=`#2f62e6`,de=`#8fb3f5`,fe={additive:!0,field:1,rail:.6,node:1},pe={additive:!1,field:.9,rail:.62,node:.95};function me(e){let t=e>>>0;return()=>{t=t+1831565813>>>0;let e=Math.imul(t^t>>>15,1|t);return e=e+Math.imul(e^e>>>7,61|e)^e,((e^e>>>14)>>>0)/4294967296}}var m=`
+import{r as e}from"./rolldown-runtime-hePW80VL.js";import{f as t,h as n,p as r,s as i}from"./index-CrM8wWLQ.js";var a=e(n(),1),o=r(),ee=11,s=7,te=58,ne=700,c=5166,l=18,re=.28,u=33,d=6.4,ie=46,ae=Math.tan(ie/2*(Math.PI/180)),f=2.399963,p=.962,oe=1-p*s%1,se=`--c-accent`,ce=`--c-accent-ink`,le=`#3d87ff`,ue=`#2f62e6`,de=`#8fb3f5`,fe={additive:!0,field:1,rail:.6,node:1},pe={additive:!1,field:.9,rail:.62,node:.95};function me(e){let t=e>>>0;return()=>{t=t+1831565813>>>0;let e=Math.imul(t^t>>>15,1|t);return e=e+Math.imul(e^e>>>7,61|e)^e,((e^e>>>14)>>>0)/4294967296}}var m=`
   uniform float uTanH;
   uniform float uAspect;
   uniform float uCamZ;

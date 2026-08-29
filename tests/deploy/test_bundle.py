@@ -411,10 +411,36 @@ def _declared_results_tables() -> dict[str, str]:
     return found
 
 
+#: Models that deliberately produce no results at all, and so declare no
+#: `results_table`. One entry, and it should stay hard to add a second.
+#:
+#: `heartbeat` is the diagnostic soak run: it computes nothing and emits only
+#: logs, progress and status, because what it exists to exercise is the LIVE
+#: path — the socket staying up for minutes, ordering, backfill, cancel. A
+#: results table would give it a Delta write and a Unity Catalog dependency to
+#: fail on, and a diagnostic that can fail for reasons unrelated to what it
+#: diagnoses is worse than no diagnostic.
+NO_RESULTS = {"heartbeat"}
+
+
 def test_every_model_declares_a_results_table():
     declared = _declared_results_tables()
-    missing = sorted(set(MODELS) - set(declared))
+    missing = sorted(set(MODELS) - set(declared) - NO_RESULTS)
     assert not missing, f"no results_table declared in job/models/<name>/model.py: {missing}"
+
+
+def test_a_model_exempt_from_results_really_declares_none():
+    """The exemption is a claim about the model, so check the model.
+
+    A `results_table` left in place while the name sits in NO_RESULTS would
+    read as "no results by design" and write to a table the DDL does not
+    create — the exact failure `test_every_model_results_table_exists_in_the_ddl`
+    exists to catch, reintroduced through the exemption meant to be safe.
+    """
+    declared = _declared_results_tables()
+    both = sorted(NO_RESULTS & set(declared))
+    assert not both, f"{both} declare a results_table but are listed as producing none"
+    assert NO_RESULTS <= set(MODELS), f"NO_RESULTS names a model that does not exist: {NO_RESULTS}"
 
 
 def test_every_model_results_table_exists_in_the_ddl():

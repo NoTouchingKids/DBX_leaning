@@ -855,6 +855,90 @@ export interface PanelFitProgressPayload extends ProvenanceFields {
  *  `chunk_index` and `final` false until the last. APPEND on each result
  *  event; never replace. */
 
+/* ================================================================== *
+ * heartbeat
+ * ================================================================== */
+
+export const HEARTBEAT: ModelSpec = {
+  name: "heartbeat",
+  label: "Heartbeat (soak)",
+  fields: [
+    {
+      key: "duration_seconds",
+      label: "Duration (s)",
+      kind: "float",
+      default: 600,
+      hint: "How long the run lasts. Clamped at 1800s by the model — the run holds one of five account-wide task slots for its whole duration.",
+    },
+    {
+      key: "log_interval_seconds",
+      label: "Log every (s)",
+      kind: "float",
+      default: 5,
+      hint: "Independent of the progress interval. Turn it down to load the live path.",
+    },
+    { key: "progress_interval_seconds", label: "Progress every (s)", kind: "float", default: 10 },
+    {
+      key: "logs_per_tick",
+      label: "Logs per tick",
+      kind: "int",
+      default: 1,
+      advanced: true,
+      hint: "Burst size. The knob for pushing the bus into dropping, which is a contract it has and nothing else here reaches.",
+    },
+    {
+      key: "quiet_every",
+      label: "Withhold every Nth log",
+      kind: "int",
+      default: 0,
+      advanced: true,
+      hint: "0 = every log reaches the browser. Above 0, every Nth is written durably with client_visible=false — the flag a backfill has to honour too. No other model emits one.",
+    },
+    { key: "seed", label: "Wave seed", kind: "int", default: 7, advanced: true },
+  ],
+};
+
+export interface HeartbeatProgressPayload {
+  tick: number;
+  phase: string;
+  phase_index: number;
+  phase_count: number;
+  /** One sine cycle over the run, offset by the seed. Decorative by design:
+   *  it exists so the progress chart has a recognisable shape, and it measures
+   *  NOTHING. Do not label it as a result or read a trend into it. */
+  wave: number;
+  logs_emitted: number;
+  duration_planned_seconds: number;
+  /** What `percent_complete` is a fraction of, said in words. */
+  percent_of: string;
+}
+/** The diagnostic model: no algorithm, no dataset, no dependencies. It emits
+ *  telemetry on a wall clock for a chosen duration so the live path has a run
+ *  that is STILL ALIVE by the time a browser has attached — every other model
+ *  finishes while the serverless session is still starting.
+ *
+ *  `percent_complete` is exact here and nowhere else: elapsed over duration,
+ *  not an estimate.
+ *
+ *  `primary_metric` is `tick_lag_seconds` — how far past its scheduled slot
+ *  each progress tick actually landed. It is the one number here that can say
+ *  something went wrong: a lag that grows means the job is starved or the bus
+ *  is backed up behind a slow consumer. Lower is better, and 0 is normal.
+ *
+ *  Two deliberate absences, both exempted by name in a test rather than left
+ *  to be noticed:
+ *
+ *  - NO RESULTS. It declares no `results_table` and no `results()`, so the
+ *    harness emits no `result` message and there is no row_count, no preview
+ *    and no fetch_hint for this model — ever, including on a cancelled run.
+ *    A run panel must render that as "this model produces none", not as a
+ *    result still loading. It is the only model in the lineup like this.
+ *  - NO PER-MODEL VIEW in `components/models/registry.ts`. Its whole purpose
+ *    is to exercise the GENERIC run page over a long-lived socket, and a
+ *    bespoke view would mean the surface being tested is not the surface
+ *    being shipped.
+ */
+
 export const MODEL_SPECS: readonly ModelSpec[] = [
   GUROBI_SCHEDULING,
   GUROBI_ROUTING,
@@ -866,6 +950,7 @@ export const MODEL_SPECS: readonly ModelSpec[] = [
   NEURAL_NET,
   ORTOOLS_JOBSHOP,
   PANEL_FIT,
+  HEARTBEAT,
 ];
 
 export type ModelName = (typeof MODEL_SPECS)[number]["name"];

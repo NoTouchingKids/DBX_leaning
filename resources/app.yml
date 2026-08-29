@@ -195,6 +195,11 @@ resources:
           job:
             id: ${resources.jobs.model_panel_fit.id}
             permission: CAN_MANAGE_RUN
+        - name: job-heartbeat
+          description: Trigger the heartbeat model.
+          job:
+            id: ${resources.jobs.model_heartbeat.id}
+            permission: CAN_MANAGE_RUN
 
         # The warehouse the read path uses — backfill, history and startup
         # reconciliation. Nothing WRITES through it (see docs/architecture.md);
@@ -347,7 +352,8 @@ resources:
                "annealing": ${resources.jobs.model_annealing.id},
                "neural_net": ${resources.jobs.model_neural_net.id},
                "ortools_jobshop": ${resources.jobs.model_ortools_jobshop.id},
-               "panel_fit": ${resources.jobs.model_panel_fit.id}}
+               "panel_fit": ${resources.jobs.model_panel_fit.id},
+               "heartbeat": ${resources.jobs.model_heartbeat.id}}
 
           # Where a job should attach. Empty until the app has a URL — jobs
           # then run unobserved, which is a normal state, not a failure.

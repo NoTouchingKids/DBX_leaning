@@ -1,5 +1,9 @@
 /**
- * The ten model views, by model name — one for every model in `job/models/`.
+ * The ten model views, by model name — one for every model in `job/models/`
+ * except `heartbeat`, which deliberately has none: it is the diagnostic soak
+ * run, its whole purpose is to exercise the GENERIC run page over a long-lived
+ * socket, and a bespoke view would mean the surface being tested is not the
+ * surface being shipped. `registry.test.ts` exempts it by name.
  *
  * The single place a `ModelView` is bound to a model — deliberately, so that
  * `ModelPage` resolves one lookup and knows nothing about any particular
