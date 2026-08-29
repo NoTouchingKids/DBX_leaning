@@ -56,9 +56,29 @@ def test_a_library_reaches_exactly_the_models_entitled_to_it(library):
     """The microservice property. A model's library must not appear in an
     environment whose extra does not provide it — and must appear in every
     environment whose extra does."""
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from export_requirements import RUNTIME_PROVIDED
+
     owning_extra = LIBRARY_OWNER[library]
     entitled = {m for m, extra in registry().items() if extra == owning_extra}
     carrying = {path.stem for path in REQUIREMENTS.glob("*.txt") if library in pins(path)}
+
+    if library in RUNTIME_PROVIDED:
+        # Entitled to it, and still must not carry it. The runtime supplies
+        # these, and a pin does not add one — it REPLACES what is installed.
+        # Withholding numpy while leaving this pinned is what aborted a task
+        # with SIGABRT: a scikit-learn built against one numpy ABI, loaded
+        # against another. So the assertion inverts rather than disappearing.
+        assert carrying == set(), (
+            f"{library} comes from the serverless runtime, so no environment "
+            f"may pin it — found in {sorted(carrying)}. If this is deliberate, "
+            f"the whole numpy-linked set has to move with it; see "
+            f"RUNTIME_PROVIDED in scripts/export_requirements.py."
+        )
+        return
+
     assert carrying == entitled, (
         f"{library} is in {sorted(carrying)} but entitled: {sorted(entitled)}"
     )
