@@ -11,6 +11,8 @@ annotated-types==0.8.0
     # via pydantic
 anyio==4.14.2
     # via httpx
+asn1crypto==1.5.1
+    # via scramp
 certifi==2026.7.22
     # via
     #   httpcore
@@ -86,14 +88,14 @@ nvidia-nvshmem-cu13==3.4.5 ; sys_platform == 'linux'
     # via torch
 nvidia-nvtx==13.0.85 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-psycopg==3.3.4
+pg8000==1.31.5
     # via dbx-leaning
-psycopg-binary==3.3.4 ; implementation_name != 'pypy'
-    # via psycopg
 pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
     # via pydantic
+scramp==1.4.17
+    # via pg8000
 sympy==1.14.0
     # via torch
 torch==2.13.0
@@ -103,7 +105,6 @@ triton==3.7.1 ; python_full_version < '3.15' and sys_platform == 'linux'
 typing-extensions==4.16.0
     # via
     #   anyio
-    #   psycopg
     #   pydantic
     #   pydantic-core
     #   torch

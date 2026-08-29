@@ -54,7 +54,7 @@ sources. Design against them; do not build past them speculatively.
 Live path    (job → app):      WebSocket, the only one, both directions
 Live path    (app → client):   SSE, one-way
 Durable path (job → UC):       Delta writer, ALWAYS, in parallel with the live path
-Status path  (job → Lakebase): run_status + history, psycopg straight to Postgres
+Status path  (job → Lakebase): run_status + history, pg8000 straight to Postgres
 ```
 
 - **Delta is the floor, not a fallback tier.** It runs regardless of whether
@@ -157,17 +157,26 @@ back in a backfill reply, or is read back from Delta. Full spec:
 - **Two writers on that row, one concern each.** The **app** claims the slot —
   the count-and-claim transaction, and the row's creation at trigger time. The
   **job** owns the status transitions — the upsert on `run_status` and the
-  append to `run_status_history` — with psycopg straight to Postgres
-  (`job/lakebase.py`, `DBX_LAKEBASE_DSN`), so `run_status` stays current for a
-  run no socket ever attached to instead of sitting at whatever the app last
-  saw. The job's upsert carries an `updated_ts` guard, so a retry delivered
-  out of order cannot move the row backwards; the app's `set_status` does not,
-  which `docs/architecture.md` records. This went over the Database REST API
-  first, to keep a Postgres driver out of ten model environments. It does not
-  work: that endpoint is a PostgREST base and will not take raw SQL, so the
-  driver is the cost of having the path at all — about 5 MB per environment.
-  Both writers now speak the same dialect to the same database, which is worth
-  something on its own.
+  append to `run_status_history` — straight to Postgres (`job/lakebase.py`,
+  `DBX_LAKEBASE_DSN`), so `run_status` stays current for a run no socket ever
+  attached to instead of sitting at whatever the app last saw. The job's
+  upsert carries an `updated_ts` guard, so a retry delivered out of order
+  cannot move the row backwards; the app's `set_status` does not, which
+  `docs/architecture.md` records. This went over the Database REST API first,
+  to keep a Postgres driver out of ten model environments; that endpoint is a
+  PostgREST base and will not take raw SQL, so a driver is the cost of having
+  the path at all.
+- **Two drivers, one dialect, and the second one is not a preference.** The app
+  uses psycopg; the job uses **pg8000**. psycopg[binary] dlopens a bundled
+  libpq and OpenSSL, and in the Databricks serverless kernel — gRPC and
+  pyarrow's native TLS already loaded — that import calls `abort()`: `Fatal
+  Python error: Aborted`, no traceback, no run, and nothing catchable, since
+  psycopg's own C/binary/ctypes fallback chain is `except Exception`. pg8000
+  has no native code at all, so there is nothing to dlopen and nothing to
+  abort; it is also ~120 KB against ~5 MB, in ten environments. It is
+  synchronous, absorbed behind a thread hop. What survives the split is the
+  dialect: `%(name)s` is psycopg's native placeholder style and pg8000's
+  `pyformat`, so both writers still speak one language to one database.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -343,17 +352,19 @@ Full procedure: `deploy/README.md`.
    writer is no longer on that list — `tests/job/test_lakebase_status.py`
    runs `REPORT_SQL` against a real PostgreSQL 16 over the real DDL, including
    the case that matters most: a stale transition leaves current state alone
-   and still appends to history. What has never been exercised on a workspace
-   is the job holding a Databricks OAuth token at all, which Lakebase requires
-   as its password (`enable_pg_native_login: false`) and which the Apps proxy
-   requires for the WebSocket — one credential, two paths, neither confirmed.
-   And
-   nothing writes `run_status_history` with `recorded_by='app'`, so a run's
-   history starts at the job's first report and never records `QUEUED`. Do not
-   read "built and tested" as "deployed".
+   and still appends to history. The job **does** now hold a Databricks
+   credential on a real workspace — `job.auth: app credential from the job's
+   runtime identity`, from a serverless task on 2026-08-29 — which was the one
+   thing gating both paths at once, since Lakebase takes an OAuth token as its
+   password (`enable_pg_native_login: false`) and the Apps proxy wants one for
+   the WebSocket. Neither path has been watched all the way through with it
+   yet. And nothing writes `run_status_history` with `recorded_by='app'`, so a
+   run's history starts at the job's first report and never records `QUEUED`.
+   Do not read "built and tested" as "deployed".
    What *is* confirmed against a real workspace: WebSocket and SSE both
-   survive the Apps ingress, the `samples` catalog's table list, and column
-   listings for seven of its tables (`docs/sample-data-inventory.md`).
+   survive the Apps ingress, the job resolving its own credential, the
+   `samples` catalog's table list, and column listings for seven of its tables
+   (`docs/sample-data-inventory.md`).
 
 ## Docs index
 

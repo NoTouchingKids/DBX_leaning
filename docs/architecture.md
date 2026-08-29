@@ -185,10 +185,10 @@ a run triggered at 3am with the app down sat at whatever the app last saw
 until startup reconciliation noticed. The job knows its own status, so the job
 reports it (`job/lakebase.py`).
 
-With psycopg, straight to Postgres. This was the Database REST API first, and
-the reasoning was sound: a Postgres driver in this process is paid for by all
-ten model environments — one job per model, each with its own dependency list
-— while `httpx` was already present for the OAuth exchange in `job/auth.py`.
+Straight to Postgres. This was the Database REST API first, and the reasoning
+was sound: a Postgres driver in this process is paid for by all ten model
+environments — one job per model, each with its own dependency list — while
+`httpx` was already present for the OAuth exchange in `job/auth.py`.
 
 It does not work. The endpoint a Lakebase instance exposes is a PostgREST base
 (`/api/2.0/workspace/<id>/rest/<database>`), which serves tables and functions
@@ -197,11 +197,45 @@ upsert and the history append in one transaction had nowhere to go. Reshaping
 around PostgREST would have meant either two calls that can drift apart, or
 moving the statement into a database function and calling it by RPC.
 
-So the driver is the cost of having this path at all: `psycopg[binary]`, about
-5 MB per model environment. What it buys back is that both writers on that row
-now speak the same dialect to the same database, and the statement is exercised
-by the same embedded PostgreSQL the app's store tests use rather than asserted
-against a fake HTTP body.
+So a driver is the cost of having this path at all. The first one chosen was
+`psycopg[binary]` — the app's driver, so one dialect in the repo — and it was
+the wrong one, for a reason that has nothing to do with Postgres. Its compiled
+`psycopg_binary.pq` dlopens a wheel-bundled libpq and its own OpenSSL. In the
+Databricks serverless Python kernel, where databricks-connect's gRPC and
+pyarrow have already brought their own native TLS into the process, that import
+does not fail — it aborts:
+
+```
+psycopg/pq/__init__.py:83 in import_from_libpq   ->  from psycopg_binary import pq
+<frozen importlib._bootstrap_external>:1289 in create_module
+Fatal Python error: Aborted
+```
+
+Nothing catches that. psycopg tries three implementations in turn — C, binary,
+ctypes — each inside `try/except Exception`, and none of them gets a turn,
+because `abort()` leaves no interpreter to raise in. The task exits 134 with
+that faulthandler dump and nothing else. It is the second failure of exactly
+this shape on this runtime, after the numpy-ABI mismatch that
+`scripts/export_requirements.py` now guards against, and the lesson generalises
+past both: **on the serverless kernel, prefer a pure-Python dependency to a
+compiled one whenever there is a choice, because the failure mode of native
+code loaded beside the runtime's own is unreadable.**
+
+The job therefore uses **pg8000**, which speaks the Postgres wire protocol in
+Python and does its TLS with the standard library. Nothing to dlopen, nothing
+to abort. It is also about 120 KB against psycopg[binary]'s 5 MB, in each of
+those ten environments, which recovers most of what the REST attempt was
+reaching for. It is synchronous, which `job/lakebase.py` absorbs behind a
+thread hop — three per report, on a path that runs a handful of times per run.
+
+The app keeps psycopg: it runs on Databricks Apps, an ordinary container with
+none of that native company, and it is async-first, which pg8000 is not.
+
+What survives having two drivers is the thing that actually mattered — one
+**dialect**. `%(name)s` is psycopg's native placeholder style and pg8000's
+`pyformat`, so `REPORT_SQL` and the statements in `app/server/store.py` are the
+same language against the same database, and each is exercised against the same
+embedded PostgreSQL rather than asserted against a fake HTTP body.
 
 The split is by concern, not by row. The **app** owns the slot claim: the
 count-and-claim transaction that makes the 5-concurrent-task ceiling real

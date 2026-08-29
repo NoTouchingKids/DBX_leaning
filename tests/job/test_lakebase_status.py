@@ -9,7 +9,7 @@ This used to connect over the Database REST API and these tests asserted on
 the JSON body a fake HTTP client received. That endpoint turned out to be a
 PostgREST base, which does not accept raw SQL — the requests here would never
 have landed against a real instance, however carefully the JSON matched.
-`job/lakebase.py` now speaks psycopg directly, so these tests run `REPORT_SQL`
+`job/lakebase.py` now speaks Postgres directly, so these tests run `REPORT_SQL`
 and `LakebaseStatus` against a REAL PostgreSQL 16 (`pgserver`, the same
 embedded server `tests/app/test_run_store.py` uses) rather than asserting on
 strings alone — the point of the rewrite is a statement that actually
@@ -37,14 +37,16 @@ Two layers:
 
 from __future__ import annotations
 
+import getpass
 import pathlib
 import re
+import ssl
 import tempfile
 
 import pytest
 
 from job.auth import AppCredential
-from job.lakebase import REPORT_SQL, LakebaseStatus
+from job.lakebase import REPORT_SQL, LakebaseStatus, connect_kwargs
 from job.record import RunRecord
 from job.shared.envelope import make_message
 
@@ -200,9 +202,7 @@ async def test_a_stale_transition_leaves_current_state_untouched_but_still_appen
         lakebase_dsn, **base_params(status="SUCCEEDED", seq=1, ts=3_000, updated_ts=3_000)
     )
 
-    await report_sql(
-        lakebase_dsn, **base_params(status="STALE", seq=2, ts=2_000, updated_ts=2_000)
-    )
+    await report_sql(lakebase_dsn, **base_params(status="STALE", seq=2, ts=2_000, updated_ts=2_000))
 
     row = await current_row(lakebase_dsn, "r1")
     assert row["status"] == "SUCCEEDED" and row["updated_ts"] == 3_000, (
@@ -370,7 +370,7 @@ async def test_both_tables_are_qualified_with_the_configured_schema(postgres):
 
 
 async def test_role_overrides_who_the_connection_authenticates_as(lakebase_dsn):
-    """`role` is passed as psycopg's `user=` override — proven here by making
+    """`role` is passed as the driver's `user=` override — proven here by making
     it wrong: a role that does not exist must fail authentication rather than
     silently falling back to whatever the DSN's own authority carries."""
     reporter = LakebaseStatus(lakebase_dsn, schema=SCHEMA, role="a-role-that-does-not-exist")
@@ -505,3 +505,70 @@ async def test_close_is_a_harmless_no_op():
     reporter = LakebaseStatus("postgresql://lakebase/db")
 
     await reporter.close()  # must not raise
+
+
+# --- the DSN split, including the shape only Databricks ever sends ---------
+
+
+def test_a_lakebase_dsn_becomes_a_tcp_connection_with_tls():
+    """The production shape, which no other test here reaches.
+
+    Every DSN in this file comes from `pgserver`, which is a unix socket. The
+    one that runs on Databricks is a TLS TCP connection to a real hostname,
+    and `connect_kwargs` is the only code that ever looks at it — a misparse
+    would surface as an authentication failure against a workspace, which is
+    the most expensive place in this project to debug.
+    """
+    params = connect_kwargs(
+        "postgresql://instance-owner@ep-cool-fog-d8vyaasx.database.us-east-2."
+        "cloud.databricks.com:5432/databricks_postgres?sslmode=require"
+    )
+
+    assert params["host"] == "ep-cool-fog-d8vyaasx.database.us-east-2.cloud.databricks.com"
+    assert params["port"] == 5432
+    assert params["database"] == "databricks_postgres"
+    assert params["user"] == "instance-owner"
+    assert "unix_sock" not in params
+    assert isinstance(params["ssl_context"], ssl.SSLContext)
+
+
+def test_sslmode_require_encrypts_without_verifying_like_libpq_does():
+    """`require` is not `verify-full`, and this side must not quietly upgrade.
+
+    The DSN is written once in `app/server/config.py` and read by both the app
+    (psycopg, which is libpq) and this module. Making one side stricter than
+    the other is a difference that shows up only in production.
+    """
+    context = connect_kwargs("postgresql://u@h:5432/d?sslmode=require")["ssl_context"]
+    assert context.check_hostname is False
+    assert context.verify_mode is ssl.CERT_NONE
+
+    verifying = connect_kwargs("postgresql://u@h:5432/d?sslmode=verify-full")["ssl_context"]
+    assert verifying.check_hostname is True
+    assert verifying.verify_mode is ssl.CERT_REQUIRED
+
+
+def test_sslmode_disable_asks_for_no_tls_at_all():
+    assert "ssl_context" not in connect_kwargs("postgresql://u@h:5432/d?sslmode=disable")
+
+
+def test_a_unix_socket_dsn_names_the_socket_file_not_its_directory():
+    """libpq's `host=/dir` means a DIRECTORY; pg8000 wants the socket FILE.
+
+    This is how the dev stack and every other test in this file connect, so a
+    regression here would fail loudly — but only after the whole module's
+    fixtures had already failed, which reads as "Postgres is broken" rather
+    than "the DSN was misparsed".
+    """
+    params = connect_kwargs("postgresql://postgres:@/postgres?host=/tmp/pgdata")
+
+    assert params["unix_sock"] == "/tmp/pgdata/.s.PGSQL.5432"
+    assert params["user"] == "postgres"
+    assert params["database"] == "postgres"
+    assert "host" not in params and "ssl_context" not in params
+
+
+def test_a_dsn_with_no_user_falls_back_to_the_os_account_like_libpq():
+    """pg8000 requires a user; libpq does not. A DSN libpq would have accepted
+    must not start failing because the driver underneath changed."""
+    assert connect_kwargs("postgresql://localhost:5432/db")["user"] == getpass.getuser()

@@ -13,6 +13,8 @@ annotated-types==0.8.0
     # via pydantic
 anyio==4.14.2
     # via httpx
+asn1crypto==1.5.1
+    # via scramp
 certifi==2026.7.22
     # via
     #   httpcore
@@ -33,21 +35,20 @@ msgpack==1.2.1
     # via dbx-leaning
 ortools==9.15.6755
     # via dbx-leaning
+pg8000==1.31.5
+    # via dbx-leaning
 protobuf==6.33.6
     # via ortools
-psycopg==3.3.4
-    # via dbx-leaning
-psycopg-binary==3.3.4 ; implementation_name != 'pypy'
-    # via psycopg
 pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
     # via pydantic
+scramp==1.4.17
+    # via pg8000
 typing-extensions==4.16.0
     # via
     #   anyio
     #   ortools
-    #   psycopg
     #   pydantic
     #   pydantic-core
     #   typing-inspection
