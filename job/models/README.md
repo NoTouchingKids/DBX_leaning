@@ -159,7 +159,7 @@ epoch_ms(value)  # datetime | int | float | date | ISO string -> epoch ms
 ```
 
 `nyc_taxi_hourly` picks the demand-curve shape (forecasting, scheduling,
-scenario, streaming); `nyc_taxi_trips` picks the row-per-observation shape
+scenario); `nyc_taxi_trips` picks the row-per-observation shape
 (mcmc, neural_net, annealing, routing). `bayesian_ab` uses both, one per
 comparison. Nothing stops a new model adding a third loader to
 `job/models/_data/datasets.py` — one function per *dataset*, not per model, so

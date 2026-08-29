@@ -65,9 +65,8 @@ historical_daynight_{...}                forecast_daynight_{...}
 That gives something genuinely rare in a sample catalog: **a forecast to
 score against**. A model can be evaluated not just on held-out actuals but
 against a commercial vendor's own forecast for the same timestamp — a real
-baseline rather than a naive-persistence one. For `forecasting` and
-`streaming_results` this is a considerably better story than a taxi demand
-curve.
+baseline rather than a naive-persistence one. For `forecasting` this is a
+considerably better story than a taxi demand curve.
 
 `historical_hourly_imperial` is one of the seven tables with **verified**
 columns — 49 of them, including `date TIMESTAMP`, `city_name`, `latitude` /
@@ -148,7 +147,7 @@ not.
 
 ### `nyctaxi.trips`
 
-What nine of the eleven models read today, through the two loaders in
+What eight of the ten models read today, through the two loaders in
 `job/models/_data/datasets.py`. One table. Its columns are **not** in
 `information_schema.columns` — absence there means nothing, see the inventory
 — and the loaders' three columns have never been confirmed against it. The
@@ -291,7 +290,6 @@ plus a config field, and the synthetic fallback stays mandatory regardless.
 | Model | Today | Best available upgrade | Why it is better |
 |---|---|---|---|
 | `forecasting` | taxi hourly | `accuweather.historical_hourly_*`, scored against `forecast_hourly_*` | A vendor forecast as the baseline, instead of held-out actuals alone |
-| `streaming_results` | taxi hourly | same, or statsmodels `co2` | A rolling-origin backtest wants length above everything |
 | `neural_net` | taxi trips, 3 near-collinear columns | `load_digits`, or `tpcds_sf1` demographics | Real signal, and no need to withhold leaky features |
 | `bayesian_ab` | weekend vs weekday fare | `wanderbricks.reviews` / `bookings` | A real two-arm split rather than one contrived from a table with no A/B in it |
 | `gurobi_scheduling` | taxi hourly demand | `bakehouse.sales_transactions` + `sales_franchises` | Staffing shifts against transaction volume is what the MILP is for. **Columns verified** |

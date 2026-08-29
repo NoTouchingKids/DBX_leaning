@@ -1,8 +1,8 @@
 # Deploying
 
-One Databricks Asset Bundle: **eleven jobs and one app**. Each model is its
+One Databricks Asset Bundle: **ten jobs and one app**. Each model is its
 own job with its own serverless environment and its own dependency list — the
-MCMC job does not carry gurobipy, the ten jobs that need neither torch nor
+MCMC job does not carry gurobipy, the eight jobs that need neither torch nor
 ortools carry neither, and a model that later needs GPU compute changes
 its own file and nothing else.
 
@@ -198,7 +198,7 @@ DBX_leaning/
 │   └── requirements.txt where Databricks Apps looks for it
 ├── job/                 <- the job unit: harness + payload + its own floor
 │   ├── run_model.py     what a task actually runs
-│   ├── models/          eleven model packages, plus _data/
+│   ├── models/          ten model packages, plus _data/
 │   ├── shared/          GENERATED and gitignored — made by the preinit hook
 │   └── requirements.txt the harness's floor; each task installs this + 1 extra
 ├── shared/              canonical. app/, job/ and tests all copy or import it.
@@ -512,7 +512,7 @@ databricks bundle run    dbx_leaning -t dev          # the app DEPLOYMENT
 **Both commands, every time the app changes.** They do different things, and
 the second is the one that is easy to forget:
 
-- `bundle deploy` creates and updates the *resources* — the eleven jobs, and
+- `bundle deploy` creates and updates the *resources* — the ten jobs, and
   the app object — and uploads `app/` to the workspace. It does not create an
   app deployment, so the running app keeps serving whatever it was serving.
 - `bundle run <app key>` creates the app deployment from what was uploaded and

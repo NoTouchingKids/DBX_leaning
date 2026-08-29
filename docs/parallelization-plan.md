@@ -5,7 +5,7 @@ them colliding, and in what order.
 
 **Where this stands.** The sequencing below has been run: the probes cleared
 (`docs/spike-results.md`), `shared/` landed and is frozen, and `job/`, `app/`
-and eleven models are built and tested. What is still live is the *method* —
+and ten models are built and tested. What is still live is the *method* —
 the file-disjointness rule, the shared-file warning about `pyproject.toml` and
 `uv.lock`, and the "freeze the contract before you fan out" discipline, which
 the frontend applied again for its own per-model views. Read the track table
@@ -45,13 +45,18 @@ branch = one Claude Code session.
 | `job/models/scenario/` | `.claude/agents/model-scenario.md` | `shared/` |
 | `job/models/forecasting/` | `.claude/agents/model-forecasting.md` | `shared/` |
 | `job/models/mcmc/` | `.claude/agents/model-mcmc.md` | `shared/` |
-| `job/models/streaming_results/` | `.claude/agents/model-streaming-results.md` | `shared/` |
 | `job/models/annealing/`, `job/models/bayesian_ab/`, `job/models/gurobi_routing/`, `job/models/neural_net/` | none — built after the pattern was established, from `job/models/README.md` and `/new-model` | `shared/` |
 | `job/models/ortools_jobshop/` — CP-SAT job shop, the open-source counterweight to the two Gurobi models: no licence file, no expiry, no size cap | none — same route, and later still | `shared/` |
 | `job/models/panel_fit/` — many small per-group fits, and the one model whose individual units may FAIL while the run SUCCEEDS | none — same route, and later still | `shared/` |
 | `app/client/` | `.claude/agents/frontend.md` | Explicitly low priority — start after `app/` + `job/` + one model work end to end |
 
-There are **eleven** models on disk, not the five that got their own brief.
+There are **ten** models on disk, and four of them got their own brief. A
+fifth track had one — `job/models/streaming_results/`, built to exercise
+chunked `result` messages when nothing else did — and it is the only track
+here that was unwound rather than finished: `panel_fit` came to cover the
+chunk contract more thoroughly, so on 2026-08-29 the model, its job
+definition, its serverless environment, its requirements file and its brief
+all went. The one thing only it covered is now a unit test on the emitter.
 `job/models/` on disk, `[tool.dbx-leaning.models]` in `pyproject.toml`, and
 `resources/model_*.job.yml` all have to agree; they are cross-checked in
 `tests/deploy/`. A brief per model turned out to be worth writing only while
@@ -68,7 +73,7 @@ of it.
 One brief describes a model that was never built:
 `.claude/agents/model-nyctaxi-demand.md`, the Spark-native aggregation
 proposed in `docs/model-expansion-and-packaging.md`. Its original
-justification is gone — nine of the eleven models read
+justification is gone — eight of the ten models read
 `samples.nyctaxi.trips` through `job/models/_data`, and the other two read
 elsewhere in Unity Catalog (`ortools_jobshop` builds its instance from
 `samples.bakehouse.sales_transactions`; `panel_fit` asks for a panel table
@@ -93,7 +98,6 @@ git worktree add ../DBX_leaning-gurobi      -b feat/model-gurobi-scheduling
 git worktree add ../DBX_leaning-scenario    -b feat/model-scenario
 git worktree add ../DBX_leaning-forecasting -b feat/model-forecasting
 git worktree add ../DBX_leaning-mcmc        -b feat/model-mcmc
-git worktree add ../DBX_leaning-streaming   -b feat/model-streaming-results
 ```
 
 Then, in each worktree, in its own terminal tab:
@@ -162,9 +166,10 @@ subagent tool's own scheduling.
   cancellation, writes to its own results table, has unit tests that don't
   require a live Databricks connection (mock the `emit()` callback and the
   results sink).
-- `job/`: connects WS with HTTP-push fallback, writes via the Delta
-  `write_batch` interface on the size/age/end-of-run flush rule, honours the
-  termination signal, degrades cleanly with no app connected at all.
+- `job/`: connects WS — the one live channel, with no second path behind
+  it — writes via the Delta `write_batch` interface on the size/age/end-of-run
+  flush rule, honours the termination signal, degrades cleanly with no app
+  connected at all.
 - `app/`: serves SSE with `Last-Event-ID` resume, accepts the job's WS
   connection, exposes `whoami`, reconciles active runs from `run_status` +
   Jobs API on startup, never polls the warehouse for cancel or status.

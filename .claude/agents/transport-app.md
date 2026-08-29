@@ -14,8 +14,9 @@ module you are changing — the source headers here are long on purpose.
 
 The optional observer. Jobs run independently of whether this is up; when it
 is, it accepts a job's WebSocket connection, relays live messages to
-connected browsers over SSE, and serves backfill/reconciliation reads from
-Unity Catalog. It never becomes the thing a run depends on to make progress.
+connected browsers over SSE, and answers backfill and reconciliation — from
+the live job where it can, from Unity Catalog where it must. It never becomes
+the thing a run depends on to make progress.
 
 ## Core structural decisions — apply these, don't relitigate them here
 
@@ -112,10 +113,13 @@ Edition) is a drop-in, not a rewrite that touches every call site.
    - On a fresh connection (no `Last-Event-ID`), send whatever the app's
      current snapshot is (current status, most recent progress point) so a
      new viewer isn't blank while waiting for the next live push.
-   - Backfill from Unity Catalog is a **separate, explicit endpoint** the
-     client calls on demand (per `docs/architecture.md` — client-triggered,
-     not automatic-on-every-reconnect), not something this streaming
-     endpoint does implicitly. Keep those two concerns cleanly separated.
+   - Backfill is a **separate, explicit endpoint** the client calls on demand
+     (per `docs/architecture.md` — client-triggered, not
+     automatic-on-every-reconnect), not something this streaming endpoint does
+     implicitly. Keep those two concerns cleanly separated. That endpoint asks
+     the live job's replay ring first and only reads Unity Catalog when the
+     job cannot cover the gap, which is a routing decision inside it and
+     changes nothing about the separation.
 
 3. **Cancel endpoint.** Receives a cancel request from the browser, forwards
    it to the job over the WS connection if one is live. **Never** implement
@@ -131,10 +135,11 @@ Edition) is a drop-in, not a rewrite that touches every call site.
    authorization decision.
 
 5. **Startup reconciliation.** On `lifespan` startup, reconcile any runs
-   left in a non-terminal state against the run store and the Jobs API — a
-   job that finished (or started) while the app was down is the normal case
-   here (apps run ~8h/day), not a rare edge case. No background polling
-   loop for this; it happens once, at startup. On the warehouse store this is
+   left in a non-terminal state — against Lakebase's `run_status_history`
+   first, then `run_events` in Delta, then the Jobs API, cheapest and closest
+   to the job first. A job that finished (or started) while the app was down
+   is the normal case here (apps run ~8h/day), not a rare edge case. No
+   background polling loop for this; it happens once, at startup. On the warehouse store this is
    also the only thing that frees a slot, since `release_slot` there is a
    no-op — which is why it cannot become optional.
 

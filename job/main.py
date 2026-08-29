@@ -125,7 +125,7 @@ def _run(coro: Coroutine[Any, Any, int]) -> int:
     run finishes — which is the semantics the task runner expects anyway.
 
     `nest_asyncio` would be the other answer. It is a dependency that
-    monkey-patches the event loop, and it would have to be added to all eleven
+    monkey-patches the event loop, and it would have to be added to all ten
     model environments to fix a problem in one of them.
     """
     try:

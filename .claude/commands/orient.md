@@ -12,8 +12,8 @@ Then, before writing or editing anything, state back in your own words:
    that is and confirm you've read the matching file in `.claude/agents/`.
    If it's ambiguous — main repo, unclear branch, or a track not listed —
    **ask which track you're meant to be working on** rather than guessing.
-   Note that a missing brief is not a missing track: there are eleven models
-   and only five have their own `.claude/agents/model-*.md`, deliberately —
+   Note that a missing brief is not a missing track: there are ten models
+   and only four have their own `.claude/agents/model-*.md`, deliberately —
    `job/models/README.md` and `/new-model` replaced the per-model brief once the
    contract stopped changing. Read those instead, and do not write a brief to
    fill the gap.

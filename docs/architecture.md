@@ -124,10 +124,29 @@ can would send a client to fetch a row that is not there. The high-water mark
 a reader can trust stops one below the lowest thing still pending — see
 `DurableBuffer.min_pending_seq`.
 
-**Only the job side of this is built.** The frames are in `shared/protocol.py`
-and the job answers a `BACKFILL` from the ring; the app does not send one yet,
-and its backfill route still goes to Unity Catalog for every gap. Until that
-loop closes the ring is a capability, not a saving.
+**Both sides of this are built, and the app is the one that decides.**
+`app/server/services.py::JobConnections` records the bounds off `hello` and off
+every `backfill_result`, so a long-lived connection's picture does not go stale
+while the ring moves; `can_serve` answers "socket here, bounds stated, gap at
+or above the floor", and `GET /api/runs/{run_id}/messages` asks the job
+whenever it says yes. A reply carrying `complete: true` is returned without
+touching SQL.
+Everything else — no socket, no bounds stated yet, a gap below the floor, a job
+that does not answer inside `BACKFILL_TIMEOUT_S` — falls through to
+`repository.messages_since` exactly as before. The response names which
+answered in `source`, because "did that read wake the warehouse" should be
+readable off a response rather than out of the app's log.
+
+Three details there are decisions rather than accidents. A job that has stated
+no bounds counts as cannot-serve, so a socket whose `hello` has not landed
+costs one fallback read rather than a timeout on every request. A second
+concurrent backfill for the same run is refused to the warehouse rather than
+parked on the first request's future: two waiters woken by whichever reply
+lands first would each be handed a page computed for the other's cursor, and
+silently wrong messages are worse than a rare warehouse read. And a
+`complete: false` page is discarded rather than stitched onto the SQL one —
+merging two sources into a single page is a dedupe problem, and the warehouse
+can serve the whole gap by itself.
 
 ## Why teardown drains before it closes
 
@@ -167,7 +186,7 @@ until startup reconciliation noticed. The job knows its own status, so the job
 reports it (`job/lakebase.py`).
 
 Over the Database REST API rather than a Postgres driver, because a driver in
-this process would be paid for by all eleven model environments — one job per
+this process would be paid for by all ten model environments — one job per
 model, each with its own dependency list — and `httpx` is already present for
 the OAuth exchange in `job/auth.py`.
 
@@ -213,10 +232,22 @@ Delta one" takes out a quarter of the message stream.
 **Postgres holds two tables.** `run_status` is current state — one row per
 run, `run_id` as PRIMARY KEY, upserted on every transition.
 `run_status_history` is append-only beside it, one row per transition, and it
-is where "how long did this sit `QUEUED`", "what did this look like an hour
-ago" and "how did this run actually end" are answered. Those questions were
-previously answerable only by reading `run_events` back out of Delta, which
-means waking the SQL warehouse to ask them.
+is where "what did this look like an hour ago" and "how did this run actually
+end" are answered. Those questions were previously answerable only by reading
+`run_events` back out of Delta, which means waking the SQL warehouse to ask
+them.
+
+**One writer of that table is designed and absent, and it is worth being
+precise about which.** Only the job appends. `recorded_by` defaults to `'job'`
+and the unique index is partial — `UNIQUE (run_id, seq) WHERE seq IS NOT NULL`
+— specifically so a writer with no envelope message behind it, and therefore
+no `seq`, can still append; that writer is the app at slot-claim time, and it
+does not exist. `claim_slot` creates the `run_status` row and writes no history
+row, so a run's history begins at the job's first report and **no run's
+history contains its `QUEUED`**. "How long did this sit `QUEUED`" is the
+obvious question to bring to a transition log and the one this one cannot
+answer yet; do not read the schema as evidence that it can. Reconciliation is
+unaffected — it reads the newest transition, which is always the job's.
 
 **`run_status` itself does not become append-only, and that is deliberate.** It
 is the tempting simplification — one table, insert-only, no upsert guard to
@@ -269,14 +300,16 @@ of them logged and carried on from. `run_events` rides the Spark durable path,
 which is the floor. The price of that insurance is two or three rows per run,
 on a flush that is happening anyway.
 
-What does change is its **role**: from reconciliation's primary source to its
+What did change is its **role**: from reconciliation's primary source to its
 backstop, with Lakebase primary. That is a real win rather than a relabelling.
-Reconciliation reads `run_events` through the SQL warehouse, so answering "what
-happened to the runs I missed" currently means waking the warehouse at app
-startup for a question Postgres can now answer for nothing —
-`app/server/reconcile.py` already treats its repository as optional for a
-related reason, and this is what makes the warehouse route the fallback rather
-than the first call.
+`app/server/reconcile.py` now asks three sources in order — `run_status_history`
+in Postgres, then `run_events` in Delta, then the Jobs API — cheapest and
+closest to the job first. Answering "what happened to the runs I missed" used
+to mean waking the SQL warehouse at app startup for a question Postgres can
+answer for nothing. The warehouse is now the second call, for a deploy with no
+Postgres or a report that never reached it, and `repo` stays optional so a
+Lakebase-only deploy reconciles from the transition log and the Jobs API
+instead of not reconciling at all.
 
 **Progress stays in Delta.** It reads like state — "where has this run got
 to" — and it is telemetry on every measure that made status OLTP-shaped.
@@ -462,13 +495,16 @@ arrive promptly or in held-and-released batches. `DBX_WS_PING_S` (20s) and
 `DBX_SSE_KEEPALIVE_S` (10s) are conservative guesses from community reports
 until those land. `docs/spike-results.md` has the table to fill in.
 
-Two more things are unverified. Neither gates anything, and both are better
-named than assumed. The Database REST API's request envelope in
-`job/lakebase.py` has never been sent to a live workspace — see "Who writes
-`run_status`" above; the `run_status` upsert and the `run_status_history`
-append both travel over it, so one real request settles both. And the backfill
-loop is half-built: the job answers a `BACKFILL` from its replay ring, and
-nothing asks it one yet.
+One more thing is unverified, and it is narrower than it was. The Database
+REST API's request *envelope* in `job/lakebase.py` has never been sent to a
+live workspace — see "Who writes `run_status`" above; the `run_status` upsert
+and the `run_status_history` append both travel over it, so one real request
+settles both. What is no longer unverified is the statement inside it:
+`tests/app/test_run_store.py` imports `REPORT_SQL` rather than retyping it and
+executes it against a real PostgreSQL 16, over the `run_status_history` DDL
+this repo ships, against the same table the app's own `set_status` writes. So
+the SQL, the schema and the two writers' agreement about which direction is
+backwards are all tested; the HTTP body around them is what is not.
 
 Everything else in this design has a documented fallback if it doesn't pan
 out (VARIANT → a JSON string column, and the whole live path → Delta alone).

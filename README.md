@@ -47,15 +47,15 @@ docs/                  Architecture rationale, platform constraints, envelope sp
 
 shared/                The message envelope + protocol. Imported by app/ and job/,
                        never by job/models/. Build against this, don't fork it.
-job/                   The harness: model loader, thread->loop crossing, WS client
-                       with HTTP-push fallback, Delta writer, cancellation
+job/                   The harness: model loader, thread->loop crossing, the WS
+                       bus, run record + replay ring, Delta writer, cancellation
 app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
                        backfill, startup reconciliation, ServiceHub/DI
-job/models/                Eleven model packages. See job/models/README.md for the
+job/models/                Ten model packages. See job/models/README.md for the
                        duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
 lakebase_ddl/          Postgres DDL (run state) — applied at startup too
-databricks.yml         Asset bundle: eleven jobs (one per model) and the app
+databricks.yml         Asset bundle: ten jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
 job/run_model.py       What a Databricks job actually runs
@@ -120,7 +120,7 @@ uv run python scripts/dev_stack.py      # app + job launcher + registry
 cd frontend && bun run dev                 # in a second terminal
 ```
 
-Then click Run on any of the eleven models. That goes through `POST /api/runs`,
+Then click Run on any of the ten models. That goes through `POST /api/runs`,
 which launches the real `job/` harness in its own OS process, which attaches
 over the real WebSocket ingress and streams real envelope messages back over
 the real SSE endpoint. It is the shipped code, not a mock server and not
@@ -145,7 +145,7 @@ production is how "works on my machine" gets built, so:
 | **Trigger** | `scripts/dev_launcher.py` answers `run-now`/`runs/get` and spawns a subprocess; `DATABRICKS_HOST` points at it | the Jobs API |
 | **Durable writes** | local JSONL under the state dir (`DBX_WRITER=jsonl`) | Delta in Unity Catalog via Spark |
 | **Model environments** | one venv with everything | one serverless environment per model |
-| **Warehouse reads** | none — backfill and `/results` answer 503, startup reconciliation is skipped | the SQL warehouse |
+| **Warehouse reads** | none — `/results` answers 503, and so does backfill unless the live job can serve the gap from its replay ring. Startup reconciliation still runs, gated on the run store rather than the read path: `run_status_history` and the launcher's Jobs API, never `run_events` | the SQL warehouse |
 | Startup latency | milliseconds | tens of seconds for a serverless task |
 
 `GET /healthz` reports `degraded` locally and names the reason; that is
@@ -165,7 +165,7 @@ does it.
 | `GET /api/runs` | Recent runs, each flagged with whether a job is live on it |
 | `GET /api/runs/{id}` | One run's current state |
 | `GET /api/runs/{id}/stream` | SSE. `id:` is the message `seq`, so `EventSource`'s own `Last-Event-ID` resume works unmodified |
-| `GET /api/runs/{id}/messages` | Explicit backfill from Unity Catalog, client-triggered, paged by seq |
+| `GET /api/runs/{id}/messages` | Explicit backfill, client-triggered, paged by seq. Asks the live job's replay ring first and only reads Unity Catalog when the job cannot cover the gap; `source` says which answered |
 | `GET /api/runs/{id}/results` | The full result set a `result` message only previews — the table its `fetch_hint` points at, paged |
 | `POST /api/runs/{id}/cancel` | Forwards over the job's WebSocket, or 409s naming the CLI escape hatch |
 | `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `job/models/` |
@@ -180,13 +180,13 @@ id), `DATABRICKS_HOST`, and — to be observed rather than merely run —
 
 ## State of play
 
-`shared/`, `job/`, `app/` and all eleven models are built and tested, and
+`shared/`, `job/`, `app/` and all ten models are built and tested, and
 **WebSocket and SSE are both confirmed working through the Databricks Apps
 ingress** — the question that stayed open across all three builds of this
 platform (`docs/spike-results.md`). The transport in `docs/architecture.md` is
 the one being built, not a hopeful guess.
 
-Deployment exists as an Asset Bundle — eleven jobs, one per model, each with
+Deployment exists as an Asset Bundle — ten jobs, one per model, each with
 its own serverless environment and dependency list exported from `uv.lock`.
 See `deploy/README.md`.
 

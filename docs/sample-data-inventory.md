@@ -28,7 +28,7 @@ hour. A column list cannot catch either.
 
 | Schema | Tables | What it looks like |
 |---|---|---|
-| `nyctaxi` | `trips` | **In use today.** What the two loaders in `job/models/_data/datasets.py` read, and with them nine of the eleven models |
+| `nyctaxi` | `trips` | **In use today.** What the two loaders in `job/models/_data/datasets.py` read, and with them eight of the ten models |
 | `bakehouse` | `sales_transactions`, `sales_customers`, `sales_franchises`, `sales_suppliers`, `media_customer_reviews`, `media_gold_reviews_chunked` | Retail transactions across franchises. **Also in use today**: `job/models/ortools_jobshop` builds its job-shop instance from `sales_transactions` |
 | `accuweather` | `historical_hourly_{metric,imperial}`, `forecast_hourly_*`, `historical_daily_calendar_*`, `forecast_daily_calendar_*`, `historical_daynight_*`, `forecast_daynight_*` | Hourly and daily weather, historical **and** forecast |
 | `wanderbricks` | `bookings`, `booking_updates`, `clickstream`, `page_views`, `payments`, `properties`, `property_amenities`, `property_images`, `amenities`, `reviews`, `users`, `hosts`, `employees`, `destinations`, `countries`, `customer_support_logs` | A travel-booking business, end to end |
@@ -55,7 +55,7 @@ one of `accuweather`'s twelve, and nothing whatsoever for `nyctaxi`, `tpch`,
 The pattern is not alphabetical, not a row cap, and not a permissions
 boundary visible from here. It does not matter *why*: what matters is that
 **absence from `columns` is not evidence of absence.** `samples.nyctaxi.trips`
-— the table nine of this repo's eleven models read today — returns no rows
+— the table eight of this repo's ten models read today — returns no rows
 from `columns` and is listed in `tables`.
 
 `scripts/probe_sample_data.py` originally treated the two as interchangeable
@@ -257,7 +257,7 @@ the platform one (get it into Unity Catalog first) has not.
 
 ## Where the models point today, and where they arguably should
 
-Nine of the eleven models read `samples.nyctaxi.trips` — through one of the
+Eight of the ten models read `samples.nyctaxi.trips` — through one of the
 two loaders in `job/models/_data/datasets.py`, `nyc_taxi_hourly()` (hourly volume
 and average fare) or `nyc_taxi_trips()` (individual trips: distance, fare,
 duration). That was chosen when it was the only table known to exist. Now
@@ -272,7 +272,6 @@ catalog entirely.
 | `gurobi_scheduling` | taxi hourly volume | `bakehouse.sales_transactions` + `sales_franchises` | Staffing shifts at franchises against transaction volume is what this MILP is *for*. Taxi trips are a demand curve borrowed from a business with no shifts in it |
 | `gurobi_routing` | taxi trips, turned into stops | `bakehouse.sales_franchises` or `sales_suppliers` — **settled, both carry lat/long** | Stops are *derived* from `trip_distance` and `duration_min` (`stops_derived_from: trip_distance_and_duration` in the results metadata), not read as locations — the taxi sample has no coordinate columns. This was the open question and the 2026-08-24 column listing answers it: `sales_franchises` and `sales_suppliers` both have `longitude DOUBLE` / `latitude DOUBLE`. A routing instance over those is real geometry rather than plausible geometry. `wanderbricks.destinations` remains unchecked — `information_schema.columns` returns nothing for that schema |
 | `forecasting` | taxi hourly volume | `accuweather.historical_hourly_metric`, or `tpcds_sf1.store_sales` + `date_dim` | The taxi sample is small; a long hourly weather series or a seasonal retail series gives a forecast horizon worth having. Weather also has a *forecast* table to score against |
-| `streaming_results` | taxi hourly volume | same as forecasting | A rolling-origin backtest wants length above all |
 | `mcmc` | fare ~ distance | fine as-is, or `bakehouse` basket value | A real regression with a known-plausible slope; the taxi version works |
 | `scenario` | taxi baseline | `wanderbricks.bookings` | Booking demand has natural scenario levers (price, capacity, season) |
 | `bayesian_ab` | taxi hourly (weekend vs weekday fare) and taxi trips (long-trip speed) | `bakehouse.media_customer_reviews`, `wanderbricks.reviews` | The two comparisons are honest but contrived from a table with no A/B in it. Reviews or bookings carry a real two-arm split |

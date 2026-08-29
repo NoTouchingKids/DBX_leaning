@@ -4,7 +4,7 @@ Problem this solves: ``[tool.setuptools] packages`` in the repo's own
 ``pyproject.toml`` bundles ``shared``, ``app``, ``job`` *and all of*
 ``models`` into a single wheel. A model's own dependencies are already
 scoped correctly via ``pyproject.toml``'s per-model extras (``gurobi``,
-``forecasting``, ``mcmc``, ``scenario``, ``streaming``) — but the *source*
+``forecasting``, ``mcmc``, ``scenario``, ``panel``) — but the *source*
 of every model still ships to every job's deployment regardless of which
 one it runs, because ``job/loader.py`` only chooses what to *import* at
 runtime, after everything is already on disk.

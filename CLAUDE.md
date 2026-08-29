@@ -8,13 +8,12 @@ map, not the territory. If something here conflicts with a file in `docs/`,
 
 A reusable internal platform on **Databricks Free Edition**: a React SPA +
 async FastAPI app triggers and observes long-running analytical models —
-eleven of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
+ten of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
 CP-SAT job shop, scenario modelling, ML forecasting, MCMC, a conjugate
-Bayesian A/B comparison, a small torch classifier, a chunked rolling
-backtest, a simulated-annealing knapsack and a bank of per-group curve fits
-over panel data — that run as independent Databricks Jobs. Live progress,
-logs and results stream back to the browser. Durable state lands in Unity
-Catalog via Delta.
+Bayesian A/B comparison, a small torch classifier, a simulated-annealing
+knapsack and a bank of per-group curve fits over panel data — that run as
+independent Databricks Jobs. Live progress, logs and results stream back to
+the browser. Durable state lands in Unity Catalog via Delta.
 
 This is a **rewrite**, not the first attempt. Two earlier builds exist in
 this project's history (a Flask+Streamlit polling POC, then a FastAPI+
@@ -75,8 +74,11 @@ Status path  (job → Lakebase): run_status + history, over the Database REST AP
   the warehouse awake for the run's duration, which is the exact cost mistake
   the first build made. `BACKFILL` is the same mistake refused from the other
   end: the job answers it from its own replay ring (`job/record.py`), so a
-  browser tab waking up cannot wake the warehouse. **Only the job side of this
-  exists — the app does not send a `BACKFILL` yet.**
+  browser tab waking up cannot wake the warehouse. Both ends are built:
+  `GET /api/runs/{run_id}/messages` asks the job whenever there is a live
+  socket and the gap sits inside the ring, and only falls through to the
+  warehouse when the job cannot answer in full. The response says which
+  answered, in `source`.
 - **The boundary between the two backfills travels on the wire.** The job
   states `replay_from_seq` (the oldest seq it can still replay) and
   `flushed_through_seq` (how far Delta has caught up) on `hello` and on every
@@ -162,7 +164,10 @@ back in a backfill reply, or is read back from Delta. Full spec:
   delivered out of order cannot move the row backwards; the app's `set_status`
   does not, which `docs/architecture.md` records. **The REST request envelope
   is unverified against a live workspace** — `LakebaseStatus._body()` is the
-  one place it is built, and it needs a single real request to confirm.
+  one place it is built, and it needs a single real request to confirm. The
+  statement it carries is not in that position — `tests/app/test_run_store.py`
+  imports `REPORT_SQL` and runs it against a real Postgres — so what is
+  unconfirmed is the HTTP shape around the SQL, not the SQL.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -220,13 +225,12 @@ job/            THE JOB UNIT — the harness plus its payload, its own floor
   run_model.py  What a Databricks task runs (workspace-file sync, not a wheel)
   (harness)     WS bus, run record + replay ring, Delta writer, Lakebase
                 status reporter, model loader
-  models/           One package per model — eleven of them: gurobi_scheduling/,
+  models/           One package per model — ten of them: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
-                mcmc/, bayesian_ab/, neural_net/, streaming_results/,
-                annealing/, panel_fit/ (plus _data/, the shared
-                samples-catalog loaders — ortools_jobshop and panel_fit
-                bring their own). Registered in [tool.dbx-leaning.models]
-                in pyproject.toml
+                mcmc/, bayesian_ab/, neural_net/, annealing/, panel_fit/
+                (plus _data/, the shared samples-catalog loaders —
+                ortools_jobshop and panel_fit bring their own). Registered
+                in [tool.dbx-leaning.models] in pyproject.toml
   shared/       A GENERATED copy, gitignored — `scripts/sync_shared.py` makes
                 it and the bundle's preinit hook runs that before every sync.
                 LOAD-BEARING: job/*.py imports `.shared`, relative, so `job` is
@@ -332,12 +336,14 @@ Full procedure: `deploy/README.md`.
    `app/client/README.md`.
 5. **Not done:** `databricks bundle deploy` has never been run against a
    workspace, `scripts/probe_sample_data.py` has never been run end to end on
-   one, and there is no CI. Two more, both narrow and both in the transport:
-   the app does not yet **send** a `BACKFILL`, so the job's replay ring is
-   built and answered but not asked; and the Database REST API's request
-   envelope in `job/lakebase.py` — which carries both the `run_status` upsert
-   and the `run_status_history` append — has not been checked against a live
-   workspace. Do not read "built and tested" as "deployed".
+   one, and there is no CI. Two more, both narrow. The Database REST API's
+   request *envelope* in `job/lakebase.py` — the body `LakebaseStatus._body()`
+   builds — has never been sent to a live workspace; the SQL it carries has
+   been, because `tests/app/test_run_store.py` imports `REPORT_SQL` and runs
+   it against a real PostgreSQL 16 over the `run_status_history` DDL. And
+   nothing writes `run_status_history` with `recorded_by='app'`, so a run's
+   history starts at the job's first report and never records `QUEUED`. Do not
+   read "built and tested" as "deployed".
    What *is* confirmed against a real workspace: WebSocket and SSE both
    survive the Apps ingress, the `samples` catalog's table list, and column
    listings for seven of its tables (`docs/sample-data-inventory.md`).

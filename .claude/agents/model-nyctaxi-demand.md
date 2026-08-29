@@ -13,9 +13,11 @@ documents something on disk.
 
 **Its central justification is gone.** This brief was written when the five
 models then in existence all used synthetic in-memory data, and it proposed
-closing that gap. That gap closed a different way: `job/models/_data` now reads
-`samples.nyctaxi.trips` for all eleven models, through the job's Spark
-session, falling back to a deterministic generator off-platform — and every
+closing that gap. That gap closed a different way: every one of the ten models
+now reads a real Unity Catalog table through `job/models/_data` and the job's
+Spark session — eight from `samples.nyctaxi.trips`, `ortools_jobshop` from
+`samples.bakehouse.sales_transactions`, `panel_fit` from a panel table nobody
+has landed — falling back to a deterministic generator off-platform — and every
 result row carries `data_source` / `data_synthetic` / `data_rows` /
 `data_fallback_reason` so the two paths stay distinguishable. So the
 paragraph below claiming "none of them reads a real Unity Catalog table" is

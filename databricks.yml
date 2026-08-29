@@ -92,7 +92,7 @@ variables:
       Database REST API endpoint the JOB posts its status transitions to.
 
       The app reaches Lakebase over Postgres; a job cannot, because a
-      Postgres driver in that process would be paid for by all eleven model
+      Postgres driver in that process would be paid for by all ten model
       environments. So the job goes over HTTP instead, and this is where.
 
       Empty is a supported deploy: the job simply does not report status live,

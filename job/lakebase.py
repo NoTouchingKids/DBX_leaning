@@ -18,7 +18,7 @@ One writer per concern, and the UPSERT's `updated_ts` guard means an
 out-of-order write cannot move the row backwards even so.
 
 **REST rather than psycopg**, because a Postgres driver in this process
-would be paid for by all eleven model environments (`CLAUDE.md`: one job per
+would be paid for by all ten model environments (`CLAUDE.md`: one job per
 model, each with its own dependency list). `httpx` is already here for the
 OAuth exchange in `job/auth.py`.
 

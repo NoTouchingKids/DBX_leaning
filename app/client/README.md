@@ -105,7 +105,7 @@ What is covered, and how each one is actually observed:
 
 | File | Asserts |
 | --- | --- |
-| `01-live-run` | A run triggered from the real form streams `percent_complete`, logs, a terminal status and a result count into the DOM — over SSE, since the local stack has no warehouse and the backfill endpoints answer 503. Cross-checked against the durable JSONL the writer produced in parallel. |
+| `01-live-run` | A run triggered from the real form streams `percent_complete`, logs, a terminal status and a result count into the DOM — over SSE, since the local stack has no warehouse, so any backfill the live job's replay ring cannot serve answers 503. Cross-checked against the durable JSONL the writer produced in parallel. |
 | `02-shared-worker` | Two tabs in one profile cause **one** `GET .../stream`; a second profile causes a second. The control is the point: it shows the instrument detects an extra connection when there is one. |
 | `03-terminal-run` | A finished run opens no live channel — passing when the client has it cached, **failing when it does not**. See below. |
 | `04-reload-mid-run` | A reload mid-run keeps the history the tab already had, renders nothing twice, and keeps following the run to completion. |
@@ -257,8 +257,6 @@ given stage.
   this directory.
 - **`GET /runs/:runId` is a placeholder**, not a page — see `App.tsx`. A
   finished run is currently watchable only from its model page.
-- **Not every model has a view yet.** Nine are planned against
-  `contract.ts`; check `src/components/models/` for which exist.
 - **ADR-001 is cited and does not exist.** `vite.config.ts` and
   `useRunStream.ts` both reference it, and `.claude/agents/frontend.md`
   points at `claude/frontend-stack-adr.md` — there is no such file anywhere

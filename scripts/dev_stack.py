@@ -38,15 +38,21 @@ SUBSTITUTED — and each one is a place local behaviour can diverge
     requires that opt-in precisely so nobody can be confused about which one
     happened. ``DBX_WRITER`` accepts only ``auto``, ``spark`` and ``jsonl``.
   * **No SQL warehouse.** So the app runs with ``sql`` degraded:
-    ``GET /api/runs/{id}/messages`` (backfill) and ``GET /api/runs/{id}/results``
-    answer 503, and startup reconciliation is skipped. Live streaming, trigger,
-    cancel, listing and status are all unaffected. ``GET /healthz`` reports
-    this rather than hiding it — expect ``"status": "degraded"`` locally, and
-    read the reason.
-  * **Crash reporting.** Because reconciliation cannot run, the launcher
-    reports a job that died without a terminal status as ``FAILED``, over the
-    real push ingress. A deploy learns the same fact from the Jobs API at
-    startup instead.
+    ``GET /api/runs/{id}/results`` answers 503, and so does
+    ``GET /api/runs/{id}/messages`` (backfill) whenever the gap has to come out
+    of Unity Catalog — a live run's recent gap is answered by the job's own
+    replay ring over its socket, which is the whole point of asking the job
+    first. Startup reconciliation still runs: it is gated on the run store,
+    not the read path, so it resolves from ``run_status_history`` and the
+    launcher's Jobs API and simply never consults ``run_events``. Live
+    streaming, trigger, cancel, listing and status are all unaffected.
+    ``GET /healthz`` reports this rather than hiding it — expect
+    ``"status": "degraded"`` locally, and read the reason.
+  * **Crash reporting.** Reconciliation runs once, on the way up, so it says
+    nothing about a job that dies while the stack is already running. The
+    launcher reports one that died without a terminal status as ``FAILED``,
+    over the real push ingress. A deploy learns the same fact from the Jobs
+    API at the next startup instead.
 
 Nothing is written inside the repository: state lives under
 ``~/.cache/dbx-leaning/dev-stack`` (``--state-dir`` to move it, ``--reset`` to
@@ -225,9 +231,11 @@ class DevStack:
         """Fail every run left non-terminal by a previous stack session.
 
         Locally this is not a guess: the launcher owns every job process, so
-        nothing from a previous session can still be running. A deploy learns
-        the same thing from the Jobs API in ``app/server/reconcile.py`` — which cannot
-        run here, because it needs the warehouse read path.
+        nothing from a previous session can still be running.
+        ``app/server/reconcile.py`` would reach the same conclusion run by run,
+        from the transition history and the Jobs API. This is the blunt
+        version, done before the app starts, because here the answer is known
+        in advance rather than looked up.
 
         Without this, five crashed runs from yesterday hold the whole
         concurrency ceiling and every trigger answers 429.
@@ -491,9 +499,10 @@ def _banner(stack: DevStack) -> str:
             -d '{{"model":"bayesian_ab"}}'
 
   Degraded on purpose, because there is no SQL warehouse:
-    GET /api/runs/{{id}}/messages  and  /api/runs/{{id}}/results  answer 503,
-    and startup reconciliation is skipped. /healthz says so; live streaming,
-    trigger, cancel and listing are unaffected.
+    /api/runs/{{id}}/results  answers 503, and  /api/runs/{{id}}/messages
+    does too unless the live job can serve the gap from its replay ring.
+    Reconciliation still runs, without run_events. /healthz says so; live
+    streaming, trigger, cancel and listing are unaffected.
 
   Ctrl-C stops the app, the launcher, every job it started, and Postgres.
 ================================================================================

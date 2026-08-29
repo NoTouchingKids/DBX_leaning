@@ -15,16 +15,17 @@ which is the thing the code cannot say about itself.
 
 Two facts this brief predates and every one of these briefs got wrong:
 
-- **This model reads real data.** All eleven models load
-  `samples.nyctaxi.trips` through `job/models/_data`, falling back to a
-  deterministic generator when there is no workspace, and carry
-  `data_source` / `data_synthetic` / `data_rows` / `data_fallback_reason` on
-  every result row so the two runs stay distinguishable afterwards. Where
+- **This model reads real data.** All ten models read a real Unity Catalog
+  table through `job/models/_data` — eight of them `samples.nyctaxi.trips`,
+  this one included — falling back to a deterministic generator when there is
+  no workspace, and carry `data_source` / `data_synthetic` / `data_rows` /
+  `data_fallback_reason` on every result row so the two runs stay
+  distinguishable afterwards. Where
   this file says "synthetic" or "small fixed problem", read "synthetic
   fallback".
-- **There are eleven models, not five.** Any count below is stale. The other
-  six were built from `job/models/README.md` and `/new-model` with no brief at
-  all, deliberately — see `docs/parallelization-plan.md`.
+- **There are ten models, and four of them have a brief.** Any count below is
+  stale. The other six were built from `job/models/README.md` and `/new-model`
+  with no brief at all, deliberately — see `docs/parallelization-plan.md`.
 
 This brief was written to build `job/models/scenario/`. Read `CLAUDE.md` and
 `docs/message-envelope-spec.md` before writing anything.
