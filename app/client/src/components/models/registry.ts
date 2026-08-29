@@ -28,7 +28,6 @@ import neuralNet from "./neural_net";
 import ortoolsJobshop from "./ortools_jobshop";
 import panelFit from "./panel_fit";
 import scenario from "./scenario";
-import streamingResults from "./streaming_results";
 
 export const MODEL_VIEWS: readonly ModelView[] = [
   gurobiScheduling,
@@ -39,7 +38,6 @@ export const MODEL_VIEWS: readonly ModelView[] = [
   bayesianAb,
   annealing,
   neuralNet,
-  streamingResults,
   ortoolsJobshop,
   panelFit,
 ];

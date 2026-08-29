@@ -24,10 +24,9 @@
  *  3. **Rounding a failure away.** `buildLattice` never lets a nonzero
  *     `groups_failed` round down to zero cells. One failure in five hundred
  *     groups is exactly the case the headline exists to surface.
- *  4. **Chunk accumulation.** This model chunks its results too, so the
- *     dedupe-on-`chunk_index` reasoning is lifted wholesale from
- *     `streaming_results/streamingModel.ts` — see `accumulateGroups` for the
- *     one place the two differ.
+ *  4. **Chunk accumulation.** This is the model that emits `result` more than
+ *     once per run, so a chunk that arrives twice under two seq numbers would
+ *     otherwise double every group in it — see `accumulateGroups`.
  */
 
 import { payloadOf } from "@/components/models/contract";
@@ -216,9 +215,9 @@ export type CellKind = "fitted" | "failed" | "pending";
 
 export interface Lattice {
   cells: readonly CellKind[];
-  /** True when every cell is exactly one group — `streaming_results`'
-   *  `lockstep`, for the same reason: "one cell per group" is only literally
-   *  true for the smaller panels and a viewer is owed which one they have. */
+  /** True when every cell is exactly one group. "One cell per group" is only
+   *  literally true for the smaller panels and a viewer is owed which one they
+   *  have. */
   oneCellPerGroup: boolean;
   /** Groups behind each cell. 1 when `oneCellPerGroup`. */
   groupsPerCell: number;
@@ -496,10 +495,9 @@ export interface GroupRow {
 export interface DurableView {
   /** Deduplicated on `chunk_index`, in chunk order. */
   chunks: readonly ResultMessage[];
-  /** Rows written durably, summed across chunks. Here a row is a GROUP — this
-   *  is the one place `panel_fit` differs from `streaming_results`, whose
-   *  rows are observations. So this number is directly comparable to
-   *  `groups_done`, and it trails it by up to `chunk_size` by design. */
+  /** Rows written durably, summed across chunks. Here a row is a GROUP, not an
+   *  observation, so this number is directly comparable to `groups_done`, and
+   *  it trails it by up to `chunk_size` by design. */
   rowsWritten: number;
   /** A `final: true` chunk has been seen. Only then are results complete, and
    *  the model emits exactly one on every path — completed, cancelled, or a
@@ -527,11 +525,11 @@ export const NO_DURABLE: DurableView = {
 /**
  * Accumulate every `result` chunk this run produced.
  *
- * The dedupe is `streaming_results`': on `chunk_index`, not on `seq`. The
- * store already drops a repeated seq, which covers the live/backfill overlap;
- * this covers the other one — the same chunk re-emitted under a new seq, which
- * a job retry produces and which would otherwise double every group in it.
- * First copy wins; `final` is true if ANY copy carried it.
+ * The dedupe is on `chunk_index`, not on `seq`. The store already drops a
+ * repeated seq, which covers the live/backfill overlap; this covers the other
+ * one — the same chunk re-emitted under a new seq, which a job retry produces
+ * and which would otherwise double every group in it. First copy wins; `final`
+ * is true if ANY copy carried it.
  *
  * Chunks APPEND. The last does not supersede the ones before it.
  */

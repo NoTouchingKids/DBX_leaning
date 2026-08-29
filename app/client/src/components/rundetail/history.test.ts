@@ -221,7 +221,7 @@ describe("resultsCompleteness", () => {
   const results = (source: readonly Message[]) => source.filter(isResult);
 
   it("is complete once a final chunk exists", () => {
-    const chunks = results(makeMessages("streaming_results", "chunked", "SUCCEEDED"));
+    const chunks = results(makeMessages("panel_fit", "chunked", "SUCCEEDED"));
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.some((chunk) => chunk.final)).toBe(true);
     expect(
@@ -230,10 +230,10 @@ describe("resultsCompleteness", () => {
   });
 
   it("is incomplete — not 'still arriving' — when a finished run has no final chunk", () => {
-    // A cancelled streaming_results run returns between windows, keeping every
+    // A chunking model cancelled between chunks returns cleanly, keeping every
     // chunk it finished and never emitting the final one. Nothing is arriving;
     // the run has stopped.
-    const chunks = results(makeMessages("streaming_results", "chunked", "SUCCEEDED")).filter(
+    const chunks = results(makeMessages("panel_fit", "chunked", "SUCCEEDED")).filter(
       (chunk) => !chunk.final,
     );
     expect(chunks.length).toBeGreaterThan(0);
@@ -243,7 +243,7 @@ describe("resultsCompleteness", () => {
   });
 
   it("will not claim incompleteness while pages are still unread", () => {
-    const chunks = results(makeMessages("streaming_results", "chunked", "SUCCEEDED")).filter(
+    const chunks = results(makeMessages("panel_fit", "chunked", "SUCCEEDED")).filter(
       (chunk) => !chunk.final,
     );
     expect(

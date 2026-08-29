@@ -18,8 +18,8 @@
  *    own disclaimer into invisibility.
  *  - `slots`, render functions for the handful of places the model contract
  *    does not reach — an extra identity chip, extra rail rows, or suppressing
- *    the generic results disclosure (gurobi_scheduling and streaming_results
- *    both do, for opposite reasons).
+ *    the generic results disclosure (gurobi_scheduling does: its signature IS
+ *    its results view).
  *
  * Everything in this file keeps working underneath both, so a model page is
  * additive and an unfinished one degrades to exactly this view.
@@ -80,7 +80,7 @@ export interface RunViewSlots {
   signature?: (ctx: RunViewContext) => ReactNode;
   diagnostics?: (ctx: RunViewContext) => ReactNode;
   /** Return `null` to suppress the generic results disclosure entirely —
-   *  gurobi_scheduling and streaming_results both do, for opposite reasons. */
+   *  gurobi_scheduling does, because its signature already is that view. */
   results?: (ctx: RunViewContext) => ReactNode;
   railExtras?: (ctx: RunViewContext) => ReactNode;
   statusRows?: (ctx: RunViewContext) => ReactNode;

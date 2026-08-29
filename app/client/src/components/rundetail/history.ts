@@ -233,10 +233,10 @@ export function summariseGaps(gaps: readonly Gap[]): GapSummary {
  * `complete`   — a chunk with `final: true` exists.
  * `incomplete` — the run is over, everything is loaded, and no final chunk
  *                arrived. NOT "still arriving": nothing is arriving, the run
- *                has stopped. `streaming_results` cancelled between windows
- *                ends exactly here, and so does a run whose final write
- *                failed. The two are indistinguishable from the client, which
- *                is itself worth saying.
+ *                has stopped. A chunking model stopped between chunks ends
+ *                exactly here, and so does a run whose final write failed. The
+ *                two are indistinguishable from the client, which is itself
+ *                worth saying.
  * `unknown`    — not enough has been loaded (or the run has not finished) to
  *                make either claim honestly.
  */

@@ -216,15 +216,6 @@ const VALIDATORS: Record<string, (p: Payload, i: number) => void> = {
     expect(p).toHaveProperty("last_scenario");
     expect(p).toHaveProperty("last_outcome");
   },
-  // StreamingProgressPayload — three named keys plus an index signature.
-  streaming_results: (p) => {
-    num(p, "windows_done");
-    num(p, "windows_total");
-    num(p, "origin");
-    // The provenance spread is what the index signature is for; assert only
-    // that extras exist, never their names.
-    expect(Object.keys(p).length).toBeGreaterThan(3);
-  },
   // AnnealingProgressPayload
   annealing: (p) => {
     num(p, "iteration");
@@ -493,7 +484,7 @@ describe("null-heavy — null is a value, not a loading state", () => {
 
 describe("chunked — append, never replace", () => {
   it("emits rising chunk_index with exactly one final:true, last", () => {
-    const snap = makeSnapshot("streaming_results", "chunked", "SUCCEEDED");
+    const snap = makeSnapshot("panel_fit", "chunked", "SUCCEEDED");
     expect(snap.results.length).toBeGreaterThan(1);
     expect(snap.results.map((r) => r.chunk_index)).toEqual(
       snap.results.map((_, i) => i),
@@ -505,7 +496,7 @@ describe("chunked — append, never replace", () => {
   });
 
   it("a still-running chunked run has chunks but no final one", () => {
-    const snap = makeSnapshot("streaming_results", "chunked", "RUNNING");
+    const snap = makeSnapshot("panel_fit", "chunked", "RUNNING");
     expect(snap.results.length).toBeGreaterThan(0);
     expect(snap.results.some((r) => r.final)).toBe(false);
   });
