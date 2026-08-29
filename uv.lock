@@ -230,10 +230,6 @@ scenario = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-streaming = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -248,7 +244,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dbx-leaning", extras = ["gurobi", "forecasting", "mcmc", "bayesian", "scenario", "streaming", "annealing", "ortools", "panel"], marker = "extra == 'models'" },
+    { name = "dbx-leaning", extras = ["gurobi", "forecasting", "mcmc", "bayesian", "scenario", "annealing", "ortools", "panel"], marker = "extra == 'models'" },
     { name = "emcee", marker = "extra == 'mcmc'", specifier = ">=3.1" },
     { name = "fastapi", marker = "extra == 'app'", specifier = ">=0.110" },
     { name = "gurobipy", marker = "extra == 'gurobi'", specifier = ">=13,<14" },
@@ -261,7 +257,6 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'nn'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'panel'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'scenario'", specifier = ">=1.26" },
-    { name = "numpy", marker = "extra == 'streaming'", specifier = ">=1.26" },
     { name = "ortools", marker = "extra == 'ortools'", specifier = ">=9.14,<10" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'app'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7,<3" },
@@ -270,7 +265,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'app'", specifier = ">=0.29" },
     { name = "websockets", marker = "extra == 'job'", specifier = ">=12" },
 ]
-provides-extras = ["app", "job", "gurobi", "ortools", "forecasting", "mcmc", "panel", "bayesian", "nn", "scenario", "streaming", "annealing", "models"]
+provides-extras = ["app", "job", "gurobi", "ortools", "forecasting", "mcmc", "panel", "bayesian", "nn", "scenario", "annealing", "models"]
 
 [package.metadata.requires-dev]
 dev = [

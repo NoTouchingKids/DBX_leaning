@@ -153,29 +153,6 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_mcmc (
 USING DELTA
 COMMENT 'Posterior summary statistics per parameter.';
 
-CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_streaming (
-    run_id      STRING NOT NULL,
-    -- Which backtest window this row came from. Written as each window
-    -- completes, not at the end of the run.
-    chunk_index INT    NOT NULL,
-    origin      INT    NOT NULL,
-    step        INT    NOT NULL,
-    predicted   DOUBLE,
-    actual      DOUBLE,
-    abs_error   DOUBLE,
-    -- Where the backtested series came from. Carried on every row, not only
-    -- logged, so a run against `samples.nyctaxi.trips` and one that fell back
-    -- to synthetic data stay distinguishable from the results table alone.
-    data_source          STRING,
-    data_synthetic       BOOLEAN,
-    data_rows            BIGINT,
-    -- Null when the real table was read. Always present, so the schema does
-    -- not depend on whether a given run happened to fall back.
-    data_fallback_reason STRING
-)
-USING DELTA
-COMMENT 'Rolling-origin backtest over sample hourly demand, written incrementally.';
-
 -- The zero-dependency control case: simulated annealing over a shift-planning
 -- knapsack. One row per trip the search chose to take, so the chosen solution
 -- is readable as data rather than as a blob. The solution-level columns
