@@ -46,36 +46,42 @@ ENVIRONMENTS: dict[str, list[str]] = {
 #: library — it observes, it does not compute.
 APP_EXTRAS = ["app"]
 
-#: Packages the Databricks serverless runtime already provides, withheld from
-#: the model environments so pip leaves the runtime's copies alone.
+#: Packages that must come from the Databricks serverless runtime, withheld so
+#: pip leaves the runtime's copies alone.
 #:
-#: The failure this prevents: a pinned `numpy==2.4.6` is not additive, it
-#: REPLACES the numpy the runtime installed and wired its own pyspark and
-#: pandas against. Seven of the ten model environments pinned one, which is
-#: why this showed up as "most of the models" rather than one of them.
+#: **These move as a SET, and that is the whole lesson.** A first version of
+#: this withheld numpy alone and left scipy and scikit-learn pinned. Both are
+#: compiled against a specific numpy ABI, so the job then ran our scipy against
+#: the runtime's numpy — which does not raise, it calls abort(). The task died
+#: on `exit code 134 (SIGABRT)` with no Python traceback to read, because by
+#: then there was no Python left to raise one.
 #:
-#: Dropping the pin does not leave a model without the library — pip sees the
-#: requirement already satisfied by what is installed and moves on. It only
-#: stops us overwriting a working version with a different one.
+#: So the rule is: never withhold a package while keeping something pinned that
+#: links its ABI. numpy, pandas, scipy and scikit-learn come from the runtime
+#: together or not at all.
 #:
-#: **The two failure directions are not symmetric, which is why this list is
-#: short.** Withholding something the runtime does NOT have fails loudly, at
-#: import, on the first run. Shipping something it DOES have fails quietly, as
-#: a version clash somewhere else entirely. So this holds only packages whose
-#: presence is not in doubt; extend it once a real job has been asked what it
-#: actually has, not by reasoning about what a runtime probably ships.
+#: The failure directions are still not symmetric, and that is what makes this
+#: set the safer end of the trade. Withholding something the runtime does NOT
+#: have fails at import, loudly, naming the module. Shipping a package built
+#: against a different numpy aborts the process. An ImportError can be read;
+#: a SIGABRT cannot.
 #:
-#: Deliberately NOT here, and why:
-#:   scipy, scikit-learn — very likely present, but scikit-learn carries a
-#:     minimum-version constraint and an absent scipy breaks it at import.
-#:   typing-extensions   — pydantic v2 needs a recent one; an older runtime
-#:     copy would break it in a way that reads as a pydantic bug.
-#:   protobuf, jinja2    — present as somebody else's transitive dependency,
-#:     with no way from here to know whose version wins.
+#: Deliberately NOT here:
+#:   torch      — the heavy one, and the reason per-model environments exist.
+#:     It bundles its own numpy interop rather than linking a system ABI, and
+#:     the runtime is not guaranteed to carry it at all.
+#:   emcee, joblib, threadpoolctl — pure Python. Nothing to mismatch.
+#:   typing-extensions — pydantic v2 needs a recent one, and an older runtime
+#:     copy breaks it in a way that reads as a pydantic bug.
 RUNTIME_PROVIDED: frozenset[str] = frozenset(
     {
+        # The numpy ABI set — all four together, see above.
         "numpy",
         "pandas",
+        "scipy",
+        "scikit-learn",
+        # Pure-Python staples the runtime always has. No ABI to mismatch;
+        # withheld only to stop pip churning versions it does not need to.
         "python-dateutil",
         "setuptools",
         "six",

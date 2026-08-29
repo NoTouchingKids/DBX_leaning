@@ -39,12 +39,6 @@ pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
     # via pydantic
-scikit-learn==1.9.0
-    # via dbx-leaning
-scipy==1.17.1 ; python_full_version < '3.12'
-    # via scikit-learn
-scipy==1.18.1 ; python_full_version >= '3.12'
-    # via scikit-learn
 threadpoolctl==3.6.0
     # via scikit-learn
 typing-extensions==4.16.0
