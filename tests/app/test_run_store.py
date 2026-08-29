@@ -749,10 +749,10 @@ async def test_the_warehouse_store_actually_stores_the_job_run_id():
     `claim_slot` inserts the row before the Jobs API is called, so by the time
     a job run id exists the row does too — and `set_run_status`'s MERGE set
     `job_run_id` only on its NOT MATCHED branch. The column stayed NULL
-    forever, and `app/server/reconcile.py::_resolve` needs it to ask the Jobs API how
-    a run ended. Without it that route is dead and reconciliation degrades to
-    the last `run_events` row, which is precisely what a job that crashed
-    before emitting anything never wrote.
+    forever, and `app/server/reconcile.py::resolve_ending` needs it to ask the
+    Jobs API how a run ended. Without it that route is dead and reconciliation
+    degrades to the last `run_events` row, which is precisely what a job that
+    crashed before emitting anything never wrote.
 
     Nothing failed, and nothing said so. Same quiet class as the Lakebase
     wiring gap.

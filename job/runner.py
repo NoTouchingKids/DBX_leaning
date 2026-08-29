@@ -8,9 +8,10 @@ record. Only the live commentary differs.
 What changed when the transport collapsed to one socket:
 
 - There is no relay and no channel list. One `WebSocketBus`, or None.
-- The job keeps a `RunRecord` of its own status and recent messages, so it
-  can *answer* as well as emit — a BACKFILL is served from memory instead of
-  waking the SQL warehouse.
+- The job keeps a `RunStream` of every message it has produced, so it can
+  *answer* as well as emit — a BACKFILL is served from memory instead of
+  waking the SQL warehouse. `RunRecord` is narrower now: just the run's own
+  status and a progress history, for `summary()` and `_force_terminal`.
 - Status transitions are reported to Lakebase by the job itself, so
   `run_status` stays current even for a run no socket ever attached to.
 - Teardown **drains before it closes**. The old order closed the channels and
@@ -47,6 +48,7 @@ from .shared.envelope import RunStatus
 from .shared.seq import SeqCounter
 from .shared.tables import TableSet
 from .sink import DurableFlusher, DurableSink
+from .stream import RunStream, StreamCursor
 
 log = logging.getLogger(__name__)
 
@@ -99,8 +101,15 @@ class JobHarness:
             cfg.run_id,
             model=_model_name(cfg.model_spec),
             job_run_id=cfg.job_run_id,
-            replay_messages=cfg.live_queue_max,
         )
+        #: The run's one message stream — replaces `RunRecord`'s old replay
+        #: ring. Every seq'd message the emitter produces lands here first;
+        #: the durable flusher and the live bus each read it back through
+        #: their own cursor (see `job/stream.py`). `live_queue_max` sizes
+        #: this the same way it always sized the old ring: same knob, same
+        #: default, now also doing double duty as the bus's own cursor-lag
+        #: cap (`_build_bus`) — see that config field's own comment.
+        self.stream = RunStream(cfg.run_id, replay_window=cfg.live_queue_max)
         self._writer = writer
         self._bus = bus
         self._bus_injected = bus is not None
@@ -120,13 +129,27 @@ class JobHarness:
 
     def _build_bus(self) -> WebSocketBus | None:
         if self._bus_injected:
-            # An injected bus was built before this harness existed, so it may
-            # be holding a different RunRecord. There is exactly one record per
-            # run and the backfill answers come out of it, so the harness's
-            # wins — otherwise a test (or a caller assembling its own bus)
-            # gets a socket that serves an empty replay ring and no error.
+            # An injected bus was built before this harness existed, so all
+            # four of its links back into the run are whatever its caller
+            # could supply — which is nothing. The harness's win, because
+            # every one of them fails silently otherwise:
+            #
+            #   record     — needed for `job_run_id` and the terminal status
+            #                `_force_terminal` reads at teardown
+            #   stream     — a socket reading from an empty placeholder
+            #                stream nobody appends to, so every BACKFILL
+            #                comes back complete and empty and nothing ever
+            #                reaches the socket at all
+            #   on_cancel  — an inbound cancel frame that no-ops, so the run
+            #                ignores the one command the socket exists to carry
+            #   next_seq   — `hello` advertising 0, telling an app that has
+            #                been watching for an hour to expect the run to
+            #                start over
             if self._bus is not None:
                 self._bus.record = self.record
+                self._bus.rebind_stream(self.stream)
+                self._bus.on_cancel = lambda who: self.token.cancel(f"cancelled by {who}")
+                self._bus.next_seq = lambda: self.seq.issued
             return self._bus
         ws_url = self.cfg.ws_url
         if not self.cfg.app_url or ws_url is None:
@@ -137,6 +160,7 @@ class JobHarness:
             ws_url,
             self.cfg.run_id,
             record=self.record,
+            stream=self.stream,
             token=self.cfg.app_token,
             credential=self._credential(),
             on_cancel=lambda who: self.token.cancel(f"cancelled by {who}"),
@@ -180,12 +204,20 @@ class JobHarness:
         )
         bus = self._build_bus()
         reporter = self._build_status_reporter()
+        # The durable flusher's own read position into the stream — created
+        # once and reused for the whole run (the periodic tick below, and the
+        # final flush in `_finalise`). A fresh cursor at either of those would
+        # start back at the beginning of the stream and re-write rows that are
+        # already durable, since a cursor's position is what "already pulled"
+        # means; there is no other record of it.
+        durable_cursor = self.stream.cursor()
 
         handle = self._handle or load_model(cfg.model_spec, cfg.model_config)
         emitter = Emitter(
             cfg.run_id,
             sink=sink,
             record=self.record,
+            stream=self.stream,
             bus=bus,
             seq=self.seq,
             results_table=self._results_table(handle),
@@ -196,12 +228,13 @@ class JobHarness:
 
         if bus is not None:
             await bus.start()
-        # The periodic flush, and the one place the record learns how far the
+        # The periodic flush, and the one place the stream learns how far the
         # warehouse has caught up — which is half of what a client needs to
         # decide whether to ask the job or ask SQL. On its own thread, so
         # neither depends on this loop getting scheduled.
         flusher = DurableFlusher(
             sink,
+            cursor=durable_cursor,
             tick_s=cfg.flush_tick_s,
             after_flush=lambda: self._note_flushed(sink),
         )
@@ -234,7 +267,7 @@ class JobHarness:
             # touching the sink, so the "unflushed rows means not SUCCEEDED"
             # decision is made against a buffer nothing else can move.
             flusher.stop()
-            status, detail = await self._finalise(sink, emitter, status, detail)
+            status, detail = await self._finalise(sink, durable_cursor, emitter, status, detail)
             await self._report(reporter)
             if bus is not None:
                 # Drain FIRST, close second. The other order is what dropped
@@ -269,14 +302,18 @@ class JobHarness:
         return self.outcome
 
     def _note_flushed(self, sink: DurableSink) -> None:
-        """How far Delta has caught up, told to the record.
+        """How far Delta has caught up, told to the stream.
 
         Runs on the flusher's thread, and again on the loop at the end of
-        `_finalise`. Safe from both: `RunRecord` guards every field with its
+        `_finalise`. Safe from both: `RunStream` guards every field with its
         own lock, and the mark it keeps is a high-water mark, so two threads
         reporting out of order cannot move it backwards.
+
+        This is also what lets the stream evict anything at all — see
+        `job/stream.py`'s eviction rule — so a durable stall shows up as the
+        stream (and therefore the run's memory) growing, not as silent loss.
         """
-        self.record.note_flushed(sink.flushed_through_seq(self.seq.issued))
+        self.stream.note_flushed(sink.flushed_through_seq(self.seq.issued))
 
     async def _report(self, reporter: LakebaseStatus | None) -> None:
         """Push the current status to Lakebase. Never load-bearing."""
@@ -328,7 +365,12 @@ class JobHarness:
         emitter.emit("result", rows=rows, final=True)
 
     async def _finalise(
-        self, sink: DurableSink, emitter: Emitter, status: RunStatus, detail: str | None
+        self,
+        sink: DurableSink,
+        cursor: StreamCursor,
+        emitter: Emitter,
+        status: RunStatus,
+        detail: str | None,
     ) -> tuple[RunStatus, str | None]:
         """Flush, then decide the terminal status — in that order.
 
@@ -339,8 +381,12 @@ class JobHarness:
             # The run's one hop to a thread, rather than one per write: the
             # sink is synchronous now, and this flush carries everything the
             # run produced, so on Spark it is the one that can take seconds.
-            # Off-loop is what keeps the socket breathing through it.
-            await asyncio.to_thread(sink.flush_all)
+            # Off-loop is what keeps the socket breathing through it. Pulling
+            # first is what makes it carry everything: the periodic flusher
+            # already stopped (see `run`'s `finally`), so whatever it had not
+            # yet taken off `cursor` is only sitting in the stream, not the
+            # buffer, until this does so.
+            await asyncio.to_thread(self._pull_and_flush_all, sink, cursor)
         except Exception:  # noqa: BLE001
             log.exception("final flush raised")
 
@@ -358,24 +404,38 @@ class JobHarness:
             # Inline, NOT through `to_thread`, and this is the one place in the
             # teardown where that matters. The flush above already took
             # everything the run produced; what is left here is exactly one
-            # row — the terminal status. Sending it through a thread would buy
-            # nothing and cost a guaranteed yield, because `to_thread` does a
-            # full executor round trip even with no rows to write.
+            # row — the terminal status, sitting in the stream since the
+            # `emit` just above. Sending it through a thread would buy nothing
+            # and cost a guaranteed yield, because `to_thread` does a full
+            # executor round trip even with no rows to write.
             #
             # The yield it would create used to be actively dangerous: it
-            # landed between `offer()`ing the terminal status and `bus.drain()`,
-            # and drain tested `self._q` to decide whether to wait — which a
-            # batch already in flight leaves empty, so it returned at once and
-            # `close()` cancelled the send task mid-batch. ~45% of fast runs
-            # lost the tail of their live stream that way. `drain()` waits on
-            # `_idle` now and survives the yield, so this is no longer load-
-            # bearing; it stays because a thread round trip for one row is
-            # still pure cost.
-            sink.flush_all()
+            # landed between queuing the terminal status and `bus.drain()`,
+            # and drain decided whether to wait from a check that a batch
+            # already in flight leaves looking empty — so it returned at once
+            # and `close()` cancelled the send task mid-batch. ~45% of fast
+            # runs lost the tail of their live stream that way. `drain()`
+            # waits on `_idle` now and survives the yield, so this is no
+            # longer load-bearing; it stays because a thread round trip for
+            # one row is still pure cost.
+            self._pull_and_flush_all(sink, cursor)
         except Exception:  # noqa: BLE001
             log.exception("could not record terminal status")
         self._note_flushed(sink)
         return status, detail
+
+    @staticmethod
+    def _pull_and_flush_all(sink: DurableSink, cursor: StreamCursor) -> int:
+        """Drain whatever a stopped flusher never got to off `cursor`, then
+        write every table regardless of its own size/age trigger.
+
+        Must reuse the SAME cursor the periodic flusher used for this run —
+        see the comment on `durable_cursor` in `run()`. A fresh one would
+        start again from the beginning of the stream and re-write rows that
+        are already durable.
+        """
+        sink.pull(cursor)
+        return sink.flush_all()
 
 
 def _model_name(spec: str) -> str:

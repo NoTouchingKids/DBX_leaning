@@ -15,6 +15,22 @@ This replaces the old `channels.py` + `relay.py` pair. What went, and why:
   job's replay ring, so the app can ask for it back (`ControlKind.BACKFILL`).
   Dropping the oldest when full is now both simpler and recoverable.
 
+What changed again when the send queue became a cursor into `job/stream.py`'s
+`RunStream` (the same structure the durable flusher and a BACKFILL reply now
+read from, instead of a private deque here): there is no longer a local
+buffer for this bus to bound on its own. A cursor that falls behind simply
+lags; nothing here removes anything from the stream itself, because eviction
+there answers to durability, not to how far any one live consumer has got.
+Left alone, a disconnected or merely slow socket next to a durable path that
+is *also* behind would let the run's retained history grow without the bound
+`queue_max` used to guarantee. So `queue_max` is kept, and means something
+adjacent rather than identical: not "how many messages this bus may hold,"
+which it no longer does, but "how far behind the stream's head this bus's own
+cursor may sit" — past it, the excess is skipped, not sent, counted the same
+way a dropped message always was. What is skipped is never the only copy: it
+is retained-or-already-durable by construction, so BACKFILL is what a client
+gets it back from.
+
 What stayed, deliberately:
 
 - **The reconnect loop.** A run that starts while the app is down must attach
@@ -35,14 +51,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections import deque
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
 from .auth import AppCredential, ingress_headers
 from .record import RunRecord
 from .shared.codec import to_jsonable
-from .shared.envelope import TERMINAL_STATUSES, LogMessage, Message, StatusMessage
+from .shared.envelope import TERMINAL_STATUSES, LogMessage, Message
 from .shared.protocol import (
     ControlFrame,
     ControlKind,
@@ -52,6 +67,7 @@ from .shared.protocol import (
     pong,
     unpack_frame,
 )
+from .stream import RunStream, StreamCursor
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +113,7 @@ class WebSocketBus:
         run_id: str,
         *,
         record: RunRecord,
+        stream: RunStream | None = None,
         token: str | None = None,
         credential: AppCredential | None = None,
         on_cancel: Callable[[str], None] | None = None,
@@ -109,6 +126,9 @@ class WebSocketBus:
     ) -> None:
         self.url = url
         self.run_id = run_id
+        #: `job_run_id` for `hello`, and (via `latest_status`) the terminal
+        #: message `_force_terminal` pushes past a queue that will not drain
+        #: in time. The replay ring itself is `stream`, below.
         self.record = record
         self.token = token
         #: The Databricks identity the Apps proxy demands. Distinct from
@@ -118,12 +138,17 @@ class WebSocketBus:
         self.next_seq = next_seq or (lambda: 0)
         self.reconnect_s = reconnect_s
         self.ping_s = ping_s
+        #: Was a queue capacity; now the cursor lag cap — see the module
+        #: docstring. Same knob, same default, a different consequence for
+        #: crossing it.
         self.queue_max = max(1, queue_max)
         self.batch_max = max(1, batch_max)
         self._connect = connect  # injectable for tests
 
         self._ws: WebSocketLike | None = None
-        self._q: deque[Message] = deque()
+        self.stream: RunStream
+        self._cursor: StreamCursor
+        self.rebind_stream(stream if stream is not None else RunStream(run_id))
         self._wake = asyncio.Event()
         self._idle = asyncio.Event()
         self._idle.set()
@@ -136,7 +161,8 @@ class WebSocketBus:
         self._closed = False
 
         self.sent = 0
-        #: Evicted because the queue was full. Recoverable by BACKFILL.
+        #: Skipped because the cursor fell more than `queue_max` behind the
+        #: stream's head. Recoverable by BACKFILL — see the module docstring.
         self.dropped = 0
         #: Lost to a socket that died mid-batch. Counted apart from `dropped`
         #: because they mean different things: one is backpressure working as
@@ -152,26 +178,38 @@ class WebSocketBus:
 
     @property
     def pending(self) -> int:
-        return len(self._q)
+        """How far this bus's cursor sits behind the stream's head — an
+        honest distance, not a promise every one of them is still here to
+        send (see `StreamCursor.lag`)."""
+        return self._cursor.lag
+
+    def rebind_stream(self, stream: RunStream) -> None:
+        """Point this bus at a different `RunStream`, with a fresh cursor.
+
+        A bus constructed before the run's real stream exists — every test
+        that builds one directly, and `JobHarness._build_bus` for an injected
+        bus — gets a throwaway placeholder at construction time. Swapping the
+        stream in later without also throwing away the old cursor would leave
+        `_cursor` pointed at the placeholder forever, so a BACKFILL would
+        answer from an empty stream nobody ever appends to instead of the
+        run's real one. Mirrors reassigning `.record` for the same reason.
+        """
+        self.stream = stream
+        self._cursor = stream.cursor()
 
     # --- producer side (loop thread only; the Emitter does the hop) -------
 
-    def offer(self, msg: Message) -> None:
-        """Queue for sending. Never raises, never blocks.
+    def notify(self) -> None:
+        """Wake the send loop: something new exists in the run's stream.
 
-        Full queue drops the oldest, whatever it is. That is safe here in a
-        way it was not before: the durable copy already exists and the replay
-        ring still holds it, so a dropped message is recoverable by BACKFILL
-        rather than lost.
+        Carries no payload. The message itself is already durable-safe the
+        moment `Emitter.emit` appends it to `self.stream` — this bus reads it
+        back out through its own cursor, so all a notification has to do is
+        make the send loop look again promptly instead of waiting out its
+        poll interval.
         """
         if self._closed:
             return
-        if not _live_visible(msg):
-            return
-        while len(self._q) >= self.queue_max:
-            self._q.popleft()
-            self.dropped += 1
-        self._q.append(msg)
         self._idle.clear()
         self._wake.set()
 
@@ -195,27 +233,28 @@ class WebSocketBus:
 
         Returns how many messages were still unsent when it gave up.
 
-        **Waits on `_idle`, never on `len(self._q)`.** An earlier version
-        skipped the wait entirely when the queue looked empty, which is a
-        different question from "is there anything still going out": the send
-        loop pops a whole batch into a local list *before* awaiting its sends,
-        so a batch in flight leaves `_q` empty. Drain returned at once,
-        `close()` cancelled the send task mid-batch, and the tail of the live
-        stream — terminal status included — was lost while `left` reported 0.
-        It needed a yield between the last `offer()` and here to show up, and
-        one existed; it cost ~45% of fast runs.
+        **Waits on `_idle`, never on `self._cursor.lag`.** An earlier version
+        (back when this held a local queue) skipped the wait entirely when the
+        queue looked empty, which is a different question from "is there
+        anything still going out": the send loop takes a whole batch from the
+        cursor *before* awaiting its sends, so a batch in flight already reads
+        as caught-up. Drain returned at once, `close()` cancelled the send
+        task mid-batch, and the tail of the live stream — terminal status
+        included — was lost while `left` reported 0. It needed a yield between
+        the last append and here to show up, and one existed; it cost ~45% of
+        fast runs.
 
-        `_idle` is the honest signal, and already was: `offer()` clears it and
-        the send loop only sets it once the queue is empty AND the awaits from
-        the last batch have returned. Waiting on it unconditionally is also
-        free when there is genuinely nothing to do, because an already-set
-        Event returns immediately.
+        `_idle` is the honest signal, and already was: `notify()` clears it and
+        the send loop only sets it once the cursor has caught up to the
+        stream's head AND the awaits from the last batch have returned.
+        Waiting on it unconditionally is also free when there is genuinely
+        nothing to do, because an already-set Event returns immediately.
         """
         self._draining = True
         self._wake.set()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._idle.wait(), timeout=timeout_s)
-        left = len(self._q)
+        left = self._cursor.lag
         if left:
             # The deadline beat the backlog. Order stays FIFO right up to here
             # — reordering the queue so the outcome went first was tried and
@@ -226,9 +265,19 @@ class WebSocketBus:
             # allowed to be a casualty of the deadline: send it directly, as
             # the final frame. The client sees a gap in `seq` before it, which
             # is exactly the signal to BACKFILL — and every message in that gap
-            # is durable and still in the replay ring.
+            # is durable and still in the stream.
             forced = await self._force_terminal()
-            left = len(self._q)
+            # NOT `self._cursor.lag` again: `_force_terminal`, on success,
+            # rebinds the cursor straight to the terminal message's own seq
+            # (see there) so a future send never re-offers what this already
+            # pushed out of band -- and since the terminal is normally the
+            # run's last message, that rebind alone would read as `lag == 0`,
+            # silently erasing everything abandoned in between from this
+            # count. One message left the unsent bucket, however it left;
+            # the rest are still exactly as abandoned as `left` said a line
+            # above, and BACKFILL is how the app gets them back.
+            if forced:
+                left -= 1
             log.info(
                 "%d message(s) unsent after %.1fs drain; terminal status %s, "
                 "the durable copy stands and the app can BACKFILL the rest",
@@ -239,29 +288,31 @@ class WebSocketBus:
         return left
 
     async def _force_terminal(self) -> bool:
-        """Push the run's outcome past a queue that will not drain in time."""
+        """Push the run's outcome past a queue that will not drain in time.
+
+        Reads it off `record.latest_status` rather than searching for it:
+        there is no local queue to scan any more, and the record already
+        keeps exactly this (see `RunRecord`'s own docstring, job #1).
+        """
         ws = self._ws
         if ws is None:
             return False
-        terminal = next(
-            (
-                m
-                for m in reversed(self._q)
-                if isinstance(m, StatusMessage) and m.status in TERMINAL_STATUSES
-            ),
-            None,
-        )
-        if terminal is None:
+        terminal = self.record.latest_status
+        if terminal is None or terminal.status not in TERMINAL_STATUSES:
             return False
+        if terminal.seq <= self._cursor.position:
+            return False  # already sent by the ordinary path
         try:
             await ws.send(pack_frame(terminal))
         except Exception:  # noqa: BLE001
             return False
         self.sent += 1
-        # Take it out, or the send loop may send it again and the unsent count
-        # reported to the caller includes a message that was delivered.
-        with contextlib.suppress(ValueError):
-            self._q.remove(terminal)
+        # Jump the cursor to this position so the unsent count reported to
+        # the caller does not still include a message that was just
+        # delivered — and so nothing between the old position and here gets
+        # offered again later: it was deliberately skipped, not sent, and
+        # BACKFILL is how the app gets it back.
+        self._cursor = self.stream.cursor(terminal.seq)
         return True
 
     async def close(self) -> None:
@@ -291,7 +342,18 @@ class WebSocketBus:
 
     async def _send_loop(self) -> None:
         while True:
-            if not self._q:
+            # Runs whether or not a socket is attached right now: a lagging
+            # cursor is a memory question, not a send question, and the old
+            # queue-capacity cap applied unconditionally too (see the module
+            # docstring for why this must not wait on having a connection).
+            self._skip_lagging_cursor()
+
+            # `.lag` is a non-destructive peek (unlike `.take()`), which is
+            # exactly what is needed to mirror the old `if not self._q` check:
+            # deciding whether there is anything new must not itself consume
+            # it, or the branch below (no socket) would advance the cursor
+            # past messages it has nowhere to send.
+            if self._cursor.lag == 0:
                 self._idle.set()
                 if self._draining and self._closed:
                     return
@@ -304,16 +366,38 @@ class WebSocketBus:
 
             ws = self._ws
             if ws is None:
-                # No socket. Hold what is queued — a reconnect is on its way,
-                # and the app catches up from `hello` plus BACKFILL. Give up
-                # only once the run is closing.
+                # No socket. Hold position — a reconnect is on its way, and
+                # the app catches up from `hello` plus BACKFILL. Give up only
+                # once the run is closing.
                 if self._draining:
                     self._idle.set()
                     return
                 await asyncio.sleep(0.1)
                 continue
 
-            batch = [self._q.popleft() for _ in range(min(self.batch_max, len(self._q)))]
+            taken = self._cursor.take(self.batch_max)
+            if not taken:
+                # `.lag` said behind, but nothing was actually retained to
+                # read: eviction reached this position before the cursor did.
+                # Only reachable if `queue_max` here is configured larger than
+                # the stream's own replay window -- production ties both to
+                # the same value, so normal operation never sees this -- but
+                # left unhandled, `.lag` would stay positive forever (`take`
+                # does not move a cursor's position when it finds nothing),
+                # and this loop has no `await` in this branch: that would be
+                # a genuine busy-spin freezing the event loop, not just a
+                # stuck bus. Jump to the retained floor so it cannot happen.
+                self._cursor = self.stream.cursor(self.stream.replay_from_seq - 1)
+                continue
+            # `client_visible=False` logs come back from `take()` — it is the
+            # generic primitive the durable pull is built on too, and that
+            # side must see everything. Filtering here, after the cursor has
+            # already advanced past them, is what keeps them off the socket;
+            # `read()` (BACKFILL) does the equivalent for the same reason.
+            batch = [m for m in taken if _live_visible(m)]
+            if not batch:
+                continue  # nothing to send this round; loop again, no wait
+
             try:
                 for msg in batch:
                     await ws.send(pack_frame(msg))
@@ -330,6 +414,25 @@ class WebSocketBus:
                 await _safe_close(ws)
                 continue
             self.sent += len(batch)
+
+    def _skip_lagging_cursor(self) -> None:
+        """Bound how far behind the stream's head this bus's cursor may sit.
+
+        There is no local queue any more to cap on this bus's own behalf —
+        `job/stream.py`'s eviction is durability-gated and does not know or
+        care how far any one live consumer has fallen behind. Left alone, a
+        disconnected or merely slow socket next to a durable path that is
+        *also* behind would grow the run's retained history without bound, in
+        a way the old fixed-size queue never allowed. Past `queue_max`, jump
+        the excess rather than insisting on sending a backlog nobody would
+        thank this bus for delivering late: what is skipped is retained (or
+        already durable) by construction, so BACKFILL is how it comes back.
+        """
+        lag = self._cursor.lag
+        if lag <= self.queue_max:
+            return
+        skipped = self._cursor.take(lag - self.queue_max)
+        self.dropped += len(skipped)
 
     # --- the connection ---------------------------------------------------
 
@@ -376,8 +479,8 @@ class WebSocketBus:
             self.run_id,
             job_run_id=self.record.job_run_id,
             next_seq=self.next_seq(),
-            replay_from_seq=self.record.replay_from_seq,
-            flushed_through_seq=self.record.flushed_through_seq,
+            replay_from_seq=self.stream.replay_from_seq,
+            flushed_through_seq=self.stream.flushed_through_seq,
         )
 
     async def _ping(self, ws: WebSocketLike) -> None:
@@ -431,7 +534,7 @@ class WebSocketBus:
             limit = DEFAULT_BACKFILL_LIMIT
         limit = max(0, min(limit, DEFAULT_BACKFILL_LIMIT))
 
-        messages, complete = self.record.since(after_seq, limit=limit)
+        messages, complete = self.stream.read(after_seq, limit=limit)
         self.backfills_served += 1
         log.info(
             "backfill after seq %d: served %d message(s), complete=%s",
@@ -445,8 +548,8 @@ class WebSocketBus:
                 after_seq=after_seq,
                 messages=[to_jsonable(m) for m in messages],
                 complete=complete,
-                replay_from_seq=self.record.replay_from_seq,
-                flushed_through_seq=self.record.flushed_through_seq,
+                replay_from_seq=self.stream.replay_from_seq,
+                flushed_through_seq=self.stream.flushed_through_seq,
             )
         )
 
@@ -478,8 +581,9 @@ async def _safe_close(ws: WebSocketLike | None) -> None:
 
 
 def _live_visible(msg: Message) -> bool:
-    """`client_visible=False` filters the live send only — the durable write
-    and the replay ring already have it."""
+    """`client_visible=False` filters the live send only — the stream and the
+    durable write both already have it (`StreamCursor.take` is unfiltered;
+    see `job/stream.py`)."""
     return not (isinstance(msg, LogMessage) and not msg.client_visible)
 
 

@@ -86,9 +86,15 @@ class JobConfig:
     flush_max_age_s: float = 30.0
     flush_tick_s: float = 1.0
 
-    #: Live path only, and now recoverable: a message dropped here is still
-    #: in the durable buffer and in the job's replay ring, so the app can ask
-    #: for it back over the socket instead of it being lost.
+    #: Live path only, and recoverable: anything dropped for this reason is
+    #: still retained by the run's `RunStream` (or already durable), so the
+    #: app can ask for it back over the socket instead of it being lost. One
+    #: knob, two jobs, deliberately: it sizes `RunStream`'s own retention
+    #: window (`JobHarness.stream`) AND, unchanged since before the stream
+    #: existed, the live bus's cursor-lag cap (`WebSocketBus.queue_max`) —
+    #: see that class's module docstring for why crossing it means "skip
+    #: ahead," not "drop the oldest," now that there is no local queue to
+    #: drop from.
     live_queue_max: int = 2000
     ws_reconnect_s: float = 30.0
     ws_ping_s: float = 20.0

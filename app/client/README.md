@@ -12,9 +12,10 @@ end. That is met: `shared/`, `job/`, `app/` and nine models are built and
 tested, `tests/integration/test_end_to_end.py` drives real models through the
 real harness offline, and the ingress probes cleared
 (`docs/spike-results.md`). What is *still* missing is envelope traffic from a
-**deployed** run — `databricks bundle deploy` has never been executed against
-a workspace — so everything here is built against locally-run models, the
-generated schema, and tests.
+**deployed** run. The bundle itself has been deployed to a workspace many
+times; what has not happened is this client being driven against telemetry
+from one. Everything here is built against locally-run models, the generated
+schema, and tests.
 
 ## The stack, and the one thing to know about each choice
 

@@ -797,6 +797,7 @@ in as many words.
 
 - **No CI.** Nothing runs the test suite on a push; `bundle validate` and the
   `--check` export are both CI-shaped and unwired.
-- **`bundle deploy` has never been run** against a real workspace from here.
-  The bundle validates against the CLI's schema, and every contract it shares
-  with the application code is tested, but validation is not deployment.
+- **`bundle deploy` has been run against a real workspace, repeatedly.** What
+  that establishes is that the bundle resolves, uploads and creates its
+  resources — not that a deployed run behaves correctly end to end, which is
+  a separate question this file does not answer.

@@ -1,4 +1,4 @@
-"""The one live path: what it says on connect, what it answers, what it drops.
+"""The one live path: what it says on connect, what it answers, what it skips.
 
 The real question these cannot answer — whether the Databricks Apps ingress
 passes an Upgrade and holds it — is what /spike-ws exists for. These cover
@@ -13,8 +13,9 @@ import pytest
 
 from job.bus import DEFAULT_BACKFILL_LIMIT, WebSocketBus, _diagnosis
 from job.record import RunRecord
-from job.shared.envelope import make_message
+from job.shared.envelope import Message, make_message
 from job.shared.protocol import ControlFrame, ControlKind, backfill, cancel, pack_frame, ping
+from job.stream import RunStream
 
 from .conftest import FakeSocket, connector, until
 
@@ -25,6 +26,24 @@ def log(seq: int, **fields):
 
 def status(seq: int, value: str = "RUNNING"):
     return make_message("status", run_id="run-1", seq=seq, status=value)
+
+
+def offer(bus: WebSocketBus, msg: Message) -> None:
+    """What `Emitter.emit` does to the run's shared state, minus the thread
+    hop: append to the bus's own stream (what the send loop and a BACKFILL
+    both read), tell its record (what `_force_terminal` reads for the run's
+    latest status at teardown), and wake it -- `notify()`, the one thing that
+    actually crosses a thread boundary in production.
+
+    A raw `stream.append()` is not equivalent for a test that expects prompt
+    delivery: `notify()` is also what clears `_idle`, and nothing else does
+    -- append without it and the send loop has no reason to leave its poll
+    wait early, and `drain()` (which waits on `_idle`) reads a stream that
+    still looks caught-up seconds before it actually is.
+    """
+    bus.stream.append(msg)
+    bus.record.observe(msg)
+    bus.notify()
 
 
 @pytest.fixture
@@ -59,16 +78,17 @@ def refusing(url, **kwargs):
     raise ConnectionRefusedError("app is down")
 
 
-# --- connecting ------------------------------------------------------------
+# --- connecting --------------------------------------------------------
 
 
 async def test_hello_is_the_first_frame_and_carries_both_replay_bounds(make_bus):
     record = RunRecord("run-1", job_run_id="jr-9")
-    record.observe(log(3990))
-    record.note_flushed(3980)
+    stream = RunStream("run-1")
+    stream.append(log(3990))
+    stream.note_flushed(3980)
     ws = FakeSocket()
 
-    bus = make_bus(ws, record, next_seq=lambda: 4000)
+    bus = make_bus(ws, record, stream=stream, next_seq=lambda: 4000)
     await bus.start()
     assert await until(lambda: bool(ws.sent))
 
@@ -102,13 +122,15 @@ async def test_a_refused_connection_retries_rather_than_giving_up(make_bus):
     assert bus.connect_attempts >= 3 and bus.connects == 1
 
 
-async def test_messages_offered_while_nothing_is_connected_are_held_not_dropped(make_bus):
-    """The queue holds through a blip; the app catches up from hello plus
-    BACKFILL. Giving up early would drop what a reconnect could have had."""
-    bus = make_bus(reconnect_s=0.01, connect=refusing)
+async def test_messages_appended_while_nothing_is_connected_are_held_not_dropped(make_bus):
+    """The stream holds through a blip; the app catches up from hello plus
+    BACKFILL. There is no local queue any more to give up on early — see
+    `WebSocketBus`'s own module docstring."""
+    stream = RunStream("run-1")
+    bus = make_bus(stream=stream, reconnect_s=0.01, connect=refusing)
     await bus.start()
     for seq in range(3):
-        bus.offer(log(seq))
+        stream.append(log(seq))
     await asyncio.sleep(0.05)
 
     assert bus.pending == 3 and bus.dropped == 0 and bus.sent == 0
@@ -164,15 +186,15 @@ async def test_the_app_level_ping_goes_out_on_its_own(make_bus):
 # --- backfill --------------------------------------------------------------
 
 
-async def test_a_backfill_is_answered_from_the_replay_ring(make_bus):
+async def test_a_backfill_is_answered_from_the_stream(make_bus):
     """The request that must never wake the SQL warehouse."""
-    record = RunRecord("run-1")
+    stream = RunStream("run-1")
     for seq in range(5):
-        record.observe(log(seq))
-    record.note_flushed(2)
+        stream.append(log(seq))
+    stream.note_flushed(2)
     ws = FakeSocket()
 
-    bus = make_bus(ws, record)
+    bus = make_bus(ws, stream=stream)
     await bus.start()
     assert await until(lambda: bus.is_connected)
     ws.push(pack_frame(backfill("run-1", after_seq=1)))
@@ -189,13 +211,20 @@ async def test_a_backfill_is_answered_from_the_replay_ring(make_bus):
 
 async def test_a_backfill_reaching_below_the_ring_says_so_rather_than_lying(make_bus):
     """complete=False is the app's signal to go to SQL for the rest. A partial
-    answer presented as a whole one is how a client silently loses rows."""
-    record = RunRecord("run-1", replay_messages=3)
+    answer presented as a whole one is how a client silently loses rows.
+
+    Eviction needs a durable mark to have caught up (`job/stream.py`'s
+    eviction rule), not just the window overflowing — `note_flushed(9)`
+    confirms everything so `evict_below` is governed by `replay_window=3`
+    alone, retaining exactly the last 3.
+    """
+    stream = RunStream("run-1", replay_window=3)
     for seq in range(10):
-        record.observe(log(seq))
+        stream.append(log(seq))
+    stream.note_flushed(9)
     ws = FakeSocket()
 
-    bus = make_bus(ws, record)
+    bus = make_bus(ws, stream=stream)
     await bus.start()
     assert await until(lambda: bus.is_connected)
     ws.push(pack_frame(backfill("run-1", after_seq=0)))
@@ -210,12 +239,12 @@ async def test_a_backfill_reaching_below_the_ring_says_so_rather_than_lying(make
 async def test_one_backfill_reply_is_capped_however_much_is_asked_for(make_bus):
     """An unbounded reply would let one reconnect pack the whole ring into a
     single frame. A client with a bigger gap pages on by seq."""
-    record = RunRecord("run-1")
+    stream = RunStream("run-1")
     for seq in range(DEFAULT_BACKFILL_LIMIT + 100):
-        record.observe(log(seq))
+        stream.append(log(seq))
     ws = FakeSocket()
 
-    bus = make_bus(ws, record)
+    bus = make_bus(ws, stream=stream)
     await bus.start()
     assert await until(lambda: bus.is_connected)
     ws.push(pack_frame(backfill("run-1", after_seq=-1, limit=10_000)))
@@ -226,29 +255,40 @@ async def test_one_backfill_reply_is_capped_however_much_is_asked_for(make_bus):
     assert payload["complete"] is True, "a truncated page is still complete as far as it goes"
 
 
-# --- the queue -------------------------------------------------------------
+# --- the live cursor's lag cap ----------------------------------------------
 
 
-async def test_a_full_queue_drops_the_oldest_and_counts_it(make_bus):
-    """Dropping the oldest is safe here in a way it was not for the old relay:
-    the durable copy exists and the replay ring still holds it, so a dropped
-    message is recoverable by BACKFILL rather than gone."""
-    bus = make_bus(queue_max=3)
+async def test_a_lagging_cursor_skips_ahead_past_queue_max_and_counts_it(make_bus):
+    """Replaces the old queue-eviction test: there is no local queue any more
+    for this bus to bound on its own. Past `queue_max`, the cursor jumps
+    forward instead of insisting on a backlog nobody would thank it for
+    delivering late — see `WebSocketBus`'s own module docstring. What is
+    skipped is retained (or already durable) by construction, so BACKFILL is
+    how a client gets it back, exactly as a dropped message always was.
+    """
+    bus = make_bus(queue_max=3, connect=refusing, reconnect_s=0.01)
+    await bus.start()
     for seq in range(5):
-        bus.offer(log(seq))
+        offer(bus, log(seq))
 
-    assert bus.pending == 3 and bus.dropped == 2
-    assert [m.seq for m in bus._q] == [2, 3, 4]
+    assert await until(lambda: bus.dropped == 2)
+    assert bus.pending == 3
 
 
-async def test_a_client_invisible_log_is_never_offered_live(make_bus):
-    """Raw solver chatter is written durably and stays replayable; it just
-    never travels to a browser."""
-    bus = make_bus()
-    bus.offer(log(0, client_visible=False))
-    bus.offer(log(1))
+async def test_a_client_invisible_log_is_never_sent_live(make_bus):
+    """Filtering moved from append-time (there is no append into the bus any
+    more) to the send loop, after `take()` — see `_send_loop`. The durable
+    path and a BACKFILL still see it; only the live send does not."""
+    ws = FakeSocket()
+    bus = make_bus(ws)
+    await bus.start()
+    assert await until(lambda: bus.is_connected)
 
-    assert [m.seq for m in bus._q] == [1]
+    offer(bus, log(0, client_visible=False))
+    offer(bus, log(1))
+
+    assert await until(lambda: bool(ws.messages()))
+    assert [m.seq for m in ws.messages()] == [1]
     assert bus.dropped == 0, "filtered is not dropped"
 
 
@@ -261,7 +301,7 @@ async def test_drain_lets_a_slow_socket_finish_before_the_close(make_bus):
     await bus.start()
     assert await until(lambda: bus.is_connected)
     for seq in range(50):
-        bus.offer(log(seq))
+        offer(bus, log(seq))
 
     left = await bus.drain(5.0)
 
@@ -275,23 +315,24 @@ async def test_drain_gives_up_at_its_deadline_rather_than_holding_the_run_open(m
     bus = make_bus(reconnect_s=0.01, connect=refusing)
     await bus.start()
     for seq in range(3):
-        bus.offer(log(seq))
+        offer(bus, log(seq))
 
     assert await bus.drain(0.05) == 3
     assert bus.dropped == 0
 
 
 async def test_a_batch_already_in_flight_is_waited_for_not_abandoned(make_bus):
-    """`drain()` must ask "is anything still going out", not "is the queue empty".
+    """`drain()` must ask "is anything still going out", not "is the cursor
+    caught up".
 
-    The send loop pops a whole batch into a local list BEFORE awaiting its
-    sends, so a batch in flight leaves `_q` empty. An earlier `drain()` tested
-    `_q` to decide whether to wait at all, saw nothing, and returned at once —
-    `close()` then cancelled the send task mid-batch and the tail of the live
-    stream went with it, terminal status included, while `left` cheerfully
-    reported 0.
+    The send loop takes a whole batch from the cursor BEFORE awaiting its
+    sends, so a batch in flight already reads as caught-up (`bus.pending ==
+    0`). An earlier `drain()` tested exactly that to decide whether to wait at
+    all, saw nothing outstanding, and returned at once — `close()` then
+    cancelled the send task mid-batch and the tail of the live stream went
+    with it, terminal status included, while `left` cheerfully reported 0.
 
-    It needed a yield between the last `offer()` and the drain to show up, and
+    It needed a yield between the last append and the drain to show up, and
     the runner had one. The sleep below is that yield, made deliberate.
     """
     ws = FakeSocket(send_delay_s=0.02)
@@ -300,8 +341,8 @@ async def test_a_batch_already_in_flight_is_waited_for_not_abandoned(make_bus):
     assert await until(lambda: bus.is_connected)
 
     for seq in range(3):
-        bus.offer(log(seq))
-    bus.offer(status(3, "SUCCEEDED"))
+        offer(bus, log(seq))
+    offer(bus, status(3, "SUCCEEDED"))
 
     # Long enough for the send loop to take the whole batch and be parked on
     # the first send, short enough that none of them has landed yet.
@@ -328,8 +369,8 @@ async def test_a_deadline_the_backlog_outlives_still_costs_no_outcome(make_bus):
     await bus.start()
     assert await until(lambda: bus.is_connected)
     for seq in range(100):
-        bus.offer(log(seq))
-    bus.offer(status(100, "SUCCEEDED"))
+        offer(bus, log(seq))
+    offer(bus, status(100, "SUCCEEDED"))
 
     left = await bus.drain(0.15)
 
@@ -346,7 +387,7 @@ async def test_a_send_failure_ends_the_session_so_the_bus_can_redial(make_bus):
     redials only when ``_session`` returns, and ``_session`` is parked on the
     INBOUND iterator — which a socket whose write direction has failed can
     keep open indefinitely. Without the close, the bus would sit there holding
-    queued messages against a connection nothing would ever re-establish.
+    a lagging cursor against a connection nothing would ever re-establish.
     """
     ws = FakeSocket()
     bus = make_bus(ws, reconnect_s=0.02)
@@ -354,11 +395,11 @@ async def test_a_send_failure_ends_the_session_so_the_bus_can_redial(make_bus):
     assert await until(lambda: bus.is_connected)
 
     ws.fail_on_send = True
-    bus.offer(log(0))
+    offer(bus, log(0))
     assert await until(lambda: not bus.is_connected)
 
-    # Counted apart from a queue-full eviction: backpressure working as
-    # designed and a connection failing are different facts about a run.
+    # Counted apart from a lag-cap skip: backpressure working as designed and
+    # a connection failing are different facts about a run.
     assert bus.send_failures == 1
     assert bus.dropped == 0
     assert bus.sent == 0

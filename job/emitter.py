@@ -8,16 +8,27 @@ Two rules follow, and they are the reason this class exists:
 
 1. ``asyncio.Queue`` is not thread-safe, so the live hand-off crosses via
    ``loop.call_soon_threadsafe``. Three lines of stdlib, no dependency.
-2. The durable append happens *synchronously, on the calling thread*, before
-   the live hand-off. Durability must not sit behind the same bounded,
-   droppable queue as the live path — that is what makes "logs may drop live,
-   never durably" true rather than aspirational.
+2. The stream append happens *synchronously, on the calling thread*, before
+   anything else. Durability must not sit behind the same droppable,
+   eventually-consistent path as the live socket — that is what makes "logs
+   may drop live, never durably" true rather than aspirational.
+
+**What "durable" means changed shape, not strength.** It used to mean
+"pushed into the write buffer" directly. Now it means "appended to
+``RunStream``" — and that is *stronger*, not weaker: ``job/stream.py``'s
+eviction rule refuses to drop a message until the durable sink has pulled
+*and* confirmed writing it (see that module's docstring), so nothing appended
+here can vanish before Delta has it. The write itself still happens later, off
+this thread, on the flusher's own cursor — what changes at the instant
+``append`` returns is that losing it has become impossible, not that it has
+already reached Delta.
 
 The run record is written on the same thread and for the same reason: it is
-what answers a BACKFILL, so it has to be true the instant a message exists,
-not once the event loop gets round to it.
+what a status message needs updated the instant it exists (``summary()`` for
+Lakebase; the terminal status for ``WebSocketBus._force_terminal`` at
+teardown), not once the event loop gets round to it.
 
-Order is the whole design: **durable, then record, then live.** Each step is
+Order is the whole design: **stream, then record, then live.** Each step is
 allowed to fail without the ones before it being undone.
 """
 
@@ -35,6 +46,7 @@ from .shared.downsample import downsample_rows
 from .shared.envelope import PREVIEW_MAX_POINTS, Message, MessageType, make_message
 from .shared.seq import SeqCounter
 from .sink import DurableSink
+from .stream import RunStream
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +60,7 @@ class Emitter:
         *,
         sink: DurableSink,
         record: RunRecord,
+        stream: RunStream | None = None,
         bus: WebSocketBus | None = None,
         seq: SeqCounter | None = None,
         results_table: str | None = None,
@@ -58,6 +71,11 @@ class Emitter:
         self.run_id = run_id
         self.sink = sink
         self.record = record
+        #: Every seq'd message's one durability-safe home — see the module
+        #: docstring. Optional only so a model's own unit tests (or a bare
+        #: `Emitter` in isolation) need not construct one by hand first;
+        #: `JobHarness` always supplies the run's real stream.
+        self.stream = stream if stream is not None else RunStream(run_id)
         #: None when the run is unobserved — no `DBX_APP_URL`, or no live
         #: channel wanted. Not an error: apps run ~8h/day, jobs do not.
         self.bus = bus
@@ -93,16 +111,19 @@ class Emitter:
         msg = make_message(type, run_id=self.run_id, seq=self.seq.next(), **fields)
 
         try:
-            self.sink.append_message(msg)
+            # The one synchronous, thread-safe write everything else rests
+            # on — see the module docstring for why this is durability now,
+            # not merely a cache the durable path happens to read.
+            self.stream.append(msg)
         except Exception:  # noqa: BLE001 - durability failing must not kill the run
-            log.exception("durable append failed for seq=%s", msg.seq)
+            log.exception("stream append failed for seq=%s; durability at risk", msg.seq)
 
         try:
             self.record.observe(msg)
         except Exception:  # noqa: BLE001 - the record is an aid, not the truth
             log.exception("run record rejected seq=%s", msg.seq)
 
-        self._offer_live(msg)
+        self._offer_live()
 
         if self.on_message is not None:
             try:
@@ -171,32 +192,39 @@ class Emitter:
 
     # --- live hand-off ----------------------------------------------------
 
-    def _offer_live(self, msg: Message) -> None:
-        """Hand to the live path. Never raises: a model must not learn that
-        nobody is listening, and the durable copy already exists."""
+    def _offer_live(self) -> None:
+        """Wake the bus: the message is already in `self.stream` for it to
+        read. Never raises: a model must not learn that nobody is listening,
+        and the stream append already happened regardless.
+
+        No payload crosses here any more — unlike the old push queue, there
+        is nothing left to hand over. The thread hop is still required
+        (`asyncio.Event` is no more thread-safe than `asyncio.Queue` was),
+        it just now carries a wake-up instead of data.
+        """
         if self.bus is None:
             return
         loop = self._loop
         if loop is None:
-            self._offer_now(msg)  # no loop bound: single-threaded/test use
+            self._notify_now()  # no loop bound: single-threaded/test use
             return
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
         if running is loop:
-            self._offer_now(msg)
+            self._notify_now()
             return
         try:
-            loop.call_soon_threadsafe(self._offer_now, msg)
+            loop.call_soon_threadsafe(self._notify_now)
         except RuntimeError:
             # Loop already closed — the run is ending; durable write stands.
             pass
 
-    def _offer_now(self, msg: Message) -> None:
+    def _notify_now(self) -> None:
         if self.bus is None:
             return
         try:
-            self.bus.offer(msg)
+            self.bus.notify()
         except Exception:  # noqa: BLE001 - the live path is never load-bearing
-            log.exception("live bus rejected seq=%s; durable copy stands", msg.seq)
+            log.exception("live bus notify failed; stream copy stands")
