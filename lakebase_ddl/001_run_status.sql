@@ -5,9 +5,15 @@
 -- rather than only readable as a Python string, and so a DBA can apply it by
 -- hand if startup DDL is ever disallowed.
 --
--- Only run_status lives here. Everything append-only and high-volume — logs,
+-- Only run_status lives here, plus its transition log in
+-- 002_run_status_history.sql. Everything append-only and high-volume — logs,
 -- progress, events, results — stays in Delta (uc_ddl/). See app/server/store.py for
 -- why this one table is different.
+--
+-- The PRIMARY KEY below and the count-and-claim transaction in claim_slot are
+-- the two properties this whole table is in Postgres for. 002's header
+-- explains what appending transitions to THIS row would cost; the short
+-- version is both of them.
 --
 -- NOT `public`, and that is not tidiness. Since PostgreSQL 15 the `public`
 -- schema no longer grants CREATE to `PUBLIC`, so a role that does not own the

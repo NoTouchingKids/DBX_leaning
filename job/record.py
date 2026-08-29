@@ -183,20 +183,39 @@ class RunRecord:
     # --- the end-of-run summary ------------------------------------------
 
     def summary(self, *, requested_by: str | None = None) -> dict[str, Any]:
-        """The run's state as one flat row, for ``run_status``.
+        """The run's state as one flat row, for ``run_status`` and its history.
 
-        Keyed to match the ``run_status`` columns in both schemas — Lakebase's
-        (``lakebase_ddl/001_run_status.sql``) and Unity Catalog's
-        (``uc_ddl/001_core_tables.sql``), which agree on these eight names.
+        The first eight keys match the ``run_status`` columns in both schemas
+        — Lakebase's (``lakebase_ddl/001_run_status.sql``) and Unity Catalog's
+        (``uc_ddl/001_core_tables.sql``), which agree on those eight names.
 
         Today the only consumer is ``LakebaseStatus.report()``, whose upsert
         binds seven of them: ``requested_by`` is deliberately not bound, because
         the app sets it when it claims the slot and the job has no business
         knowing who asked. The upsert's ``DO UPDATE`` leaves that column alone,
         so a value the app wrote survives every status the job reports.
+
+        ``seq`` and ``ts`` are the extras, and they are *the status message's
+        own* coordinates rather than columns of ``run_status``: they are what
+        the append-only companion row (``run_status_history``) is deduplicated
+        and ordered by, so a redelivered report appends once and a reader can
+        put the transitions back in the order the job saw them — not the order
+        Postgres happened to receive them in.
+
+        With no status message yet, ``seq`` is None. That is exactly what makes
+        such a row exempt from the history table's
+        ``UNIQUE (run_id, seq) WHERE seq IS NOT NULL``, and it should be: there
+        is no message identity to dedupe on. ``ts`` falls back to ``updated_ts``
+        for the same row, because that column is NOT NULL and "when this was
+        reported" is still a true answer.
         """
         with self._lock:
             status = self._status
+        # One clock read, not two: ``ts`` falls back to this when no status
+        # message has arrived, and a fallback stamped a hair after the
+        # ``updated_ts`` it ships with would have the two rows disagreeing
+        # about when the same report happened.
+        updated_ts = now_ms()
         return {
             "run_id": self.run_id,
             "job_run_id": self.job_run_id,
@@ -204,8 +223,10 @@ class RunRecord:
             "status": (status.status.value if status else RunStatus.FAILED.value),
             "detail": (status.detail if status else "no terminal status was recorded"),
             "started_ts": self.started_ts,
-            "updated_ts": now_ms(),
+            "updated_ts": updated_ts,
             "requested_by": requested_by,
+            "seq": (status.seq if status else None),
+            "ts": (status.ts if status else updated_ts),
         }
 
     def describe(self) -> str:
