@@ -281,6 +281,40 @@ async def test_drain_gives_up_at_its_deadline_rather_than_holding_the_run_open(m
     assert bus.dropped == 0
 
 
+async def test_a_batch_already_in_flight_is_waited_for_not_abandoned(make_bus):
+    """`drain()` must ask "is anything still going out", not "is the queue empty".
+
+    The send loop pops a whole batch into a local list BEFORE awaiting its
+    sends, so a batch in flight leaves `_q` empty. An earlier `drain()` tested
+    `_q` to decide whether to wait at all, saw nothing, and returned at once —
+    `close()` then cancelled the send task mid-batch and the tail of the live
+    stream went with it, terminal status included, while `left` cheerfully
+    reported 0.
+
+    It needed a yield between the last `offer()` and the drain to show up, and
+    the runner had one. The sleep below is that yield, made deliberate.
+    """
+    ws = FakeSocket(send_delay_s=0.02)
+    bus = make_bus(ws, batch_max=10)
+    await bus.start()
+    assert await until(lambda: bus.is_connected)
+
+    for seq in range(3):
+        bus.offer(log(seq))
+    bus.offer(status(3, "SUCCEEDED"))
+
+    # Long enough for the send loop to take the whole batch and be parked on
+    # the first send, short enough that none of them has landed yet.
+    await asyncio.sleep(0.005)
+    assert not bus.pending, "the batch should be in flight, not queued — the setup this guards"
+
+    left = await bus.drain(2.0)
+    await bus.close()
+
+    assert left == 0
+    assert [m.seq for m in ws.messages()] == [0, 1, 2, 3], "nothing may be abandoned mid-batch"
+
+
 async def test_a_deadline_the_backlog_outlives_still_costs_no_outcome(make_bus):
     """Order stays FIFO right through the drain. Hoisting the outcome to the
     front instead was tried and is wrong: a client that treats a terminal

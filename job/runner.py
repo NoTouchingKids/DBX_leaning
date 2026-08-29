@@ -335,8 +335,9 @@ class JobHarness:
         """
         try:
             # The run's one hop to a thread, rather than one per write: the
-            # sink is synchronous now, and a multi-second Spark write here
-            # would otherwise stall the WebSocket drain that comes next.
+            # sink is synchronous now, and this flush carries everything the
+            # run produced, so on Spark it is the one that can take seconds.
+            # Off-loop is what keeps the socket breathing through it.
             await asyncio.to_thread(sink.flush_all)
         except Exception:  # noqa: BLE001
             log.exception("final flush raised")
@@ -352,7 +353,23 @@ class JobHarness:
 
         try:
             emitter.emit("status", status=status, detail=detail)
-            await asyncio.to_thread(sink.flush_all)  # the terminal status must land
+            # Inline, NOT through `to_thread`, and this is the one place in the
+            # teardown where that matters. The flush above already took
+            # everything the run produced; what is left here is exactly one
+            # row — the terminal status. Sending it through a thread would buy
+            # nothing and cost a guaranteed yield, because `to_thread` does a
+            # full executor round trip even with no rows to write.
+            #
+            # The yield it would create used to be actively dangerous: it
+            # landed between `offer()`ing the terminal status and `bus.drain()`,
+            # and drain tested `self._q` to decide whether to wait — which a
+            # batch already in flight leaves empty, so it returned at once and
+            # `close()` cancelled the send task mid-batch. ~45% of fast runs
+            # lost the tail of their live stream that way. `drain()` waits on
+            # `_idle` now and survives the yield, so this is no longer load-
+            # bearing; it stays because a thread round trip for one row is
+            # still pure cost.
+            sink.flush_all()
         except Exception:  # noqa: BLE001
             log.exception("could not record terminal status")
         self._note_flushed(sink)
