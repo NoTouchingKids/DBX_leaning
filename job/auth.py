@@ -109,6 +109,13 @@ class AppCredential:
                 log.info("no app credential from %s: %s", source, exc)
                 continue
             if not found:
+                # Say so. A source that declines because it is not configured
+                # used to `continue` in silence, so three of the four ways
+                # this can end with no token left nothing in the log at all —
+                # and the only visible symptom was the Apps proxy bouncing the
+                # handshake to a login page thirty seconds later, which names
+                # none of them.
+                log.info("no app credential from %s: not configured here", source)
                 continue
             token, ttl = found
             self._token = token
@@ -120,9 +127,27 @@ class AppCredential:
 
         log.info(
             "no Databricks credential for the app ingress; if the app is behind "
-            "the Apps proxy this run will go unobserved (durable path unaffected)"
+            "the Apps proxy this run will go unobserved (durable path unaffected). "
+            "Auth-related variables this process CAN see: %s",
+            self._visible_auth_env() or "none",
         )
         return None
+
+    def _visible_auth_env(self) -> str:
+        """Which auth variables exist here — NAMES ONLY, never values.
+
+        The point is to answer "what does this runtime actually offer" from
+        one job log, rather than by reasoning about what a serverless task is
+        supposed to inject. Values are never logged: half of these are
+        secrets, and a token in a driver log outlives the run that wrote it.
+        """
+        interesting = ("DATABRICKS", "DBX_", "OAUTH", "CLIENT_ID", "CLIENT_SECRET", "TOKEN")
+        names = sorted(
+            name
+            for name in self._env
+            if any(fragment in name.upper() for fragment in interesting)
+        )
+        return ", ".join(names)
 
     async def _from_env(self) -> tuple[str, float] | None:
         token = self._get("DBX_APP_OAUTH_TOKEN")
