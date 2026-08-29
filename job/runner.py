@@ -19,9 +19,11 @@ What changed when the transport collapsed to one socket:
   status included.
 - The durable path runs on a thread of its own (`DurableFlusher`), not as a
   task on this loop. Delta is the floor, and a floor that stops ticking
-  whenever the loop is wedged is not one. This file keeps exactly one hop
-  into it, at teardown, so a Spark write taking seconds cannot stall the
-  drain that follows.
+  whenever the loop is wedged is not one. This file keeps one hop into it,
+  in `_finalise`, so the flush carrying everything the run produced cannot
+  stall the drain that follows. The single row after it goes inline — see
+  the note there, which is about what a needless `to_thread` costs the live
+  path, not about durability.
 """
 
 from __future__ import annotations

@@ -210,9 +210,12 @@ class DurableFlusher:
     def stop(self, timeout_s: float = STOP_TIMEOUT_S) -> None:
         """Signal, then join. Idempotent — teardown paths call it once each."""
         self._stop.set()
-        thread, self._thread = self._thread, None
+        thread = self._thread
         if thread is None:
             return
+        # The handle is kept rather than dropped, so `running` can still answer
+        # honestly if the join below times out. Clearing it here would report a
+        # thread that is very much alive as stopped.
         thread.join(timeout_s)
         if thread.is_alive():
             # Only reachable through a write that never returns. Say so: the
