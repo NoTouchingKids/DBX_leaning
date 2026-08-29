@@ -71,11 +71,28 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_status (
     requested_by STRING
 )
 USING DELTA
-COMMENT 'Current state per run. Updated by the app; never polled on a timer.';
+COMMENT 'Current state per run, from the app. Lakebase is the live record; see architecture.md.';
 
--- Append-only status transitions written by the JOB. Distinct from run_status:
--- a job that runs while the app is down still records its transitions here,
--- and startup reconciliation reads them back.
+-- The `status` quarter of the envelope message stream, written by the JOB.
+--
+-- Read that as the reason it exists, because the obvious one is now wrong:
+-- Lakebase holds the run's status history (`run_status` plus
+-- `run_status_history`, written by the job itself), so "somewhere durable to
+-- record transitions the app missed" no longer justifies a second copy.
+--
+-- What does: `app/server/repository.py::messages_since` — the backfill query —
+-- is a four-branch UNION ALL over run_logs, run_progress, run_events and
+-- run_results_meta, ordered by the one monotonic `seq`. Drop this table and a
+-- client rebuilding a finished run gets a stream with permanent holes wherever
+-- a status was, and "did this run succeed" stops being answerable from the
+-- message stream at all. Postgres cannot stand in: `seq` is assigned onto the
+-- envelope and a Postgres row never had one, so merging the two would mean
+-- ordering one stream two different ways.
+--
+-- It is also the only status record that does not depend on a network call
+-- succeeding — Lakebase is reached over REST, this rides the Spark durable
+-- path that is the floor. Two or three rows per run on a flush that is already
+-- happening.
 CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_events (
     run_id STRING NOT NULL,
     seq    BIGINT NOT NULL,

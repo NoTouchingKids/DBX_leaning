@@ -5,6 +5,12 @@ finished, while this app was down is the normal case — so on the way up, any
 run still marked non-terminal is checked against what the job itself recorded
 in ``run_events`` and, failing that, against the Jobs API.
 
+There should be far less for it to do than there once was: the job now reports
+its own status to Lakebase as it goes (``job/lakebase.py``), so a run the app
+never observed usually arrives here already terminal. What is left is the case
+that reporting could not reach Lakebase either — which is exactly when reading
+``run_events`` off the durable path earns its warehouse wake-up.
+
 There is deliberately no periodic version of this. A poll on a timer is what
 keeps the SQL warehouse awake, and uptime is what costs money.
 """

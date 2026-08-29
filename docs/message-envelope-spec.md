@@ -97,11 +97,15 @@ it: anything else emitting a magic large number has to null it itself.
 
 ## `status`
 
-A lifecycle transition. Not backed by its own table — `run_status` is one row
-per run, upserted by the job on every transition (`job/lakebase.py`), and the
-live status message is a notification of that update, not the record of truth.
-The append-only durable trace of the transitions themselves goes to
-`run_events`, which is what a run that nothing was watching leaves behind.
+A lifecycle transition. The record of truth is in Lakebase — `run_status`, one
+row per run, upserted by the job on every transition (`job/lakebase.py`), with
+the transition appended to `run_status_history` beside it — and the live status
+message is a notification of that update, not the record itself. The transition
+is *also* written to `run_events` in Delta, and that copy is not redundant: it
+is the `status` quarter of the backfill stream, the one place a status carries
+the same `seq` as the logs and progress around it, and the only status record
+that does not depend on a network call succeeding. See `docs/architecture.md`,
+"What lives in Postgres, what lives in Delta".
 
 | Field | Type | Notes |
 |---|---|---|
