@@ -4,12 +4,33 @@ up — it is the floor, not a fallback tier.
 Nothing here drops anything. A failed write puts its rows back in the buffer
 and is retried on the next tick; the failure is remembered so the runner can
 refuse to report ``SUCCEEDED`` over a lost result write.
+
+**Nothing in this module touches asyncio, and that is the point.** It was
+async once: ``flush_due``/``flush_all`` were coroutines holding an
+``asyncio.Lock``, and ``_write`` did
+``await asyncio.to_thread(writer.write_batch, ...)`` — an async wrapper whose
+whole job was handing a blocking call straight back to a thread. Both ends of
+that path were already synchronous. Rows arrive from the model's worker
+thread into a ``threading.Lock``-guarded buffer, and the writer is blocking
+Spark; the event loop sat in the middle of something that never needed it.
+
+Taking it out buys the property the "floor, not a fallback tier" language
+actually demands: **the durable path no longer depends on the event loop
+being healthy.** A wedged loop — a long synchronous callback, a socket that
+will not drain, a task that never yields — costs the live commentary and
+leaves Delta ticking. A floor that stalls with the loop is not one.
+
+``DurableFlusher`` is what replaced the asyncio task: one daemon thread doing
+the periodic flush. The loop keeps exactly one hop into any of this, at
+teardown (``JobHarness._finalise``), so a Spark write taking seconds cannot
+stall the WebSocket drain that follows it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import threading
+from collections.abc import Callable
 from typing import Any
 
 from .buffer import DurableBuffer
@@ -19,7 +40,18 @@ from .shared.tables import TableSet, table_for, to_row
 
 log = logging.getLogger(__name__)
 
-__all__ = ["DurableSink"]
+__all__ = ["DurableSink", "DurableFlusher"]
+
+#: Floor on the flush interval. ``DBX_FLUSH_TICK_S=0`` is one typo away in a
+#: deploy, and a thread whose wait is zero does not tick — it spins a core for
+#: the length of the run, on billed compute, saying nothing about why.
+MIN_TICK_S = 0.001
+
+#: How long ``DurableFlusher.stop()`` waits for a tick already in flight.
+#: Bounded, because a wedged Spark write must not hold a finished run open;
+#: safe to bound, because the thread is a daemon and cannot keep the process
+#: alive past it.
+STOP_TIMEOUT_S = 30.0
 
 
 class DurableSink:
@@ -41,7 +73,10 @@ class DurableSink:
         self.rows_written = 0
         self.write_failures = 0
         self.last_error: str | None = None
-        self._flush_lock = asyncio.Lock()
+        # Serialises the take-then-write pair, so the flusher thread and the
+        # runner's final flush cannot both take rows for the same table and
+        # write them out of order.
+        self._flush_lock = threading.Lock()
 
     # --- append (called from any thread, never blocks on I/O) -------------
 
@@ -53,37 +88,40 @@ class DurableSink:
         for row in rows:
             self.buffer.append(qualified, row)
 
-    # --- flush (event loop side; the write itself goes off-loop) ----------
+    # --- flush (any thread; blocking, and left that way) ------------------
 
-    async def flush_due(self) -> int:
+    def flush_due(self) -> int:
+        """Write whatever has crossed the size or age bound. Nothing else."""
         due = self.buffer.due(max_bytes=self.max_bytes, max_age_s=self.max_age_s)
-        return await self._flush(due)
+        return self._flush(due)
 
-    async def flush_all(self) -> int:
-        async with self._flush_lock:
+    def flush_all(self) -> int:
+        """End of run: every table, both bounds ignored."""
+        with self._flush_lock:
             pending = self.buffer.take_all()
             written = 0
             for table, rows in pending.items():
-                written += await self._write(table, rows)
+                written += self._write(table, rows)
             return written
 
-    async def _flush(self, tables: list[str]) -> int:
+    def _flush(self, tables: list[str]) -> int:
         if not tables:
             return 0
-        async with self._flush_lock:
+        with self._flush_lock:
             written = 0
             for table in tables:
                 rows = self.buffer.take(table)
-                written += await self._write(table, rows)
+                written += self._write(table, rows)
             return written
 
-    async def _write(self, table: str, rows: list[dict[str, Any]]) -> int:
+    def _write(self, table: str, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
         try:
-            # write_batch is blocking; keeping it off the loop is what lets a
-            # WebSocket stay alive across a flush.
-            count = await asyncio.to_thread(self.writer.write_batch, table, rows)
+            # Blocking, and deliberately still blocking: every caller is
+            # already off the event loop — the flusher thread, or the runner's
+            # one `to_thread` hop at teardown.
+            count = self.writer.write_batch(table, rows)
         except Exception as exc:  # noqa: BLE001 - every failure mode is "retry later"
             self.write_failures += 1
             self.last_error = f"{table}: {exc}"
@@ -117,3 +155,99 @@ class DurableSink:
     @property
     def unflushed(self) -> int:
         return self.buffer.stats().rows
+
+
+class DurableFlusher:
+    """The periodic flush, on a daemon thread of its own.
+
+    This was an ``asyncio.Task`` on the run's loop. It is a thread now for the
+    reason at the top of this module: the durable path is the floor, and the
+    floor must not stop when the loop does.
+
+    Two details are the whole lifecycle, and both prevent a specific failure:
+
+    - **The stop signal is a ``threading.Event``, waited on as the tick.**
+      ``Event.wait(tick_s)`` returns the instant ``stop()`` fires, where a
+      ``time.sleep(tick_s)`` loop that checks a flag afterwards would add a
+      whole tick of latency to every run's teardown — a 30s flush interval
+      would mean up to 30s of it.
+    - **The thread is a daemon, and ``stop()`` still joins it.** Daemon so a
+      thread that somehow outlives its stop can never hold the process open;
+      joined anyway so the run's final flush is the last word on what is
+      durable, rather than racing a tick nobody is waiting for.
+
+    ``after_flush`` runs on this thread, right after the flush, and is where
+    the run record learns how far Delta has caught up. It is a callback rather
+    than a ``RunRecord`` reference so the durable path keeps knowing nothing
+    about the replay ring — and ``RunRecord`` guards every field with its own
+    lock, so being called from here is safe.
+    """
+
+    def __init__(
+        self,
+        sink: DurableSink,
+        *,
+        tick_s: float,
+        after_flush: Callable[[], None] | None = None,
+        name: str = "durable-flush",
+    ) -> None:
+        self.sink = sink
+        self.tick_s = max(float(tick_s), MIN_TICK_S)
+        self.after_flush = after_flush
+        self.name = name
+        #: Ticks completed, error or not. The one observable that says the
+        #: thread is really running, without a test having to guess a sleep.
+        self.ticks = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("flusher already started")
+        self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout_s: float = STOP_TIMEOUT_S) -> None:
+        """Signal, then join. Idempotent — teardown paths call it once each."""
+        self._stop.set()
+        thread = self._thread
+        if thread is None:
+            return
+        # The handle is kept rather than dropped, so `running` can still answer
+        # honestly if the join below times out. Clearing it here would report a
+        # thread that is very much alive as stopped.
+        thread.join(timeout_s)
+        if thread.is_alive():
+            # Only reachable through a write that never returns. Say so: the
+            # alternative is a silent thread still writing after the run it
+            # belonged to reported its outcome.
+            log.warning("durable flush thread still running %.0fs after stop", timeout_s)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    # A context manager because the commonest way to leak one of these is a
+    # test (or a caller) that starts it and then fails before its stop.
+    def __enter__(self) -> DurableFlusher:
+        self.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.stop()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.tick_s):
+            self._tick()
+
+    def _tick(self) -> None:
+        self.ticks += 1
+        try:
+            self.sink.flush_due()
+            if self.after_flush is not None:
+                self.after_flush()
+        except Exception:  # noqa: BLE001 - a bad tick must not end the durable path
+            # Keep ticking. The rows are still in the buffer, the next tick
+            # retries them, and a thread that died here would take the whole
+            # durable path down without anything noticing until the run ended.
+            log.exception("durable flush tick raised; continuing")

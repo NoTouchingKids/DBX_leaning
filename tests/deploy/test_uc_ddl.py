@@ -212,7 +212,13 @@ def results_tables() -> dict[str, list[str]]:
 @pytest.fixture(scope="module")
 def results() -> dict[str, list[tuple[str, bool]]]:
     parsed = results_tables()
-    assert len(parsed) >= 11, sorted(parsed)
+    # Anti-vacuity, same as the `columns` fixture: a parser that matched
+    # nothing would let every assertion below pass over an empty dict. The
+    # bound is the model count (ten since `streaming_results` was removed —
+    # `panel_fit` covers the chunked-results contract more thoroughly, and the
+    # per-chunk preview it did not cover is now a unit test on the emitter).
+    # Which tables must exist, in both directions, is `test_bundle.py`'s job.
+    assert len(parsed) >= 10, sorted(parsed)
     return parsed
 
 

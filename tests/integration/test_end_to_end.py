@@ -21,7 +21,7 @@ from job.shared.envelope import MessageAdapter, RunStatus
 
 # The harness's own socket fake, rather than a second one here: one place that
 # knows what a websocket looks like to `job.bus`.
-from tests.job.conftest import FakeSocket, connector
+from tests.job.conftest import FakeSocket, connector, until
 
 
 @pytest.fixture
@@ -96,9 +96,14 @@ async def test_everything_written_is_a_valid_envelope_message(run_config, tmp_pa
     assert seqs == list(range(len(seqs))), "the durable record has gaps"
 
 
-async def test_the_streaming_model_writes_each_chunk_as_it_goes(run_config, tmp_path):
+async def test_a_chunked_model_writes_each_chunk_as_it_goes(run_config, tmp_path):
+    """`panel_fit` emits a result every `chunk_size` groups instead of once at
+    the end. The harness has to number those emissions and count each one's
+    rows on its own — a `row_count` that became a running total would make a
+    partial run unreadable, and a chunk_index that repeated would make the
+    results table unorderable."""
     writer = JsonlWriter(tmp_path / "delta")
-    cfg = run_config("job.models.streaming_results", model_config={"n": 400, "step": 60})
+    cfg = run_config("job.models.panel_fit", model_config={"chunk_size": 6})
 
     outcome = await JobHarness(cfg, writer=writer).run()
 
@@ -108,27 +113,46 @@ async def test_the_streaming_model_writes_each_chunk_as_it_goes(run_config, tmp_
     assert [m["chunk_index"] for m in meta] == list(range(len(meta)))
     assert [m["final"] for m in meta][:-1] == [False] * (len(meta) - 1)
     assert meta[-1]["final"] is True
-    assert sum(m["row_count"] for m in meta) == len(table(writer, "results_streaming"))
+    assert sum(m["row_count"] for m in meta) == len(table(writer, "results_panel_fit"))
 
 
 async def test_a_run_cancelled_partway_keeps_what_it_produced(run_config, tmp_path):
     writer = JsonlWriter(tmp_path / "delta")
+    # A panel big enough that plenty of the run is still ahead when the first
+    # chunk lands — the default 48 groups all fit in about 70ms, so a cancel
+    # would be racing the model rather than interrupting it.
+    panel = [
+        {"entity": f"g{g}", "code": f"C{g}", "year": float(1960 + i), "life_expectancy": 50.0 + i}
+        for g in range(600)
+        for i in range(8)
+    ]
     cfg = run_config(
-        "job.models.streaming_results",
-        model_config={"n": 2000, "step": 10, "window": 100},
+        "job.models.panel_fit",
+        model_config={
+            "rows": panel,
+            "limit": len(panel),
+            "chunk_size": 20,
+            "progress_every": 50,
+        },
     )
     harness = JobHarness(cfg, writer=writer)
 
-    async def cancel_soon():
-        await asyncio.sleep(0.05)
+    async def cancel_once_something_exists():
+        # Cancel on the first chunk rather than after a fixed sleep: the
+        # property under test is "a cancelled run keeps what it produced",
+        # which says nothing unless something was produced first. `until` is
+        # bounded, so a model that never emits fails the assertions below
+        # rather than hanging the suite.
+        await until(lambda: harness.record.counts().get("result", 0) >= 1)
         harness.token.cancel("cancelled by test")
 
-    asyncio.create_task(cancel_soon())
+    asyncio.create_task(cancel_once_something_exists())
     outcome = await harness.run()
 
     assert outcome.status is RunStatus.CANCELLED
     assert outcome.result_chunks > 0, "a cancelled run kept nothing"
-    assert len(table(writer, "results_streaming")) == outcome.result_rows
+    assert outcome.result_rows > 0, "a cancelled run kept no rows"
+    assert len(table(writer, "results_panel_fit")) == outcome.result_rows
     assert [r["status"] for r in table(writer, "run_events")][-1] == "CANCELLED"
 
 

@@ -97,11 +97,15 @@ it: anything else emitting a magic large number has to null it itself.
 
 ## `status`
 
-A lifecycle transition. Not backed by its own table — `run_status` is one row
-per run, upserted by the job on every transition (`job/lakebase.py`), and the
-live status message is a notification of that update, not the record of truth.
-The append-only durable trace of the transitions themselves goes to
-`run_events`, which is what a run that nothing was watching leaves behind.
+A lifecycle transition. The record of truth is in Lakebase — `run_status`, one
+row per run, upserted by the job on every transition (`job/lakebase.py`), with
+the transition appended to `run_status_history` beside it — and the live status
+message is a notification of that update, not the record itself. The transition
+is *also* written to `run_events` in Delta, and that copy is not redundant: it
+is the `status` quarter of the backfill stream, the one place a status carries
+the same `seq` as the logs and progress around it, and the only status record
+that does not depend on a network call succeeding. See `docs/architecture.md`,
+"What lives in Postgres, what lives in Delta".
 
 | Field | Type | Notes |
 |---|---|---|
@@ -146,12 +150,22 @@ nothing.
 A model that produces results in chunks (a rolling-origin backtest, chunked
 batch inference) emits one `result` message **per chunk**, each with its own
 `chunk_index` and its own `row_count` — that chunk's count, never a running
-total. `job/models/streaming_results/` is the model this was added for, and its
-tests fail loudly if the harness stops supporting it. It is no longer the
-only one: `job/models/panel_fit/` emits a chunk every `chunk_size` groups, which
-is what keeps a 48-group run from being silent until the end. Two
-independent users of a field is roughly where "a feature one model needed"
-becomes "part of the contract", so treat it as the latter.
+total. `job/models/panel_fit/` is the model that exercises this: it emits a
+chunk every `chunk_size` groups, which is what keeps a 48-group run from being
+silent until the end. Its tests are what fail loudly if the harness stops
+supporting it — exactly one final chunk on every path, a chunk boundary that
+never splits or repeats a group, and a cancellation that flushes the partial
+chunk rather than discarding it.
+
+It is the only chunking model today, and that is not a reason to read these
+fields as one model's private arrangement. `final` is how a client knows a
+result set is finished, and a reader that ignores it renders a partial answer
+as a complete one — so every consumer of a `result` message honours both
+fields whether or not the run it is watching ever emits more than one chunk.
+The harness builds the `preview` per emission, from that emission's rows and
+nothing else; `tests/job/test_emitter_results.py` is where that is pinned,
+because it is a property of `Emitter`, not of whichever model happens to
+chunk.
 
 The rows themselves never travel on the message. A model calls
 `emit("result", rows=[...])` and the harness writes them to the model's
@@ -231,10 +245,20 @@ exactly that. The seq gaps that leaves are honest and permanent: a client that
 loops "backfill until contiguous" spins forever — see "Why the client keeps
 its own history" in `docs/architecture.md`.
 
-**The app does not send a `backfill` yet.** The frames exist and the job
-answers them; the app's side is unbuilt, and its backfill route reads Unity
-Catalog for every gap. Do not write client code that assumes the reply will
-come.
+**The app sends these.** `GET /api/runs/{run_id}/messages` asks the job
+whenever there is a live socket for the run and the requested `after_seq` sits
+at or above the bounds that socket last stated; a reply with `complete: true`
+is served straight to the client with no warehouse read at all. Anything
+else — no socket, no bounds stated yet, a gap below the floor, `complete:
+false`, or no answer inside three seconds — falls through to the Unity Catalog
+read, which is why the two sources must agree on what they withhold. The
+response carries a `source` field naming which one answered, so "did that read
+wake the warehouse" is visible without grepping the app's log.
+
+The app never asks for more than the job's own cap. A page shorter than what
+was requested reads as "that is all there is", so asking for 5,000 and being
+handed a capped 500 would tell a client to stop paging in the middle of its
+gap.
 
 ## The schema, generated
 
@@ -319,6 +343,12 @@ a message was, or whether more were coming. `seq` cannot serve: it counts
 every message of every type, so consecutive chunks are not consecutive seqs.
 Both fields default to the once-at-the-end case (`0`, `true`), so no existing
 reading of the contract changes.
+
+Note, later: `streaming_results` was retired on 2026-08-29, its chunk coverage
+having been overtaken by `job/models/panel_fit/`. The fields outlived the model
+that prompted them and nothing above this note changed with it — which is the
+ordinary outcome for a contract that was written as a contract rather than as
+one model's arrangement.
 
 ### 2026-08-22 — live gaps are backfilled, not waited on
 

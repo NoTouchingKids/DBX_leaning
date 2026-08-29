@@ -2,7 +2,7 @@
 
 Two related follow-ups: what the next model should be, and fixing the fact
 that every job currently ships the entire repo instead of just what it needs.
-Written 2026-08-23 against a repo that had five models; it now has eleven, and
+Written 2026-08-23 against a repo that had five models; it now has ten, and
 the status note below says which of this document's premises that broke.
 
 > **Status note.** Four of this document's premises have been overtaken by
@@ -15,7 +15,7 @@ the status note below says which of this document's premises that broke.
 >    none of them reads a real Unity Catalog table" is no longer true.** Every
 >    model now reads a real Unity Catalog table through `job/models/_data`, using
 >    the job's Spark session, falling back to deterministic synthetic data off
->    workspace. Nine of the eleven read `samples.nyctaxi.trips`;
+>    workspace. Eight of the ten read `samples.nyctaxi.trips`;
 >    `ortools_jobshop` reads `samples.bakehouse.sales_transactions`; and
 >    `panel_fit` asks for a panel table nobody has landed, which is the same
 >    code path arriving at the fallback every time. So the gap this doc gives
@@ -25,18 +25,22 @@ the status note below says which of this document's premises that broke.
 >    building, but on its *telemetry shape* (Spark stage/task progress, a
 >    time × zone matrix result) rather than on that justification. It has an
 >    agent brief (`.claude/agents/model-nyctaxi-demand.md`) and no code.
-> 2. **"Five models" is wrong throughout the body: there are eleven.**
+> 2. **"Five models" is wrong throughout the body: there are ten.**
 >    `gurobi_scheduling`, `gurobi_routing`, `ortools_jobshop`, `scenario`,
->    `forecasting`, `mcmc`, `bayesian_ab`, `neural_net`, `streaming_results`,
->    `annealing`, `panel_fit` — all registered in `[tool.dbx-leaning.models]`
->    and all with a job file under `resources/`. Six of them postdate this
+>    `forecasting`, `mcmc`, `bayesian_ab`, `neural_net`, `annealing`,
+>    `panel_fit` — all registered in `[tool.dbx-leaning.models]` and all with
+>    a job file under `resources/`. Six of them postdate this
 >    document: `annealing`, `bayesian_ab`, `gurobi_routing`, `neural_net`,
->    then `ortools_jobshop` and `panel_fit`. `neural_net` is the one that
+>    then `ortools_jobshop` and `panel_fit`. A seventh,
+>    `streaming_results`, was built and then retired on 2026-08-29 once
+>    `panel_fit` covered chunked results more thoroughly — a model costs a job
+>    definition, a serverless environment and a requirements file, and
+>    duplicated coverage does not earn that. `neural_net` is the one that
 >    finally makes the per-model dependency split pay for itself: torch
 >    reaches exactly one job environment, which `tests/deploy/` asserts.
 >    `ortools_jobshop` is the second such case, at a smaller scale: `ortools`
 >    installs to ~79 MB against torch's ~1.1 GB (measured in this repo's own
->    venv), so it is not the argument the split was made for, but it is ten
+>    venv), so it is not the argument the split was made for, but it is nine
 >    job environments' worth of a dependency none of them import. It also
 >    removes the ceiling this document was written under, since CP-SAT has no
 >    variable or constraint cap and no licence expiry.
@@ -115,8 +119,8 @@ up.
 
 **The gap, precisely:** `pyproject.toml`'s per-model *dependency* scoping
 already exists and is correct — the `gurobi`, `ortools`, `forecasting`,
-`mcmc`, `bayesian`, `nn`, `panel`, `scenario`, `streaming` and (deliberately
-empty) `annealing` extras each pull in only that model's own libraries.
+`mcmc`, `bayesian`, `nn`, `panel`, `scenario` and (deliberately empty)
+`annealing` extras each pull in only that model's own libraries.
 What's missing is *source* scoping: `[tool.setuptools] packages = ["shared",
 "app", "job", "models"]` means any wheel built from this repo bundles the
 entire `job/models/` package — every model's source code — regardless of which
@@ -155,12 +159,11 @@ new piece of work rather than a switch to flip.
 
 One naming gotcha worth knowing about going in: the `job/models/` directory
 name and the `pyproject.toml` extra name don't always match
-(`job/models/gurobi_scheduling` ↔ extra `gurobi`; `job/models/streaming_results` ↔
-extra `streaming`; `job/models/neural_net` ↔ extra `nn`;
-`job/models/ortools_jobshop` ↔ extra `ortools`; `job/models/panel_fit` ↔ extra
-`panel`), and two models share one extra (`gurobi_scheduling` and
-`gurobi_routing`, deliberately — one gurobipy pin, one bundled-licence
-expiry, two jobs). The mismatch is now the majority case rather than the
+(`job/models/gurobi_scheduling` ↔ extra `gurobi`; `job/models/neural_net` ↔
+extra `nn`; `job/models/ortools_jobshop` ↔ extra `ortools`;
+`job/models/panel_fit` ↔ extra `panel`), and two models share one extra
+(`gurobi_scheduling` and `gurobi_routing`, deliberately — one gurobipy pin,
+one bundled-licence expiry, two jobs). The mismatch is now the majority case rather than the
 exception, which is the argument for reading it out of the registry instead
 of deriving it.
 

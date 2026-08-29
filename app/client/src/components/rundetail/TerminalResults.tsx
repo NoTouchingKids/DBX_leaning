@@ -7,10 +7,10 @@
  * the run is over: nothing more is expected, because nothing is running. The
  * honest word for a finished run missing its final chunk is *incomplete*.
  *
- * Two ways to reach that state, and the client cannot tell them apart:
- * `streaming_results` cancelled between windows returns cleanly, having
- * written every chunk it finished and never the final one; or the final write
- * failed. Saying so is better than picking one.
+ * Two ways to reach that state, and the client cannot tell them apart: a
+ * chunking model stopped between chunks returns cleanly, having written every
+ * chunk it finished and never the final one; or the final write failed.
+ * Saying so is better than picking one.
  *
  * `row_count: 0` is never rendered as an empty state. "Succeeded, wrote
  * nothing" and "succeeded, wrote 8,760 rows" are different outcomes, and the
@@ -102,10 +102,10 @@ export function TerminalResults({
       {completeness === "incomplete" && (
         <Callout tone="warn" title="Incomplete — not still arriving">
           The run has stopped and no chunk is marked <code>final</code>. Either
-          it ended between chunks (a cancelled <code>streaming_results</code>
-          {" "}run returns cleanly, keeping every window it finished), or the
-          final result write did not land. Those are indistinguishable from
-          here; what is below is everything Delta holds.
+          it ended between chunks (a cancelled run of a chunking model returns
+          cleanly, keeping every chunk it finished), or the final result write
+          did not land. Those are indistinguishable from here; what is below is
+          everything Delta holds.
         </Callout>
       )}
 

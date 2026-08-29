@@ -116,8 +116,8 @@ export const FIXTURE_NOTES: Record<FixtureName, string> = {
   empty: "Zero messages of any type. Real: bayesian_ab is closed-form and finishes in milliseconds, so a client routinely learns the terminal status from GET /api/runs and observes no progress at all. `status` is set via markTerminal; every array is empty and `lastSeq` is null.",
   sparse: "Eight progress messages for the whole run. Real: annealing emits ~30, neural_net ~36. A view that needs a hundred points to look right fails here.",
   dense: "Two thousand progress points. Real: mcmc at a low progress_every. A view that hands every point to Recharts is visibly slow here, and that is the point of the fixture.",
-  "null-heavy": "percent_complete null and primary_metric null on every message. Real and permanent for gurobi_scheduling, transient for mcmc/scenario/streaming. Null is a value, never a loading state — an indeterminate treatment, never a 0% bar.",
-  chunked: "Five result messages with rising chunk_index, final:false until the last. Only streaming_results does this for real; every view gets it because appending rather than replacing is cheap to get wrong.",
+  "null-heavy": "percent_complete null and primary_metric null on every message. Real and permanent for gurobi_scheduling, transient for mcmc/scenario. Null is a value, never a loading state — an indeterminate treatment, never a 0% bar.",
+  chunked: "Five result messages with rising chunk_index, final:false until the last. Only panel_fit does this for real; every view gets it because appending rather than replacing is cheap to get wrong.",
   gappy: "A hole in the seq stream, plus the client_visible:false logs that backfill will not return. This gap never closes — a view must mark it, not silently join across it.",
 };
 
@@ -580,65 +580,6 @@ const SCENARIO_SCRIPT: ModelScript = {
     SUCCEEDED: "72 of 72 scenarios evaluated",
     FAILED: "grid.demand contained a non-numeric entry",
     CANCELLED: "cancelled after 50 scenarios; partial grid written",
-  },
-};
-
-/* ---------------------------------------------------------------- *
- * streaming_results
- * ---------------------------------------------------------------- */
-
-/**
- * The provenance keys are the honest weak point of this fixture. The model
- * spreads `**self._provenance` into every payload, so extra keys certainly
- * exist — but `models.ts` does not name them, so `source` / `table` /
- * `data_synthetic` below are PLAUSIBLE, NOT DERIVED. Do not build a view that
- * reads them by name; the index signature is the only part that is contract.
- */
-const STREAMING_SCRIPT: ModelScript = {
-  naturalCount: 24,
-  metricLabel: "window_mae",
-  durationS: 66,
-  progress: (count, rng) => (i) => {
-    const done = i + 1;
-    return {
-      // Transiently null on the first message, before the first window closes.
-      percent_complete: i === 0 ? null : round(100 * (done / count), 2),
-      primary_metric: round(3.1 + 0.9 * rng() - 0.4 * (i / count), 4),
-      payload: {
-        windows_done: done,
-        windows_total: count,
-        origin: 120 + i * 40,
-        source: "samples",
-        table: "samples.nyctaxi.trips",
-        data_synthetic: false,
-      },
-    };
-  },
-  logs: [
-    { level: "INFO", phase: "input", text: "60 days loaded; window 120, step 40, horizon 12" },
-    { level: "DEBUG", phase: "run", text: (i) => `window origin ${120 + i * 40} fitted` },
-    { level: "INFO", phase: "run", text: (i) => `chunk flushed: ${12 * (i + 1)} rows cumulative` },
-  ],
-  logSource: "model",
-  preview: (rng, chunk) =>
-    Array.from({ length: 4 }, (_, k) => {
-      const actual = round(288 + 60 * Math.sin((chunk * 4 + k) / 2.2) + 9 * rng(), 2);
-      const predicted = round(actual + 11 * (rng() - 0.5), 2);
-      return {
-        origin: 120 + chunk * 160 + k * 40,
-        horizon: k + 1,
-        actual,
-        predicted,
-        abs_error: round(Math.abs(actual - predicted), 2),
-      };
-    }),
-  rowCount: 288,
-  fetchHint: hint("main.dbx_leaning.streaming_results_results"),
-  detail: {
-    RUNNING: "rolling origin evaluation",
-    SUCCEEDED: "24 windows, 288 rows across 5 chunks",
-    FAILED: "window 9 produced a nan prediction",
-    CANCELLED: "cancelled mid-window; chunks already flushed are durable",
   },
 };
 
@@ -1197,7 +1138,6 @@ const SCRIPTS: Record<string, ModelScript> = {
   forecasting: FORECASTING_SCRIPT,
   mcmc: MCMC_SCRIPT,
   scenario: SCENARIO_SCRIPT,
-  streaming_results: STREAMING_SCRIPT,
   annealing: ANNEALING_SCRIPT,
   bayesian_ab: BAYESIAN_AB_SCRIPT,
   neural_net: NEURAL_NET_SCRIPT,

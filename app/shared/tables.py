@@ -26,10 +26,12 @@ __all__ = ["TableSet", "table_for", "to_row", "LOGS", "PROGRESS", "EVENTS", "RES
 
 LOGS = "run_logs"
 PROGRESS = "run_progress"
-#: Append-only status transitions written by the *job*. Distinct from
-#: ``run_status``, the one-row-per-run current state the *app* maintains: a
-#: job that runs while the app is down still records its transitions here,
-#: and startup reconciliation reads them back.
+#: Status transitions, and the ``status`` quarter of the envelope stream.
+#:
+#: Not a status audit log — Lakebase holds that now, written by the job. This
+#: is one of the four branches ``app/server/repository.py::messages_since``
+#: unions by ``seq`` to rebuild a run, so without it a backfilled run has
+#: permanent holes where its statuses were. See ``docs/architecture.md``.
 EVENTS = "run_events"
 #: Result *metadata* — preview, row count, fetch hint. The result rows
 #: themselves go to the model's own table.

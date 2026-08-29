@@ -96,7 +96,7 @@ const CTA_SECONDARY =
  * One line per model, saying what KIND of computation it is.
  *
  * Copy, not data. `MODEL_SPECS` has no description field, this page does not
- * own it, and a gallery of eleven two-word labels is a list pretending to be a
+ * own it, and a gallery of ten two-word labels is a list pretending to be a
  * gallery. Keyed by model name and looked up with a fallback, so a model added
  * to the registry gets a tile with no blurb rather than an `undefined` — it
  * degrades to exactly the old behaviour. The facts come from the model list in
@@ -110,7 +110,6 @@ const BLURBS: Record<string, string> = {
   forecasting: "Trains on lagged history, then forecasts a horizon ahead of it.",
   mcmc: "Parallel chains sampling a posterior — burn-in, then draws.",
   scenario: "A grid of demand, capacity and unit-cost multipliers. One outcome per cell.",
-  streaming_results: "A rolling backtest: windows walked forward, results emitted as they land.",
   annealing: "Simulated annealing over a knapsack of trips, cooling toward an incumbent.",
   bayesian_ab: "A conjugate Bayesian comparison of two slices of the same data.",
   neural_net: "A small torch classifier, an epoch at a time, against a held-out split.",

@@ -37,7 +37,10 @@ Four things worth knowing before changing anything here:
   `results()` needs a column, minus `run_id` and `chunk_index`, which
   `job/emitter.py` stamps and the model must not supply. (Audited across all
   eleven models on 2026-08-25: no mismatches, and no NOT NULL column receives
-  a null on any path.)
+  a null on any path. There are ten now — `streaming_results` was retired on
+  2026-08-29 and its table went out of `002_model_results.sql` with it — so
+  that audit still covers every model here. Nothing has been added since, and
+  a model added later would be outside it.)
 - **`main.dbx_leaning` is hardcoded here and is `${var.catalog}` /
   `${var.schema}` everywhere else.** These files are applied by hand and
   `databricks sql query --file` does no substitution, so retargeting a

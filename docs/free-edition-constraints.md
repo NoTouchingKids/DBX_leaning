@@ -16,7 +16,7 @@ Free Edition's feature set changes.
 | Compute | Serverless only | No custom cluster configs |
 | Outbound internet | Restricted to trusted domains (expandable via LinkedIn verification) | Blocks anything needing arbitrary egress — see Gurobi below |
 | Account-level APIs | No access to account console / account-level APIs | Blocks anything needing account-admin approval or beta enrolment at the account level |
-| Lakebase (managed Postgres) | **Available** (added June 2026) | Real fallback for OLTP-shaped state (`run_status`) and for multi-worker fan-out via `LISTEN`/`NOTIFY`, if ever needed |
+| Lakebase (managed Postgres) | **Available** (added June 2026) | Home for OLTP-shaped run state (`run_status` + `run_status_history`); also the multi-worker fan-out route via `LISTEN`/`NOTIFY`, if ever needed |
 
 ## SQL warehouse cost model
 

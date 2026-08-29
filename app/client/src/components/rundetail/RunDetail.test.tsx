@@ -200,15 +200,12 @@ describe("RunDetail", () => {
 
   it("calls a finished run with no final chunk incomplete, not 'still arriving'", async () => {
     // The chunked fixture's last chunk carries `final: true`; dropping it is
-    // exactly what a run that stopped between windows — or whose final result
+    // exactly what a run that stopped between chunks — or whose final result
     // write did not land — leaves behind in Delta.
-    const chunks = makeMessages("streaming_results", "chunked", "SUCCEEDED").filter(
+    const chunks = makeMessages("panel_fit", "chunked", "SUCCEEDED").filter(
       (message) => !isResult(message) || !message.final,
     );
-    vi.stubGlobal(
-      "fetch",
-      server({ model: "streaming_results", rows: asServerRows(chunks) }),
-    );
+    vi.stubGlobal("fetch", server({ model: "panel_fit", rows: asServerRows(chunks) }));
     mount();
 
     expect(await screen.findByText(/Incomplete — not still arriving/)).toBeInTheDocument();

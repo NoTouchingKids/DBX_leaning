@@ -305,39 +305,6 @@ export interface ScenarioProgressPayload {
  *  way through. `primary_metric` is `best_objective`. */
 
 /* ================================================================== *
- * streaming_results
- * ================================================================== */
-
-export const STREAMING_RESULTS: ModelSpec = {
-  name: "streaming_results",
-  label: "Streaming results",
-  fields: [
-    { key: "days", label: "Days of history", kind: "int", default: 60 },
-    { key: "column", label: "Target column", kind: "string", default: "trips" },
-    { key: "window", label: "Window size", kind: "int", default: 120 },
-    { key: "step", label: "Step", kind: "int", default: 40 },
-    { key: "horizon", label: "Horizon", kind: "int", default: 12 },
-    { key: "lags", label: "Lag features", kind: "int", default: 24 },
-    { key: "seed", label: "Seed", kind: "int", default: 7 },
-    { key: "n", label: "Window limit", kind: "int", advanced: true, hint: "Omit for all windows." },
-    { key: "series", label: "Series override", kind: "number-list", advanced: true },
-  ],
-};
-
-export interface StreamingProgressPayload extends ProvenanceFields {
-  windows_done: number;
-  windows_total: number;
-  origin: number;
-  /** The model spreads `**self._provenance` into the payload, which
-   *  `ProvenanceFields` now names. There may still be EXTRA KEYS beyond all
-   *  of these — do not write an exhaustive destructure that assumes not. */
-  [key: string]: unknown;
-}
-/** `primary_metric` is `window_mae`. This is the model that emits `result`
- *  MULTIPLE TIMES per run — each with its own `chunk_index`, `final` false
- *  until the last. APPEND on each result event; never replace. */
-
-/* ================================================================== *
  * annealing
  * ================================================================== */
 
@@ -883,8 +850,10 @@ export interface PanelFitProgressPayload extends ProvenanceFields {
  *  forecasting. `percent_complete` is groups done over groups total, with no
  *  estimation: the denominator is known before the first fit.
  *
- *  This model CHUNKS its results (`chunk_size` groups per chunk), so
- *  `streaming_results` is no longer the only one that does. */
+ *  This model CHUNKS its results (`chunk_size` groups per chunk) — the one
+ *  model that emits `result` MULTIPLE TIMES per run, each with its own
+ *  `chunk_index` and `final` false until the last. APPEND on each result
+ *  event; never replace. */
 
 export const MODEL_SPECS: readonly ModelSpec[] = [
   GUROBI_SCHEDULING,
@@ -892,7 +861,6 @@ export const MODEL_SPECS: readonly ModelSpec[] = [
   FORECASTING,
   MCMC,
   SCENARIO,
-  STREAMING_RESULTS,
   ANNEALING,
   BAYESIAN_AB,
   NEURAL_NET,

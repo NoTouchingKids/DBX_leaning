@@ -8,10 +8,11 @@ mechanism already exists and works.
 
 Two things this endpoint deliberately does *not* do:
 
-- **Backfill from Unity Catalog.** That is a separate, explicit endpoint the
-  client calls on demand. Reconnects are usually a gap of milliseconds; going
-  to the warehouse on every one of them would be the cost mistake this
-  rewrite exists to avoid, dressed up as a feature.
+- **Backfill.** That is a separate, explicit endpoint the client calls on
+  demand — and one that asks the live job before it asks the warehouse.
+  Reconnects are usually a gap of milliseconds; going to the warehouse on
+  every one of them would be the cost mistake this rewrite exists to avoid,
+  dressed up as a feature.
 - **Poll anything.** Ever.
 """
 

@@ -194,12 +194,27 @@ class WebSocketBus:
         and the bound is what stops a wedged socket holding the run open.
 
         Returns how many messages were still unsent when it gave up.
+
+        **Waits on `_idle`, never on `len(self._q)`.** An earlier version
+        skipped the wait entirely when the queue looked empty, which is a
+        different question from "is there anything still going out": the send
+        loop pops a whole batch into a local list *before* awaiting its sends,
+        so a batch in flight leaves `_q` empty. Drain returned at once,
+        `close()` cancelled the send task mid-batch, and the tail of the live
+        stream — terminal status included — was lost while `left` reported 0.
+        It needed a yield between the last `offer()` and here to show up, and
+        one existed; it cost ~45% of fast runs.
+
+        `_idle` is the honest signal, and already was: `offer()` clears it and
+        the send loop only sets it once the queue is empty AND the awaits from
+        the last batch have returned. Waiting on it unconditionally is also
+        free when there is genuinely nothing to do, because an already-set
+        Event returns immediately.
         """
         self._draining = True
         self._wake.set()
-        if self._q:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._idle.wait(), timeout=timeout_s)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._idle.wait(), timeout=timeout_s)
         left = len(self._q)
         if left:
             # The deadline beat the backlog. Order stays FIFO right up to here

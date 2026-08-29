@@ -106,12 +106,15 @@ def test_paging_reports_where_to_continue(app_and_hub):
     assert body["more"] is True and body["next_offset"] == 15
 
 
-def test_results_are_ordered_by_chunk_so_a_streaming_model_reads_back_in_order(app_and_hub):
+def test_results_are_ordered_by_chunk_so_a_chunked_model_reads_back_in_order(app_and_hub):
+    """`panel_fit` writes a chunk every `chunk_size` groups, so its table holds
+    several chunks per run. Without the ORDER BY they come back in whatever
+    order Delta hands them out, and a paged read would interleave chunks."""
     app, hub = app_and_hub()
     sql = wire(
         hub,
         {
-            "fetch_hint_json": hint("main.dbx_leaning.results_streaming"),
+            "fetch_hint_json": hint("main.dbx_leaning.results_panel_fit"),
             "SELECT * FROM": [{"chunk_index": 0}],
         },
     )

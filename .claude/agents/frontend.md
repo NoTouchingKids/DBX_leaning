@@ -17,7 +17,7 @@ written: the transport spine under `src/transport/` is finished and tested
 (SharedWorker, IndexedDB, reconnect policy, gap detection), there is a
 Playwright suite under `e2e/`, and the per-model pages are underway.
 
-The gate below has been met — `app/`, `job/` and eleven models work end to
+The gate below has been met — `app/`, `job/` and ten models work end to
 end offline, and `tests/integration/test_end_to_end.py` drives real models
 through the real harness. What is still missing is envelope traffic from a
 **deployed** run: `databricks bundle deploy` has never been executed.
@@ -203,9 +203,9 @@ written — `src/transport/` is the implementation and
 
 Each model in `job/models/` gets its own page/route, since each has a
 genuinely different progress shape (Gurobi's MIP-gap chart vs. a forecast
-chart vs. an MCMC trace plot vs. a scenario-sweep completion view vs. the
-streaming-results model's incrementally-arriving result chunks). Build a
-generic fallback view first (renders `percent_complete` and
+chart vs. an MCMC trace plot vs. a scenario-sweep completion view vs.
+`panel_fit`'s incrementally-arriving result chunks). Build a generic
+fallback view first (renders `percent_complete` and
 `primary_metric`/`primary_metric_label` for any model with no special-
 casing), then layer model-specific richer views using each model's
 `payload` field once that model's real envelope traffic exists to build
@@ -218,9 +218,9 @@ payload in `job/models/<name>/model.py`. The server validates
 `TriggerRequest.config` not at all — it is `dict[str, Any]` passed verbatim
 into `DBX_MODEL_CONFIG` — so there is no schema to generate from and no test
 that will tell you when this file falls behind. Re-derive it whenever
-`job/models/` changes. It currently covers **nine of eleven models**:
-`ortools_jobshop` and `panel_fit` have no entry, so they are triggerable by
-API and absent from the UI.
+`job/models/` changes. It currently covers **all ten models**, and so does
+`src/components/models/registry.ts` — so the drift to watch for is a model
+gaining a config field or a payload key, not a model with no entry at all.
 
 ## Explicit non-goals
 

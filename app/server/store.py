@@ -1,10 +1,11 @@
 """Run state: the one piece of this platform that is OLTP-shaped.
 
-Everything else the app touches is append-only and analytical — logs,
-progress, events, results — and belongs in Delta. ``run_status`` is not: it
-is one row per run, updated on every transition, read by point-lookup, and
-counted against a concurrency ceiling. Delta is the wrong shape for all
-three, and reading it means waking a SQL warehouse whose cost is *uptime*.
+Everything else the app touches is append-only, high-volume and analytical —
+logs, progress, events, results — and belongs in Delta. ``run_status`` is
+not: it is one row per run, updated on every transition, read by
+point-lookup, and counted against a concurrency ceiling. Delta is the wrong
+shape for all three, and reading it means waking a SQL warehouse whose cost
+is *uptime*.
 
 So it moves to Lakebase (managed Postgres), which
 ``docs/free-edition-constraints.md`` already earmarked for exactly this:
@@ -26,6 +27,24 @@ Two things the Postgres one fixes that the warehouse one structurally cannot:
   arriving together both see room and both launch, straight past the
   account's 5-task limit. There is no way to write that correctly without a
   transaction.
+
+One append-only table sits beside ``run_status``: ``run_status_history``, a
+handful of transitions per run rather than the thousands of telemetry rows
+that stay in Delta. It is a second table and NOT ``run_status`` made
+append-only, because appending costs both of the properties above —
+:func:`history_schema_sql` spells out how.
+
+**Two writers touch ``run_status``**: this app, from the status messages it
+ingests over the socket, and the job itself over the Database REST API
+(``job/lakebase.py``). That is deliberate — the job is the authority on its
+own status, the app is the fallback for when the job's REST call cannot get
+through — and it is safe only because both writers carry the *same*
+``updated_ts`` guard, so neither can move the row backwards.
+:meth:`PostgresRunStore.set_status` is the app's half of that, and says what
+happens if the two halves ever stop matching. Startup reconciliation writes
+this row as well, deliberately *unguarded*, because it is correcting from
+outside the message stream rather than taking part in it — same method, same
+reason, spelled out there.
 
 Connections are opened per operation rather than pooled. That is a
 deliberate first-cut choice: the volume is a handful of statements per run,
@@ -50,13 +69,16 @@ __all__ = [
     "DEFAULT_SCHEMA",
     "RunRecord",
     "RunStore",
+    "StatusTransition",
     "PostgresRunStore",
     "WarehouseRunStore",
     "SlotDenied",
     "DuplicateRun",
     "UnsafeSchemaName",
     "qualified",
+    "qualified_history",
     "schema_sql",
+    "history_schema_sql",
     "TERMINAL_SQL_LIST",
 ]
 
@@ -135,6 +157,49 @@ class RunRecord:
         }
 
 
+@dataclass(frozen=True)
+class StatusTransition:
+    """One row of ``run_status_history``: a transition that was reported, not
+    the state the run is in now.
+
+    ``RunRecord`` is the answer to "what is this run doing"; a list of these is
+    the answer to "how did it get there", which the current-state row cannot
+    give because every transition overwrites the last one.
+
+    ``status`` stays a plain string rather than becoming a :class:`RunStatus`.
+    ``RunRecord.from_row`` maps an unrecognised value onto ``FAILED`` so a
+    junk row still renders — the right call for current state, and the wrong
+    one here. This is an audit record: rewriting a status nobody recognises as
+    ``FAILED`` invents a transition that never happened, and hides the data
+    problem that produced it.
+    """
+
+    run_id: str
+    status: str
+    ts: int
+    seq: int | None = None
+    detail: str | None = None
+    recorded_by: str = "job"
+    #: Insertion order, from the table's BIGSERIAL. The tiebreaker for rows
+    #: sharing a ``ts``: epoch milliseconds collide routinely — QUEUED and
+    #: RUNNING inside one millisecond is an ordinary fast start — and two
+    #: transitions in the wrong order is a history that reads as a lie.
+    id: int = 0
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> StatusTransition:
+        seq = row.get("seq")
+        return cls(
+            run_id=str(row["run_id"]),
+            status=str(row["status"]),
+            ts=int(row.get("ts") or 0),
+            seq=None if seq is None else int(seq),
+            detail=row.get("detail"),
+            recorded_by=str(row.get("recorded_by") or "job"),
+            id=int(row.get("id") or 0),
+        )
+
+
 @runtime_checkable
 class RunStore(Protocol):
     name: str
@@ -157,8 +222,27 @@ class RunStore(Protocol):
         """Undo a claim whose launch then failed."""
 
     async def set_status(
-        self, run_id: str, status: RunStatus | str, *, detail: str | None = None
-    ) -> None: ...
+        self,
+        run_id: str,
+        status: RunStatus | str,
+        *,
+        detail: str | None = None,
+        ts: int | None = None,
+    ) -> None:
+        """Record a transition on the run's row, creating it if it is new.
+
+        ``ts`` is the *status message's own* timestamp, and a caller holding a
+        message must pass it: it is what the out-of-order guard compares, and
+        it is the clock the job's writer uses for the same column. Stamping
+        the wall clock at write time instead makes that comparison trivially
+        true — see :meth:`PostgresRunStore.set_status`.
+
+        Omitted means there is no message behind the write, and the guard does
+        not apply. Startup reconciliation is the only caller in that position:
+        it is correcting the row from outside the message stream, and a
+        correction that can be refused leaves a finished run holding one of the
+        account's five task slots forever.
+        """
 
     async def get(self, run_id: str) -> RunRecord | None: ...
 
@@ -202,6 +286,19 @@ class UnsafeSchemaName(ValueError):
     """A schema name that will not be interpolated into SQL."""
 
 
+def _vetted(schema: str) -> str:
+    """One gate for the one thing here that cannot be a bound parameter.
+
+    Every qualifier goes through this, so adding a table cannot add a way to
+    skip the check.
+    """
+    if not _PG_IDENTIFIER.match(schema):
+        raise UnsafeSchemaName(
+            f"{schema!r} is not a plain Postgres identifier; refusing to build SQL from it"
+        )
+    return schema
+
+
 def qualified(schema: str) -> str:
     """`schema.run_status`, vetted.
 
@@ -211,11 +308,16 @@ def qualified(schema: str) -> str:
     to `public` finds a DIFFERENT, empty table rather than failing — which is
     a far worse outcome than an error.
     """
-    if not _PG_IDENTIFIER.match(schema):
-        raise UnsafeSchemaName(
-            f"{schema!r} is not a plain Postgres identifier; refusing to build SQL from it"
-        )
-    return f"{schema}.run_status"
+    return f"{_vetted(schema)}.run_status"
+
+
+def qualified_history(schema: str) -> str:
+    """`schema.run_status_history`, vetted the same way.
+
+    A separate table, deliberately. See :func:`history_schema_sql` for why
+    `run_status` did not simply become append-only instead.
+    """
+    return f"{_vetted(schema)}.run_status_history"
 
 
 def schema_sql(schema: str) -> str:
@@ -245,6 +347,62 @@ CREATE INDEX IF NOT EXISTS run_status_recent_idx ON {table} (updated_ts DESC);
 """
 
 
+def history_schema_sql(schema: str) -> str:
+    """The append-only transition log that sits BESIDE `run_status`.
+
+    Not `run_status` made append-only, and the difference is the whole reason
+    Postgres holds this table at all:
+
+    - **The primary key on `run_id`.** Many rows per run and there is nothing
+      left to conflict on, so `ON CONFLICT (run_id) DO UPDATE` — the job's
+      upsert with its `updated_ts` guard, and this store's `set_status` — has
+      no target, and a duplicate `run_id` stops being refusable. That is
+      precisely the Delta failure the move to Postgres fixed: two registry
+      rows for one run and the reader taking whichever came back first.
+    - **The transactional count-and-claim.** `claim_slot` counts non-terminal
+      runs inside one advisory-locked transaction. Against an append-only
+      table that count becomes a latest-row-per-run subquery, and one written
+      slightly wrong over-counts finished runs and jams the account's 5-task
+      ceiling shut, or under-counts and sails past it.
+
+    So: current state keeps its shape, history gets its own table. Anyone
+    tempted to "simplify" the two back into one loses both properties.
+
+    Delta's `run_events` (`uc_ddl/001_core_tables.sql`) holds the same
+    transitions durably and stays the record of truth. It is not a substitute
+    for this: reading it means waking the SQL warehouse, whose cost is uptime,
+    which is the exact spend this platform is built to avoid.
+    """
+    table = qualified_history(schema)
+    return f"""
+CREATE SCHEMA IF NOT EXISTS {schema};
+
+CREATE TABLE IF NOT EXISTS {table} (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      TEXT   NOT NULL,
+    seq         BIGINT,            -- the envelope seq of the status message, when it came from one
+    status      TEXT   NOT NULL,
+    detail      TEXT,
+    ts          BIGINT NOT NULL,   -- epoch ms, when the transition happened
+    recorded_by TEXT   NOT NULL DEFAULT 'job'
+);
+
+-- Retries are idempotent: the job may report the same status message twice
+-- after a reconnect, and `seq` identifies it uniquely within a run.
+--
+-- Partial so that a writer with no envelope message behind it can still
+-- append, having no seq to be identified by. Nothing does today: the app
+-- claims the slot without appending here, so a run's history starts at the
+-- job's first report and QUEUED is never in it. That is a gap, recorded in
+-- docs/architecture.md, not a description of what happens.
+CREATE UNIQUE INDEX IF NOT EXISTS run_status_history_seq_idx
+    ON {table} (run_id, seq) WHERE seq IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS run_status_history_run_idx
+    ON {table} (run_id, ts DESC);
+"""
+
+
 #: One well-known lock id, so every ceiling check serialises against the
 #: others. Arbitrary but fixed; changing it would let two app versions race.
 _CEILING_LOCK_ID = 230825001
@@ -265,6 +423,7 @@ class PostgresRunStore:
         #: trigger of the day.
         self._schema = schema
         self._table = qualified(schema)
+        self._history = qualified_history(schema)
         #: Awaited on every connection, when set. Lakebase's password is a
         #: short-lived OAuth token, so it cannot live in the DSN: baked in at
         #: startup it works for about an hour, and this app runs for up to 24.
@@ -298,7 +457,14 @@ class PostgresRunStore:
     async def ensure_schema(self) -> None:
         conn = await self._conn()
         try:
-            await conn.execute(schema_sql(self._schema))
+            # Both tables in ONE statement string, which Postgres runs as a
+            # single implicit transaction — verified, not assumed: a failing
+            # tail statement rolls the earlier CREATEs back. So the schema is
+            # all-or-nothing. Two execute() calls would let `run_status`
+            # succeed while the history table failed, leaving an app that is
+            # up, healthy, and silently losing every transition the job
+            # appends. Half a schema fails quietly; a missing one does not.
+            await conn.execute(schema_sql(self._schema) + history_schema_sql(self._schema))
             self.server_version = await self._read_server_version(conn)
         finally:
             await conn.close()
@@ -384,12 +550,88 @@ class PostgresRunStore:
             await conn.close()
 
     async def set_status(
-        self, run_id: str, status: RunStatus | str, *, detail: str | None = None
+        self,
+        run_id: str,
+        status: RunStatus | str,
+        *,
+        detail: str | None = None,
+        ts: int | None = None,
     ) -> None:
+        """Move the row forward, and only forward.
+
+        **Why the app writes this row at all, now that the job does.** The job
+        reports its own transitions straight to Lakebase (`job/lakebase.py`)
+        and is the authority on them, which makes this look like a redundant
+        second writer. It is not, and deleting it costs the case it exists
+        for: the job's path is an HTTP POST to the Database REST API, and
+        unconfigured (no `DBX_LAKEBASE_REST_URL`), refused or timed out it
+        logs and carries on — nothing on the job's live path is allowed to be
+        load-bearing. When that write is the one that failed the socket is
+        usually still up, so the app is holding the status message and is the
+        only writer left that can keep `run_status` current. Drop this and the
+        row sits at whatever the app last saw until the next startup
+        reconciliation, holding one of the account's five task slots meanwhile.
+
+        **The guard is what makes two writers safe**, and it is deliberately
+        the same one `job/lakebase.py::REPORT_SQL` carries, character for
+        character: `run_status.updated_ts <= EXCLUDED.updated_ts`. Two writers
+        with different ideas of what "backwards" means do not close the race,
+        they move it — `<` here against the job's `<=` would resolve the same
+        pair of writes differently depending on which arrived first.
+
+        **`<=`, so an equal timestamp is applied rather than refused.** Epoch
+        milliseconds collide routinely — QUEUED and RUNNING inside one
+        millisecond is an ordinary fast start — so a tie is evidence the clock
+        is coarse, not that a write is stale. Refusing ties would drop the
+        second of two legitimate transitions and leave the row on QUEUED for a
+        run that is RUNNING. It also keeps a redelivered report idempotent:
+        the same message written twice lands the same value twice.
+
+        **`ts` is the message's, not `now()`.** That is the difference between
+        a guard and a decoration. These writes are dispatched through
+        `asyncio.create_task` (`services.py::_persist_status`), so two
+        transitions can land in the opposite order to the one they arrived in;
+        stamped with the clock at write time the late one carries the *larger*
+        timestamp and the guard waves it through — a terminal status
+        overwritten by the RUNNING that preceded it, which is exactly the bug
+        the guard is here to stop. It also has to be the message's clock for
+        the comparison against the job's writes to mean anything: the job
+        binds `updated_ts` from the status message, so an app write stamped
+        `now()` — always later, the message had to travel — would beat every
+        report the job makes. `services.py::_persist_status` must therefore
+        hand `msg.ts` over: a call from there that omits it falls back to the
+        clock, and this stops being a guard.
+
+        **No `ts` means no message behind the write, and then there is no
+        guard.** The only caller in that position is startup reconciliation,
+        which is correcting the row from outside the message stream entirely —
+        `run_events`, `run_status_history`, the Jobs API — and ordering it
+        against message timestamps is not merely unnecessary, it is unsafe.
+        The row can legitimately hold a timestamp ahead of this app's clock:
+        the job stamps it from the job cluster's clock, and the two only have
+        to disagree by a second. Guarded, the correction is then refused, the
+        finished run keeps one of the account's five task slots, and — because
+        reconciliation is startup-only, deliberately — nothing tries again.
+        That is the failure this whole path exists to prevent, so a correction
+        must land.
+
+        The footgun in that: a caller that HAS a message and forgets to pass
+        its `ts` silently gets the unguarded write. There are two callers and
+        the Protocol says which is which; check that before adding a third.
+        """
         value = status.value if isinstance(status, RunStatus) else str(status)
+        # One stamp bound twice, not two `now_ms()` calls: a row this
+        # statement CREATES has no better idea of when the run started than
+        # when the message was emitted, and two separate reads of the clock
+        # can leave `started_ts` a millisecond after `updated_ts`.
+        stamp = now_ms() if ts is None else int(ts)
+        # Two shapes of one statement rather than a bound flag, because the
+        # difference IS the semantic: a write carrying a message is ordered
+        # against the other writers' messages, and a correction is not.
+        guard = "" if ts is None else f"WHERE {self._table}.updated_ts <= EXCLUDED.updated_ts"
         conn = await self._conn()
         try:
-            await conn.execute(
+            cur = await conn.execute(
                 f"""
                 INSERT INTO {self._table}
                     (run_id, model, status, detail, started_ts, updated_ts)
@@ -397,10 +639,32 @@ class PostgresRunStore:
                 ON CONFLICT (run_id) DO UPDATE
                 SET status = EXCLUDED.status,
                     detail = EXCLUDED.detail,
-                    updated_ts = EXCLUDED.updated_ts
+                    -- GREATEST, so this column never goes down. On the guarded
+                    -- path it is exactly EXCLUDED.updated_ts, since the guard
+                    -- only passes when that is the larger. On the unguarded
+                    -- one it stops a correction written at `now()` from
+                    -- LOWERING the ordering key every other writer compares
+                    -- against — which would re-admit the very message the
+                    -- guard had already refused, on its next redelivery.
+                    updated_ts = GREATEST({self._table}.updated_ts, EXCLUDED.updated_ts)
+                {guard}
                 """,
-                (run_id, value, detail, now_ms(), now_ms()),
+                (run_id, value, detail, stamp, stamp),
             )
+            if cur.rowcount == 0:
+                # A refused write is not an error, but it is not nothing
+                # either, and the failure this repo keeps hitting is the one
+                # where nothing failed and nothing said so. If this line shows
+                # up for a status that should have been current, the clocks on
+                # the two writers have drifted apart and the guard is refusing
+                # real transitions rather than stale ones.
+                log.info(
+                    "refused a stale status write for %s -> %s (ts=%d); the row already "
+                    "carries a later transition",
+                    run_id,
+                    value,
+                    stamp,
+                )
         finally:
             await conn.close()
 
@@ -462,6 +726,43 @@ class PostgresRunStore:
         finally:
             await conn.close()
 
+    async def history(self, run_id: str, *, limit: int = 500) -> list[StatusTransition]:
+        """Every transition recorded for one run, oldest first.
+
+        Read-only from here. The job writes this table over the Database REST
+        API (`job/lakebase.py`), alongside the upsert of the current row; the
+        app reads it back.
+
+        Deliberately NOT on the :class:`RunStore` Protocol. `run_status_history`
+        is a Postgres table with no warehouse equivalent, and giving
+        :class:`WarehouseRunStore` a version that returns `[]` would make "this
+        deployment has no history table" indistinguishable from "this run had
+        no transitions" — the same silent degradation as an app that ran the
+        fallback store for weeks because nothing set `DBX_LAKEBASE_*`. A caller
+        that wants this checks the store it has.
+
+        Ordered newest-first in SQL and reversed here, which is not fussiness:
+        `ORDER BY ts LIMIT n` truncates the *tail*, so a run with more
+        transitions than the bound comes back missing its terminal one — the
+        single row anyone reading a history is looking for.
+        """
+        conn = await self._conn()
+        try:
+            async with conn.cursor() as cur:
+                # Both values bound, neither spliced — `run_id` as text and
+                # `limit` as an integer. `seq` and `ts` are BIGINT in the
+                # table for the same reason every parameter in this codebase
+                # carries a type: compared as strings, "2" > "12".
+                await cur.execute(
+                    f"SELECT {_HISTORY_COLUMNS} FROM {self._history} "
+                    "WHERE run_id = %s ORDER BY ts DESC, id DESC LIMIT %s",
+                    (run_id, limit),
+                )
+                rows = await cur.fetchall()
+        finally:
+            await conn.close()
+        return [StatusTransition.from_row(_zip_history(r)) for r in reversed(rows)]
+
     async def close(self) -> None:
         return None
 
@@ -478,9 +779,18 @@ _COLUMN_NAMES = (
 )
 _COLUMNS = ", ".join(_COLUMN_NAMES)
 
+#: Listed in the SELECT rather than `SELECT *`, so a column added to the table
+#: cannot shift the tuple under `_zip_history` and silently re-label every row.
+_HISTORY_COLUMN_NAMES = ("id", "run_id", "seq", "status", "detail", "ts", "recorded_by")
+_HISTORY_COLUMNS = ", ".join(_HISTORY_COLUMN_NAMES)
+
 
 def _zip(row) -> dict[str, Any]:
     return dict(zip(_COLUMN_NAMES, row, strict=True))
+
+
+def _zip_history(row) -> dict[str, Any]:
+    return dict(zip(_HISTORY_COLUMN_NAMES, row, strict=True))
 
 
 def _filters(*, status: str | None, model: str | None) -> tuple[str, list[Any]]:
@@ -552,8 +862,40 @@ class WarehouseRunStore:
         log.info("warehouse store cannot release %s; reconciliation will correct it", run_id)
 
     async def set_status(
-        self, run_id: str, status: RunStatus | str, *, detail: str | None = None
+        self,
+        run_id: str,
+        status: RunStatus | str,
+        *,
+        detail: str | None = None,
+        ts: int | None = None,
     ) -> None:
+        """**No out-of-order guard on this path, and `ts` is accepted and
+        ignored.** Do not read the two stores as equally safe here.
+
+        It cannot be had from this file: `repository.set_run_status` stamps
+        `updated_ts` from its own clock and takes no timestamp, and its MERGE
+        has no `WHEN MATCHED AND t.updated_ts <= :updated_ts`. Both are
+        addable — Databricks SQL supports the conditional MERGE clause — but
+        the table underneath is Delta with no primary key, so a run can
+        already hold more than one row and a per-row guard still leaves the
+        reader taking whichever comes back first. That ambiguity is what the
+        move to Postgres fixed; a guard bolted on here would look like the fix
+        without being it.
+
+        The asymmetry that matters, though, is that the two-writer hazard the
+        Postgres guard closes does not exist on this path at all: the job
+        reports to Lakebase's `run_status`, never to this Delta table. When
+        the app is on this store the two writers are not racing over one row,
+        they are writing to different tables — a different problem, and not
+        one a guard fixes. What is left here is the app racing *itself*, since
+        `services.py::_persist_status` dispatches these writes as tasks. The
+        correction for that is the startup reconciliation this store already
+        cannot do without, because `release_slot` is a no-op.
+
+        `ts` stays in the signature because it is the Protocol's: a caller
+        must be able to make the same call against either store without
+        knowing which one it got.
+        """
         value = status.value if isinstance(status, RunStatus) else str(status)
         await self.repo.set_run_status(run_id, value, detail=detail)
 

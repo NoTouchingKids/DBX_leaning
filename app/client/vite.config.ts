@@ -116,6 +116,14 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    // Vitest defaults to 5s. The dev fixture scripts generate a run's whole
+    // message stream and then validate every message against the envelope
+    // schema; `panel_fit / dense` is the biggest of them and takes ~2.5s on
+    // its own, which is comfortably inside the default until the suite runs
+    // files in parallel and it is competing for the machine. It then fails
+    // intermittently, on a timeout, with nothing wrong with it — the worst
+    // kind of red, because it trains people to re-run rather than look.
+    testTimeout: 20_000,
     coverage: { provider: "v8", reporter: ["text", "html"] },
   },
 });

@@ -124,10 +124,29 @@ can would send a client to fetch a row that is not there. The high-water mark
 a reader can trust stops one below the lowest thing still pending — see
 `DurableBuffer.min_pending_seq`.
 
-**Only the job side of this is built.** The frames are in `shared/protocol.py`
-and the job answers a `BACKFILL` from the ring; the app does not send one yet,
-and its backfill route still goes to Unity Catalog for every gap. Until that
-loop closes the ring is a capability, not a saving.
+**Both sides of this are built, and the app is the one that decides.**
+`app/server/services.py::JobConnections` records the bounds off `hello` and off
+every `backfill_result`, so a long-lived connection's picture does not go stale
+while the ring moves; `can_serve` answers "socket here, bounds stated, gap at
+or above the floor", and `GET /api/runs/{run_id}/messages` asks the job
+whenever it says yes. A reply carrying `complete: true` is returned without
+touching SQL.
+Everything else — no socket, no bounds stated yet, a gap below the floor, a job
+that does not answer inside `BACKFILL_TIMEOUT_S` — falls through to
+`repository.messages_since` exactly as before. The response names which
+answered in `source`, because "did that read wake the warehouse" should be
+readable off a response rather than out of the app's log.
+
+Three details there are decisions rather than accidents. A job that has stated
+no bounds counts as cannot-serve, so a socket whose `hello` has not landed
+costs one fallback read rather than a timeout on every request. A second
+concurrent backfill for the same run is refused to the warehouse rather than
+parked on the first request's future: two waiters woken by whichever reply
+lands first would each be handed a page computed for the other's cursor, and
+silently wrong messages are worse than a rare warehouse read. And a
+`complete: false` page is discarded rather than stitched onto the SQL one —
+merging two sources into a single page is a dedupe problem, and the warehouse
+can serve the whole gap by itself.
 
 ## Why teardown drains before it closes
 
@@ -167,20 +186,24 @@ until startup reconciliation noticed. The job knows its own status, so the job
 reports it (`job/lakebase.py`).
 
 Over the Database REST API rather than a Postgres driver, because a driver in
-this process would be paid for by all eleven model environments — one job per
+this process would be paid for by all ten model environments — one job per
 model, each with its own dependency list — and `httpx` is already present for
 the OAuth exchange in `job/auth.py`.
 
 The split is by concern, not by row. The **app** owns the slot claim: the
 count-and-claim transaction that makes the 5-concurrent-task ceiling real
 rather than advisory, and the row's creation at trigger time. The **job** owns
-the status transitions on that row. The job's write is an upsert rather than an
+the status transitions — the upsert on `run_status`, and the append that
+records the same transition in `run_status_history` (see the next section).
+The job's write is an upsert rather than an
 update, because a job triggered outside the app (a schedule, a manual
 `run-now`) has no row yet, and refusing to record the status of exactly the
 runs nobody is watching is the wrong way to fail. It carries a
 `WHERE ... updated_ts <= EXCLUDED.updated_ts` guard, because Databricks can
 deliver a retry out of order and without it a late `RUNNING` would overwrite a
-`SUCCEEDED` that had already landed.
+`SUCCEEDED` that had already landed. The guard is about the row and only the
+row: an append-only history has nothing to move backwards, so a retry
+delivered late lands there as one more row rather than as a lost transition.
 
 One asymmetry to know about: the app still calls `set_status` for every status
 message it sees on the socket, and *its* upsert has no such guard
@@ -197,6 +220,114 @@ regardless.
 so pointing it at a different shape is a change in one method — and it has
 never been sent to a live workspace. One real request and response would
 settle it; until then, treat the shape as unconfirmed.
+
+## What lives in Postgres, what lives in Delta
+
+The line is OLTP-shaped state on one side and append-only telemetry on the
+other. Where it falls is worth writing down, because the two obvious tidyings
+both cross it: "state is state, so move all of it to Postgres" drags progress
+along with it, and "there is already a status table in Postgres, so delete the
+Delta one" takes out a quarter of the message stream.
+
+**Postgres holds two tables.** `run_status` is current state — one row per
+run, `run_id` as PRIMARY KEY, upserted on every transition.
+`run_status_history` is append-only beside it, one row per transition, and it
+is where "what did this look like an hour ago" and "how did this run actually
+end" are answered. Those questions were previously answerable only by reading
+`run_events` back out of Delta, which means waking the SQL warehouse to ask
+them.
+
+**One writer of that table is designed and absent, and it is worth being
+precise about which.** Only the job appends. `recorded_by` defaults to `'job'`
+and the unique index is partial — `UNIQUE (run_id, seq) WHERE seq IS NOT NULL`
+— specifically so a writer with no envelope message behind it, and therefore
+no `seq`, can still append; that writer is the app at slot-claim time, and it
+does not exist. `claim_slot` creates the `run_status` row and writes no history
+row, so a run's history begins at the job's first report and **no run's
+history contains its `QUEUED`**. "How long did this sit `QUEUED`" is the
+obvious question to bring to a transition log and the one this one cannot
+answer yet; do not read the schema as evidence that it can. Reconciliation is
+unaffected — it reads the newest transition, which is always the job's.
+
+**`run_status` itself does not become append-only, and that is deliberate.** It
+is the tempting simplification — one table, insert-only, no upsert guard to
+get right — and it would give back both of the things Postgres was chosen over
+Delta for in the first place. The primary key on `run_id` is what refuses a
+duplicate run outright, rather than quietly producing a second registry row and
+leaving every point lookup afterwards to decide which of the two is the run.
+And the 5-concurrent-task ceiling is a count-and-claim inside one transaction:
+count the non-terminal rows, insert, commit. Append-only turns that count into
+latest-row-per-run — a window function over the whole history, on the hot path
+of every trigger, in place of an indexed count over a partial index that
+already excludes the terminal rows. The appends go to the history table; the
+row the ceiling is enforced on stays one row.
+
+**The planned end-of-run status write to Unity Catalog's `run_status` is
+cancelled**, and was never built. Its purpose was to leave a run's final state
+somewhere durable that did not depend on the live path. Lakebase now holds both
+the current row and the transitions that produced it, so a Delta row repeating
+the same fact is a third copy to keep in step. UC's `run_status` stays in
+`uc_ddl/` as what it already was: the fallback home for the row on a deployment
+with no Lakebase provisioned.
+
+**`run_events` survives, and its own DDL comment is wrong about why.** The
+comment in `uc_ddl/001_core_tables.sql` says the table exists so that a job
+running while the app is down still records its transitions somewhere startup
+reconciliation can read them back from. That was the whole stated
+justification, and it largely evaporated once the job started writing Lakebase
+directly: the run the app missed now updates the registry itself, as it
+happens. Read on its own, that comment now argues for deleting the table. The
+comment is what is out of date, not the table — this section is the correction
+until the DDL says it itself.
+
+What `run_events` actually is: **the `status` quarter of the message stream.**
+`app/server/repository.py::messages_since` — the backfill query — is a
+`UNION ALL` over `run_logs`, `run_progress`, `run_events` and
+`run_results_meta`, ordered by the single monotonic `seq`. Take `run_events`
+out and a client backfilling a finished run gets a stream with a permanent hole
+wherever a status transition was, and "did this run succeed" stops being
+answerable from the message stream at all. The replacement would be the client
+fetching status separately, from a different store, in a different shape, and
+merging it in by timestamp — because `seq` is assigned by the job onto the
+envelope, and a Postgres row that was never an envelope does not carry one.
+That is two shapes for one thing, which is the exact failure the one-envelope
+design exists to prevent.
+
+The second reason to keep it is that `run_events` is the only status record
+that does not depend on a network call succeeding. Lakebase-over-REST is a live
+path, and unconfigured, unreachable and refused are all things it does — all
+of them logged and carried on from. `run_events` rides the Spark durable path,
+which is the floor. The price of that insurance is two or three rows per run,
+on a flush that is happening anyway.
+
+What did change is its **role**: from reconciliation's primary source to its
+backstop, with Lakebase primary. That is a real win rather than a relabelling.
+`app/server/reconcile.py` now asks three sources in order — `run_status_history`
+in Postgres, then `run_events` in Delta, then the Jobs API — cheapest and
+closest to the job first. Answering "what happened to the runs I missed" used
+to mean waking the SQL warehouse at app startup for a question Postgres can
+answer for nothing. The warehouse is now the second call, for a deploy with no
+Postgres or a report that never reached it, and `repo` stays optional so a
+Lakebase-only deploy reconciles from the transition log and the Jobs API
+instead of not reconciling at all.
+
+**Progress stays in Delta.** It reads like state — "where has this run got
+to" — and it is telemetry on every measure that made status OLTP-shaped.
+Volume: 10 to 500 progress rows in a run, against two or three status
+transitions. Shape: a status row is two short strings, while a progress row
+carries a free-form `payload_json` that `mcmc` fills with `chain_positions` and
+`panel_fit` with `failure_counts`. Access: every question asked of progress is
+an analytical scan — plot the objective over the run, compare this run's
+convergence with the last one's — never a point lookup, and never a count
+against a ceiling.
+
+The live path makes that sharper rather than softer. Progress is barely read
+from storage at all: while the run is live it arrives over the WebSocket, a
+small gap is served from the job's replay ring, and storage is touched only for
+a cold read of a finished run — which is precisely the analytical case, one
+ordered scan of one run's rows, on a warehouse the rest of the backfill is
+waking anyway. Moving it to Postgres would pay OLTP prices for a workload that
+never does a point lookup, in the one store whose job is a transactional count.
 
 ## Why models are duck-typed, not a class hierarchy
 
@@ -364,11 +495,16 @@ arrive promptly or in held-and-released batches. `DBX_WS_PING_S` (20s) and
 `DBX_SSE_KEEPALIVE_S` (10s) are conservative guesses from community reports
 until those land. `docs/spike-results.md` has the table to fill in.
 
-Two more things are unverified. Neither gates anything, and both are better
-named than assumed. The Database REST API's request envelope in
-`job/lakebase.py` has never been sent to a live workspace — see "Who writes
-`run_status`" above. And the backfill loop is half-built: the job answers a
-`BACKFILL` from its replay ring, and nothing asks it one yet.
+One more thing is unverified, and it is narrower than it was. The Database
+REST API's request *envelope* in `job/lakebase.py` has never been sent to a
+live workspace — see "Who writes `run_status`" above; the `run_status` upsert
+and the `run_status_history` append both travel over it, so one real request
+settles both. What is no longer unverified is the statement inside it:
+`tests/app/test_run_store.py` imports `REPORT_SQL` rather than retyping it and
+executes it against a real PostgreSQL 16, over the `run_status_history` DDL
+this repo ships, against the same table the app's own `set_status` writes. So
+the SQL, the schema and the two writers' agreement about which direction is
+backwards are all tested; the HTTP body around them is what is not.
 
 Everything else in this design has a documented fallback if it doesn't pan
 out (VARIANT → a JSON string column, and the whole live path → Delta alone).

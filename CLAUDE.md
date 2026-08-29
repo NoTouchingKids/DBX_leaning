@@ -8,13 +8,12 @@ map, not the territory. If something here conflicts with a file in `docs/`,
 
 A reusable internal platform on **Databricks Free Edition**: a React SPA +
 async FastAPI app triggers and observes long-running analytical models —
-eleven of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
+ten of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
 CP-SAT job shop, scenario modelling, ML forecasting, MCMC, a conjugate
-Bayesian A/B comparison, a small torch classifier, a chunked rolling
-backtest, a simulated-annealing knapsack and a bank of per-group curve fits
-over panel data — that run as independent Databricks Jobs. Live progress,
-logs and results stream back to the browser. Durable state lands in Unity
-Catalog via Delta.
+Bayesian A/B comparison, a small torch classifier, a simulated-annealing
+knapsack and a bank of per-group curve fits over panel data — that run as
+independent Databricks Jobs. Live progress, logs and results stream back to
+the browser. Durable state lands in Unity Catalog via Delta.
 
 This is a **rewrite**, not the first attempt. Two earlier builds exist in
 this project's history (a Flask+Streamlit polling POC, then a FastAPI+
@@ -46,8 +45,8 @@ sources. Design against them; do not build past them speculatively.
   Catalog first — a volume, Marketplace, or Delta Sharing. See
   `docs/free-edition-constraints.md`, "Getting data in from outside".
 - Lakebase (managed Postgres) **is** available, and is used: it holds
-  `run_status` (see Conventions), and it is also the fallback fan-out
-  mechanism if this ever needs more than one app worker.
+  `run_status` and `run_status_history` (see Conventions), and it is also the
+  fallback fan-out mechanism if this ever needs more than one app worker.
 
 ## Transport architecture (settled — do not redesign without reading `docs/architecture.md` first)
 
@@ -55,7 +54,7 @@ sources. Design against them; do not build past them speculatively.
 Live path    (job → app):      WebSocket, the only one, both directions
 Live path    (app → client):   SSE, one-way
 Durable path (job → UC):       Delta writer, ALWAYS, in parallel with the live path
-Status path  (job → Lakebase): run_status, over the Database REST API
+Status path  (job → Lakebase): run_status + history, over the Database REST API
 ```
 
 - **Delta is the floor, not a fallback tier.** It runs regardless of whether
@@ -75,8 +74,11 @@ Status path  (job → Lakebase): run_status, over the Database REST API
   the warehouse awake for the run's duration, which is the exact cost mistake
   the first build made. `BACKFILL` is the same mistake refused from the other
   end: the job answers it from its own replay ring (`job/record.py`), so a
-  browser tab waking up cannot wake the warehouse. **Only the job side of this
-  exists — the app does not send a `BACKFILL` yet.**
+  browser tab waking up cannot wake the warehouse. Both ends are built:
+  `GET /api/runs/{run_id}/messages` asks the job whenever there is a live
+  socket and the gap sits inside the ring, and only falls through to the
+  warehouse when the job cannot answer in full. The response says which
+  answered, in `source`.
 - **The boundary between the two backfills travels on the wire.** The job
   states `replay_from_seq` (the oldest seq it can still replay) and
   `flushed_through_seq` (how far Delta has caught up) on `hello` and on every
@@ -132,25 +134,40 @@ back in a backfill reply, or is read back from Delta. Full spec:
   dependency set, because the two APIs this needs (Statement Execution and
   Jobs) are a few plain REST calls and the SDK's weight would be paid by
   every model environment.
-- **Run state lives in Lakebase (Postgres); telemetry lives in Delta.**
-  `run_status` is the one OLTP-shaped thing here — one row per run, updated on
-  every transition, point-looked-up, counted against the concurrency ceiling.
-  Delta is poor at all three and reading it costs warehouse *uptime*. Postgres
-  also buys what Delta structurally cannot: a primary key on `run_id`, and a
-  transaction around the count-and-claim so the 5-task ceiling is real rather
-  than advisory. Everything append-only — logs, progress, events, results —
-  stays in Delta. See `app/server/store.py`; the warehouse-backed store remains as
-  the unconfigured default so a deploy is never blocked on provisioning.
+- **Run state lives in Lakebase (Postgres); telemetry lives in Delta.** Two
+  tables in Postgres. `run_status` is current state — one row per run, updated
+  on every transition, point-looked-up, counted against the concurrency
+  ceiling — and Delta is poor at all three, on top of costing warehouse
+  *uptime* to read. `run_status_history` is the append-only trace of those
+  transitions beside it, so "how long did this sit QUEUED" stops being a
+  warehouse question. `run_status` stays one upserted row and does **not**
+  become append-only: the primary key on `run_id` is what refuses a duplicate
+  run, and the 5-task ceiling is a count-and-claim inside one transaction —
+  those are the two things Postgres was chosen over Delta for, and append-only
+  would cost both, turning an indexed count into a window function over
+  latest-row-per-run. Everything append-only and high-volume stays in Delta —
+  logs, progress, events, results. **Progress does not follow status across**:
+  10–500 rows a run with a fat `payload_json`, read by analytical scan and
+  never point-looked-up. `run_events` stays too — it is the `status` quarter
+  of the backfill stream and the only status record that does not ride a
+  network call — and the planned end-of-run status write to UC's `run_status`
+  is cancelled. `docs/architecture.md` has the split in full. See
+  `app/server/store.py`; the warehouse-backed store remains as the
+  unconfigured default so a deploy is never blocked on provisioning.
 - **Two writers on that row, one concern each.** The **app** claims the slot —
   the count-and-claim transaction, and the row's creation at trigger time. The
-  **job** owns the status transitions on it, over the Database REST API
+  **job** owns the status transitions — the upsert on `run_status` and the
+  append to `run_status_history` — over the Database REST API
   (`job/lakebase.py`, `DBX_LAKEBASE_REST_URL`), so `run_status` stays current
   for a run no socket ever attached to instead of sitting at whatever the app
   last saw. The job's upsert carries an `updated_ts` guard, so a retry
   delivered out of order cannot move the row backwards; the app's `set_status`
   does not, which `docs/architecture.md` records. **The REST request envelope
   is unverified against a live workspace** — `LakebaseStatus._body()` is the
-  one place it is built, and it needs a single real request to confirm.
+  one place it is built, and it needs a single real request to confirm. The
+  statement it carries is not in that position — `tests/app/test_run_store.py`
+  imports `REPORT_SQL` and runs it against a real Postgres — so what is
+  unconfirmed is the HTTP shape around the SQL, not the SQL.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -208,13 +225,12 @@ job/            THE JOB UNIT — the harness plus its payload, its own floor
   run_model.py  What a Databricks task runs (workspace-file sync, not a wheel)
   (harness)     WS bus, run record + replay ring, Delta writer, Lakebase
                 status reporter, model loader
-  models/           One package per model — eleven of them: gurobi_scheduling/,
+  models/           One package per model — ten of them: gurobi_scheduling/,
                 gurobi_routing/, ortools_jobshop/, scenario/, forecasting/,
-                mcmc/, bayesian_ab/, neural_net/, streaming_results/,
-                annealing/, panel_fit/ (plus _data/, the shared
-                samples-catalog loaders — ortools_jobshop and panel_fit
-                bring their own). Registered in [tool.dbx-leaning.models]
-                in pyproject.toml
+                mcmc/, bayesian_ab/, neural_net/, annealing/, panel_fit/
+                (plus _data/, the shared samples-catalog loaders —
+                ortools_jobshop and panel_fit bring their own). Registered
+                in [tool.dbx-leaning.models] in pyproject.toml
   shared/       A GENERATED copy, gitignored — `scripts/sync_shared.py` makes
                 it and the bundle's preinit hook runs that before every sync.
                 LOAD-BEARING: job/*.py imports `.shared`, relative, so `job` is
@@ -227,7 +243,7 @@ shared/         The message envelope + protocol helpers, imported by both
                 app/ and job/ (and indirectly by job/models/ via the callback
                 they're handed — models never import shared/ directly)
 uc_ddl/         Unity Catalog DDL (telemetry + per-model results tables)
-lakebase_ddl/   Postgres DDL (run_status), applied at app startup
+lakebase_ddl/   Postgres DDL (run_status + history), applied at app startup
 schema/         Generated JSON Schema for the wire protocol
 scripts/        Registry, requirements/schema export, licence + sample probes
 resources/      One job definition per model, plus the app — see below
@@ -320,11 +336,14 @@ Full procedure: `deploy/README.md`.
    `app/client/README.md`.
 5. **Not done:** `databricks bundle deploy` has never been run against a
    workspace, `scripts/probe_sample_data.py` has never been run end to end on
-   one, and there is no CI. Two more, both narrow and both in the transport:
-   the app does not yet **send** a `BACKFILL`, so the job's replay ring is
-   built and answered but not asked; and the Database REST API's request
-   envelope in `job/lakebase.py` has not been checked against a live
-   workspace. Do not read "built and tested" as "deployed".
+   one, and there is no CI. Two more, both narrow. The Database REST API's
+   request *envelope* in `job/lakebase.py` — the body `LakebaseStatus._body()`
+   builds — has never been sent to a live workspace; the SQL it carries has
+   been, because `tests/app/test_run_store.py` imports `REPORT_SQL` and runs
+   it against a real PostgreSQL 16 over the `run_status_history` DDL. And
+   nothing writes `run_status_history` with `recorded_by='app'`, so a run's
+   history starts at the job's first report and never records `QUEUED`. Do not
+   read "built and tested" as "deployed".
    What *is* confirmed against a real workspace: WebSocket and SSE both
    survive the Apps ingress, the `samples` catalog's table list, and column
    listings for seven of its tables (`docs/sample-data-inventory.md`).

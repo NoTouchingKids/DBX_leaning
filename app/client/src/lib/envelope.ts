@@ -125,7 +125,7 @@ export interface ProgressMessage extends CommonFields {
   type: "progress";
   elapsed_seconds: number;
   /** `null` is a REAL, CORRECT value — not a loading state. Always null for
-   *  gurobi_scheduling; transiently null for mcmc / scenario / streaming.
+   *  gurobi_scheduling; transiently null for mcmc / scenario.
    *  Render an indeterminate treatment, never a 0% bar. */
   percent_complete: number | null;
   /** Sanitised server-side: NaN and ±Infinity become null. */
@@ -159,8 +159,8 @@ export interface ResultMessage extends CommonFields {
    *  chunk 0 and 1 but seq 40 and 91. */
   chunk_index: number;
   /** False while more chunks are coming. Results are complete only once a
-   *  message with `final: true` has been seen. streaming_results is the model
-   *  that actually exercises this. */
+   *  message with `final: true` has been seen. panel_fit is the model that
+   *  actually exercises this. */
   final: boolean;
 }
 

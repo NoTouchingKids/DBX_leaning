@@ -1,11 +1,11 @@
 /**
- * The nine model views, by model name.
+ * The ten model views, by model name — one for every model in `job/models/`.
  *
  * The single place a `ModelView` is bound to a model — deliberately, so that
  * `ModelPage` resolves one lookup and knows nothing about any particular
- * model, and so that adding a tenth is one import and one entry.
+ * model, and so that adding the next one is one import and one entry.
  *
- * Static imports, not `import()` by name. A dynamic path would defer nine
+ * Static imports, not `import()` by name. A dynamic path would defer ten
  * chunks and cost a loading state on every model page, and the whole set is
  * small; more importantly a name-built import path cannot be typechecked, so
  * a renamed directory would fail at runtime on one page instead of at build
@@ -28,7 +28,6 @@ import neuralNet from "./neural_net";
 import ortoolsJobshop from "./ortools_jobshop";
 import panelFit from "./panel_fit";
 import scenario from "./scenario";
-import streamingResults from "./streaming_results";
 
 export const MODEL_VIEWS: readonly ModelView[] = [
   gurobiScheduling,
@@ -39,7 +38,6 @@ export const MODEL_VIEWS: readonly ModelView[] = [
   bayesianAb,
   annealing,
   neuralNet,
-  streamingResults,
   ortoolsJobshop,
   panelFit,
 ];

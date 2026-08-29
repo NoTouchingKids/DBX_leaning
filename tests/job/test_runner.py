@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -231,6 +232,62 @@ async def test_the_durable_record_is_complete_at_any_size(cfg, writer, steps):
     assert outcome.unflushed_rows == 0
     assert len(rows(writer, "run_progress")) == steps
     assert len(rows(writer, "results_fake")) == steps
+
+
+async def test_the_durable_high_water_mark_advances_while_the_run_is_still_going(cfg, writer):
+    """The periodic flush is a thread now, and this is what says it is wired
+    to the record rather than only to the writer.
+
+    `_finalise` flushes and calls `note_flushed` at the end of every run, so a
+    mark checked afterwards proves nothing about the tick. This one is read
+    while the model is still blocking, where -1 means the thread never ran.
+    """
+    model = BlockingModel({"poll_s": 0.01})
+    conf = cfg(
+        model_spec="tests.job.conftest:BlockingModel", flush_tick_s=0.02, flush_max_age_s=0.02
+    )
+    harness = JobHarness(conf, writer=writer, handle=describe_object(model, "blocking"))
+
+    mid_run: list[int] = []
+
+    async def stop_once_delta_has_caught_up():
+        await until(lambda: harness.record.flushed_through_seq >= 0)
+        mid_run.append(harness.record.flushed_through_seq)
+        harness.token.cancel("stop")
+
+    asyncio.create_task(stop_once_delta_has_caught_up())
+    outcome = await harness.run()
+
+    assert outcome.status is RunStatus.CANCELLED
+    assert mid_run and mid_run[0] >= 0, "the flush thread never ran during the run"
+
+
+async def test_the_flush_thread_does_not_outlive_the_run(cfg, writer):
+    """Stopped and joined in the harness's `finally`, on every path out.
+
+    A daemon thread left ticking is invisible until it writes on behalf of a
+    run that already reported its outcome — or, here, until it hangs the suite.
+    """
+    conf = cfg(model_config={"steps": 2}, flush_tick_s=0.01)
+    await JobHarness(conf, writer=writer).run()
+
+    assert [t.name for t in threading.enumerate() if t.name.startswith("durable-flush")] == []
+
+
+async def test_a_run_that_fails_still_stops_its_flush_thread(cfg, writer):
+    class Exploding:
+        results_table = "results_boom"
+
+        def run(self):
+            raise ValueError("bad input")
+
+    conf = cfg(model_spec="x:Exploding", flush_tick_s=0.01)
+    outcome = await JobHarness(
+        conf, writer=writer, handle=describe_object(Exploding(), "boom")
+    ).run()
+
+    assert outcome.status is RunStatus.FAILED
+    assert [t.name for t in threading.enumerate() if t.name.startswith("durable-flush")] == []
 
 
 # --- the live bus, attached ------------------------------------------------

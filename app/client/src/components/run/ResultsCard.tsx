@@ -11,8 +11,8 @@
  * wrote nothing — possibly because the write itself failed", and those look
  * identical if a zero is treated as "nothing to show".
  *
- * Results APPEND across chunks; `streaming_results` emits many of them, each
- * with its own `chunk_index` and `final: false` until the last.
+ * Results APPEND across chunks; `panel_fit` emits many of them, each with its
+ * own `chunk_index` and `final: false` until the last.
  */
 
 import type { ResultMessage } from "@/lib/envelope";

@@ -145,7 +145,7 @@ def test_the_job_baseline_carries_no_model_library():
 
     The microservice split only means something if the baseline is empty of
     solver and ML libraries: each task installs this plus exactly ONE model
-    extra, so anything that leaks in here is carried by all eleven jobs.
+    extra, so anything that leaks in here is carried by all ten jobs.
     """
     baseline = pins(JOB_REQUIREMENTS)
     for library in ("gurobipy", "ortools", "torch", "scikit-learn", "emcee", "pandas"):

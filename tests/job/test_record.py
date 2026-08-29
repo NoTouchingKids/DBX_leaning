@@ -117,3 +117,47 @@ def test_a_run_that_recorded_no_status_summarises_as_failed():
 
     assert summary["status"] == "FAILED"
     assert "no terminal status" in summary["detail"]
+
+
+def test_the_summary_carries_the_status_messages_own_seq_and_ts():
+    """`run_status_history` dedupes on (run_id, seq) and orders by ts, so both
+    have to be the *message's* — re-clocking a history row on the way out
+    would make a redelivered report look like a second transition."""
+    record = RunRecord("r", model="scenario")
+    record.observe(make_message("status", run_id="r", seq=0, ts=1_000, status="RUNNING"))
+    record.observe(make_message("status", run_id="r", seq=7, ts=1_700, status="SUCCEEDED"))
+
+    summary = record.summary()
+
+    assert summary["seq"] == 7 and summary["ts"] == 1_700
+    assert summary["updated_ts"] > summary["ts"], "updated_ts is when it was reported"
+
+
+def test_a_summary_with_no_status_message_has_no_seq_and_is_timestamped_anyway():
+    """NULL seq is what keeps such a row outside the history table's partial
+    unique index, and rightly: there is no message identity to dedupe it by.
+    `ts` is NOT NULL there, so it falls back to when the report was made."""
+    summary = RunRecord("r").summary()
+
+    assert summary["seq"] is None
+    assert summary["ts"] == summary["updated_ts"]
+
+
+def test_the_summary_carries_every_column_its_two_tables_bind():
+    """Positional binding in `LakebaseStatus._body()`: a key that quietly
+    disappears here is a KeyError at report time, and a key that quietly
+    appears is nothing until someone binds it. Both are worth failing on."""
+    assert set(RunRecord("r").summary()) == {
+        # the run_status columns, in both schemas
+        "run_id",
+        "job_run_id",
+        "model",
+        "status",
+        "detail",
+        "started_ts",
+        "updated_ts",
+        "requested_by",
+        # the status message's own coordinates, for run_status_history
+        "seq",
+        "ts",
+    }

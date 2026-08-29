@@ -55,9 +55,9 @@ describe("URL round-tripping", () => {
   // This is the link five model pages build by hand. If it stops working the
   // filter is applied to nothing and the page silently shows all models.
   it("reads the model-page link", () => {
-    const filters = parseHistoryFilters(new URLSearchParams("model=streaming_results"));
-    expect(filters.model).toBe("streaming_results");
-    expect(serverQuery(filters)).toEqual({ limit: DEFAULT_LIMIT, model: "streaming_results" });
+    const filters = parseHistoryFilters(new URLSearchParams("model=panel_fit"));
+    expect(filters.model).toBe("panel_fit");
+    expect(serverQuery(filters)).toEqual({ limit: DEFAULT_LIMIT, model: "panel_fit" });
   });
 
   it("drops a status the server has never heard of rather than passing it on", () => {

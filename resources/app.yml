@@ -185,11 +185,6 @@ resources:
           job:
             id: ${resources.jobs.model_neural_net.id}
             permission: CAN_MANAGE_RUN
-        - name: job-streaming-results
-          description: Trigger the streaming_results model.
-          job:
-            id: ${resources.jobs.model_streaming_results.id}
-            permission: CAN_MANAGE_RUN
         - name: job-ortools-jobshop
           description: Trigger the ortools_jobshop model.
           job:
@@ -351,7 +346,6 @@ resources:
                "bayesian_ab": ${resources.jobs.model_bayesian_ab.id},
                "annealing": ${resources.jobs.model_annealing.id},
                "neural_net": ${resources.jobs.model_neural_net.id},
-               "streaming_results": ${resources.jobs.model_streaming_results.id},
                "ortools_jobshop": ${resources.jobs.model_ortools_jobshop.id},
                "panel_fit": ${resources.jobs.model_panel_fit.id}}
 

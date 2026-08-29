@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from shared.envelope import Message, StatusMessage
 from shared.protocol import ControlFrame, pack_frame
+from shared.protocol import backfill as backfill_frame
 from shared.tables import TableSet
 
 from .broadcaster import Broadcaster, InProcessBroadcaster
@@ -29,7 +31,67 @@ from .store import PostgresRunStore, RunStore, WarehouseRunStore
 
 log = logging.getLogger(__name__)
 
-__all__ = ["ServiceHub", "JobConnections"]
+__all__ = ["ServiceHub", "JobConnections", "ReplayBounds", "BACKFILL_TIMEOUT_S"]
+
+#: How long a backfill request waits on the job before the caller gives up and
+#: goes to SQL instead.
+#:
+#: The job answers from an in-memory ring in a single frame, so a reply that
+#: has not arrived in seconds is not a big answer — it is a wedged socket, a
+#: blocked event loop, or a job that died mid-frame. Unbounded would mean a
+#: browser request hanging on a process that will never speak again; the
+#: warehouse read this falls back to is slower than this wait, but it finishes.
+BACKFILL_TIMEOUT_S = 3.0
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayBounds:
+    """The two seq bounds a job states about what can still be answered where.
+
+    Held per run rather than replaced by a constant here on purpose. A tuned
+    threshold — "gaps under 500 go to the job" — would be a number to keep in
+    step across two codebases, and it would be wrong the first time a model
+    changed how chattily it logs. Both numbers are things the job knows for
+    free, so it says them and the app decides (docs/architecture.md).
+    """
+
+    #: The oldest seq the job can still replay from memory. Anything at or
+    #: above it, the job can answer in full; below it, only the warehouse can.
+    replay_from_seq: int
+    #: Everything at or below this has reached Delta. Above it the warehouse
+    #: cannot answer, whatever it is asked. Recorded but not yet routed on —
+    #: the fall-back read is the same statement either way.
+    flushed_through_seq: int
+
+    def covers(self, after_seq: int) -> bool:
+        """Does a request after ``after_seq`` land inside the job's ring?
+
+        ``- 1`` because ``after_seq`` is an *exclusive* lower bound: asking
+        for everything after the message one below the oldest still held
+        starts at the oldest, which the ring has. Off by one the other way and
+        every gap that reached exactly to the ring's floor would be sent to
+        SQL for no reason.
+        """
+        return after_seq >= self.replay_from_seq - 1
+
+
+@dataclass(slots=True)
+class _PendingBackfill:
+    """One outstanding ``BACKFILL``, waiting on the frame that answers it."""
+
+    after_seq: int
+    future: asyncio.Future[dict[str, Any] | None]
+
+
+def _as_int(value: Any) -> int | None:
+    """Ints off the wire, or None. A job that omits a bound is not a job that
+    reported zero, and the two must not be confused — see ``record_bounds``."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class JobConnections:
@@ -37,21 +99,171 @@ class JobConnections:
 
     The *only* path by which anything reaches a running job — which is why
     cancel goes through the app and never through a status table a client
-    polls.
+    polls, and why a small gap is asked of the job here rather than read out
+    of Unity Catalog. Warehouse cost is uptime: a browser tab waking up after
+    thirty seconds should not be a way to spend money.
     """
 
     def __init__(self) -> None:
         self._by_run: dict[str, Any] = {}
+        #: What each connected job last said it can replay, from its `hello`
+        #: and refreshed by every `backfill_result` — a long-lived connection's
+        #: picture would otherwise go stale until the next reconnect, and the
+        #: ring moves on the whole time.
+        self._bounds: dict[str, ReplayBounds] = {}
+        #: At most one in-flight backfill per run. See `backfill` for why a
+        #: second concurrent request is refused rather than parked.
+        self._pending: dict[str, _PendingBackfill] = {}
 
     def register(self, run_id: str, ws: Any) -> None:
         self._by_run[run_id] = ws
 
     def unregister(self, run_id: str, ws: Any | None = None) -> None:
-        if ws is None or self._by_run.get(run_id) is ws:
-            self._by_run.pop(run_id, None)
+        if ws is not None and self._by_run.get(run_id) is not ws:
+            return
+        self._by_run.pop(run_id, None)
+        # Bounds belong to the connection that stated them. A reconnecting job
+        # sends `hello` again immediately; judging its new socket by the old
+        # socket's floor in that window would route a gap to a job that has
+        # not said it can serve it.
+        self._bounds.pop(run_id, None)
+        pending = self._pending.get(run_id)
+        if pending is not None and not pending.future.done():
+            # The answer is never coming. Say so now rather than holding a
+            # browser request open for the rest of the timeout.
+            pending.future.set_result(None)
 
     def is_connected(self, run_id: str) -> bool:
         return run_id in self._by_run
+
+    def bounds(self, run_id: str) -> ReplayBounds | None:
+        return self._bounds.get(run_id)
+
+    def record_bounds(self, run_id: str, payload: Mapping[str, Any]) -> None:
+        """Remember what the job says it can replay, from `hello` or a reply.
+
+        A payload missing either number is ignored rather than defaulted. A
+        floor of 0 reads as "the job can answer anything", so inventing one
+        for a job that never said it would send every gap to a socket that
+        cannot serve it, and turn each of those into a timeout followed by the
+        warehouse read that should have happened straight away.
+        """
+        replay_from = _as_int(payload.get("replay_from_seq"))
+        flushed = _as_int(payload.get("flushed_through_seq"))
+        if replay_from is None or flushed is None:
+            return
+        self._bounds[run_id] = ReplayBounds(
+            replay_from_seq=replay_from, flushed_through_seq=flushed
+        )
+
+    def can_serve(self, run_id: str, after_seq: int) -> bool:
+        """Is the job both here and able to answer this gap in full?
+
+        False on any of: no socket, no bounds stated yet, or a gap reaching
+        below the ring's floor — all three mean "go to SQL". Unstated bounds
+        count as no deliberately: the alternative is spending the backfill
+        timeout finding out, on every request, against a socket whose `hello`
+        has not arrived yet.
+
+        It is a prediction, not a guarantee. The ring can evict between this
+        answer and the reply, which is what `complete` on the reply is for.
+        """
+        if run_id not in self._by_run:
+            return False
+        bounds = self._bounds.get(run_id)
+        return bounds is not None and bounds.covers(after_seq)
+
+    async def backfill(
+        self,
+        run_id: str,
+        *,
+        after_seq: int,
+        limit: int | None = None,
+        timeout_s: float = BACKFILL_TIMEOUT_S,
+    ) -> dict[str, Any] | None:
+        """Ask the job for everything after ``after_seq``. None means "ask SQL".
+
+        Returns the reply payload — ``messages``, ``complete`` and both seq
+        bounds — or None when there is no socket, the send failed, the job
+        never answered, or another backfill for this run is already in flight.
+        Every None is the caller's cue to fall back to the warehouse: this is
+        an optimisation over that read, never a replacement for it.
+        """
+        if run_id not in self._by_run:
+            return None
+
+        existing = self._pending.get(run_id)
+        if existing is not None:
+            # One in-flight backfill per run, and a second caller is refused
+            # rather than joined onto the first. Two waiters on one future
+            # would both be resolved by whichever reply arrived first — a page
+            # computed for someone else's cursor, which is silently wrong
+            # messages where the warehouse would have given right ones.
+            # Overlap needs two viewers backfilling the same run inside one
+            # round trip, so what this costs is a rare warehouse read.
+            log.info(
+                "a backfill for %s (after seq %d) is already in flight; "
+                "this request goes to SQL instead",
+                run_id,
+                existing.after_seq,
+            )
+            return None
+
+        pending = _PendingBackfill(
+            after_seq=after_seq, future=asyncio.get_running_loop().create_future()
+        )
+        self._pending[run_id] = pending
+        try:
+            frame = backfill_frame(run_id, after_seq=after_seq, limit=limit)
+            if not await self.send(run_id, frame):
+                return None
+            return await asyncio.wait_for(pending.future, timeout_s)
+        except TimeoutError:
+            log.warning(
+                "job for %s did not answer a backfill after seq %d within %.1fs; "
+                "falling back to SQL",
+                run_id,
+                after_seq,
+                timeout_s,
+            )
+            return None
+        finally:
+            # Always, including when the caller itself was cancelled — a
+            # browser that gave up on the request. A leaked entry would refuse
+            # every later backfill for this run for the life of the socket,
+            # which is a permanent fallback to SQL that nothing reports.
+            if self._pending.get(run_id) is pending:
+                del self._pending[run_id]
+
+    def resolve_backfill(self, run_id: str, payload: Mapping[str, Any]) -> bool:
+        """Hand a `backfill_result` to whoever asked for it.
+
+        Returns whether anyone was still waiting. False is not an error: a
+        reply that arrives after its requester timed out is the ordinary shape
+        of a slow job. It is dropped, because the request it answers is gone —
+        but its bounds are kept, since they are current either way.
+        """
+        self.record_bounds(run_id, payload)
+
+        pending = self._pending.get(run_id)
+        if pending is None:
+            return False
+        # Matched on the cursor, not merely on the run. A reply to a request
+        # that already timed out would otherwise satisfy the *next* one, and
+        # hand a client a page computed for a different `after_seq` — a wrong
+        # answer where a slow one was expected.
+        if _as_int(payload.get("after_seq")) != pending.after_seq:
+            log.info(
+                "backfill_result for %s answers seq %r, not the %d being waited on; ignoring",
+                run_id,
+                payload.get("after_seq"),
+                pending.after_seq,
+            )
+            return False
+        if pending.future.done():
+            return False
+        pending.future.set_result(dict(payload))
+        return True
 
     async def send(self, run_id: str, frame: ControlFrame) -> bool:
         ws = self._by_run.get(run_id)
@@ -384,7 +596,7 @@ class ServiceHub:
             # Bound above, not re-read here: the None-check happens now, the
             # await happens later, and the attribute could have changed.
             try:
-                await store.set_status(run_id, msg.status, detail=msg.detail)
+                await store.set_status(run_id, msg.status, detail=msg.detail, ts=msg.ts)
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(

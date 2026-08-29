@@ -1,5 +1,5 @@
 Add a model to `job/models/` and register it everywhere the deploy needs it.
-There are eleven today; this is the checklist for the twelfth.
+There are ten today; this is the checklist for the eleventh.
 
 A model that only imports cleanly is not done. Six other files know about a
 model, `tests/deploy/` binds five of them together, and skipping any one of
@@ -15,7 +15,7 @@ Ask the user for:
    `DBX_JOB_IDS` — so it must be a valid Python identifier, lowercase, and
    the same string in all six places.
 2. A one-line description of what it does and **what makes its telemetry
-   shape distinct** from the eleven that exist. If it is not distinct from
+   shape distinct** from the ten that exist. If it is not distinct from
    any of them, say so — there may be no reason for a new model rather than
    a config on an existing one. The lineup is a set of *shapes*, not a set of
    techniques: solver gap, training loop, completion sweep, chunked results,
@@ -29,8 +29,8 @@ disagree, the code is right. Re-read `docs/message-envelope-spec.md` rather
 than working from memory; the envelope is frozen and the model has to fit it,
 not the other way round.
 
-**Do not write a `.claude/agents/model-<name>.md` brief.** Five of the eleven
-models have one and the last six deliberately do not — see
+**Do not write a `.claude/agents/model-<name>.md` brief.** Four of the ten
+models have one and the other six deliberately do not — see
 `docs/parallelization-plan.md`, which records that a brief per model was worth
 writing only while the contract was still being discovered, and that once
 `job/models/README.md` and this command existed the later models needed none. Add
@@ -132,7 +132,10 @@ needs an `ALTER TABLE ... ADD COLUMNS` by hand — see `uc_ddl/README.md`.
 its config fields and its progress-payload shape — and `MODEL_SPECS` is what
 the SPA renders a trigger form from. Its own header says there is no test that
 will tell you when it drifts. A model missing from it is triggerable by API
-and invisible in the UI. It currently covers nine of eleven.
+and invisible in the UI. It currently covers all ten, and so does
+`app/client/src/components/models/registry.ts` — every model has both a spec
+and a per-model view, so a new one that gets neither is the only gap in the
+set.
 
 ## 3. A new shared dependency is its own step
 

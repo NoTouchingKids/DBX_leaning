@@ -69,13 +69,13 @@ panel = ["numpy>=1.26"]
 # environments.
 bayesian = ["numpy>=1.26"]
 # The heavy one, deliberately. This is the model whose dependency actually
-# justifies per-model environments: torch must not reach the four models that
-# do not want it. If the split works, only this job carries it.
+# justifies per-model environments: torch reaches this job and no other. The
+# comment here used to count the models that did not want it, which dated from
+# before a job was a self-contained unit — back then the question was how many
+# environments a dependency leaked into. It is not a count now: each job
+# carries its own floor plus one extra, so the answer is structural.
 nn = ["torch>=2.4", "numpy>=1.26"]
 scenario = ["numpy>=1.26"]
-# Rolling-origin backtest: numpy's lstsq, deliberately nothing heavier.
-# The platform value here is the chunked result path, not the modelling.
-streaming = ["numpy>=1.26"]
 # Deliberately empty, and that is the whole point of job/models/annealing: it is
 # the control case proving the microservice split really can produce a
 # minimal environment. Its job deploys with the harness's own transport and
@@ -89,7 +89,7 @@ annealing = []
 # everyone who just wanted the light ones. Install [nn] explicitly.
 # tests/deploy/test_requirements.py enforces this rather than trusting it.
 models = [
-    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,streaming,annealing,ortools,panel]",
+    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,annealing,ortools,panel]",
 ]
 
 [dependency-groups]
@@ -144,7 +144,6 @@ mcmc = "mcmc"
 bayesian_ab = "bayesian"
 # The heavy one: torch, and only this job carries it.
 neural_net = "nn"
-streaming_results = "streaming"
 # Maps to an intentionally empty extra — see the note above it.
 annealing = "annealing"
 # The open-source scheduler. Same problem domain as gurobi_scheduling, a
