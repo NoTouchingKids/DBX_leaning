@@ -46,6 +46,74 @@ ENVIRONMENTS: dict[str, list[str]] = {
 #: library — it observes, it does not compute.
 APP_EXTRAS = ["app"]
 
+#: Packages the Databricks serverless runtime already provides, withheld from
+#: the model environments so pip leaves the runtime's copies alone.
+#:
+#: The failure this prevents: a pinned `numpy==2.4.6` is not additive, it
+#: REPLACES the numpy the runtime installed and wired its own pyspark and
+#: pandas against. Seven of the ten model environments pinned one, which is
+#: why this showed up as "most of the models" rather than one of them.
+#:
+#: Dropping the pin does not leave a model without the library — pip sees the
+#: requirement already satisfied by what is installed and moves on. It only
+#: stops us overwriting a working version with a different one.
+#:
+#: **The two failure directions are not symmetric, which is why this list is
+#: short.** Withholding something the runtime does NOT have fails loudly, at
+#: import, on the first run. Shipping something it DOES have fails quietly, as
+#: a version clash somewhere else entirely. So this holds only packages whose
+#: presence is not in doubt; extend it once a real job has been asked what it
+#: actually has, not by reasoning about what a runtime probably ships.
+#:
+#: Deliberately NOT here, and why:
+#:   scipy, scikit-learn — very likely present, but scikit-learn carries a
+#:     minimum-version constraint and an absent scipy breaks it at import.
+#:   typing-extensions   — pydantic v2 needs a recent one; an older runtime
+#:     copy would break it in a way that reads as a pydantic bug.
+#:   protobuf, jinja2    — present as somebody else's transitive dependency,
+#:     with no way from here to know whose version wins.
+RUNTIME_PROVIDED: frozenset[str] = frozenset(
+    {
+        "numpy",
+        "pandas",
+        "python-dateutil",
+        "setuptools",
+        "six",
+        "tzdata",
+    }
+)
+
+
+def _requirement_name(line: str) -> str:
+    """The bare package name from an exported requirement line."""
+    name = line.strip()
+    for separator in ("==", ">=", "<=", "~=", "!=", ">", "<", ";", "[", " "):
+        name = name.split(separator)[0]
+    return name.strip().lower()
+
+
+def strip_runtime_provided(body: str) -> str:
+    """Drop runtime-provided pins, and the `# via` block that follows each.
+
+    `uv export` writes a requirement then indents its provenance underneath,
+    so removing the requirement alone would leave orphaned comments attached
+    to whatever came next — which reads as though the wrong package pulled it
+    in, and is exactly the sort of stale comment this repo keeps paying for.
+    """
+    out: list[str] = []
+    skipping = False
+    for line in body.splitlines():
+        if line.startswith((" ", "\t")) and line.lstrip().startswith("#"):
+            if skipping:
+                continue
+            out.append(line)
+            continue
+        skipping = bool(line.strip()) and _requirement_name(line) in RUNTIME_PROVIDED
+        if not skipping:
+            out.append(line)
+    return "\n".join(out).strip() + "\n"
+
+
 #: The job unit's own baseline: the harness transport, no model library.
 #:
 #: Nothing installs this today — each job task installs
@@ -68,7 +136,7 @@ HEADER = """\
 """
 
 
-def export(extras: list[str]) -> str:
+def export(extras: list[str], *, strip_runtime: bool = True) -> str:
     """One `uv export` for one environment.
 
     No hashes: Databricks' serverless environment installer takes a plain
@@ -93,11 +161,15 @@ def export(extras: list[str]) -> str:
     body = "\n".join(
         line for line in result.stdout.splitlines() if not line.startswith("#")
     ).strip()
-    return body + "\n"
+    return strip_runtime_provided(body) if strip_runtime else body + "\n"
 
 
-def render(name: str, extras: list[str]) -> str:
-    return HEADER.format(name=name, extras=", ".join(extras)) + "\n" + export(extras)
+def render(name: str, extras: list[str], *, strip_runtime: bool = True) -> str:
+    return (
+        HEADER.format(name=name, extras=", ".join(extras))
+        + "\n"
+        + export(extras, strip_runtime=strip_runtime)
+    )
 
 
 def targets() -> dict[pathlib.Path, str]:
@@ -105,7 +177,12 @@ def targets() -> dict[pathlib.Path, str]:
     # The app's list lives in `app/`, not at the repo root: Databricks Apps
     # installs requirements.txt from the app's SOURCE directory, and
     # `resources/app.yml` points that at `../app`.
-    out[ROOT / "app" / "requirements.txt"] = render("databricks-app", APP_EXTRAS)
+    # Not stripped: the app runs on Databricks Apps, a plain Python
+    # environment, not the serverless Spark runtime whose preinstalled
+    # scientific stack RUNTIME_PROVIDED is about.
+    out[ROOT / "app" / "requirements.txt"] = render(
+        "databricks-app", APP_EXTRAS, strip_runtime=False
+    )
     # The job unit's baseline — see JOB_EXTRAS. Every file under
     # deploy/requirements/ is this plus one model extra.
     out[ROOT / "job" / "requirements.txt"] = render("job-harness", JOB_EXTRAS)

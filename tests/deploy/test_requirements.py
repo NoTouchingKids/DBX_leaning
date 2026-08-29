@@ -163,3 +163,33 @@ def test_every_model_environment_is_the_job_baseline_plus_its_own():
     for path in sorted(REQUIREMENTS.glob("*.txt")):
         missing = baseline - set(pins(path))
         assert not missing, f"{path.name} is missing harness packages: {sorted(missing)}"
+
+
+def test_the_model_environments_withhold_what_the_runtime_already_provides():
+    """A pin here does not add a library, it REPLACES the runtime's.
+
+    Databricks serverless installs numpy and wires its own pyspark and pandas
+    against it. `numpy==2.4.6` in a requirements file overwrites that copy,
+    and what breaks is not numpy — it is whatever else was built against the
+    version that got replaced. Seven of the ten model environments carried one
+    of these, which is why it showed up as most of the models rather than one.
+
+    Dropping the pin does not leave a model without the library: pip finds the
+    requirement already satisfied and moves on.
+    """
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from export_requirements import RUNTIME_PROVIDED, _requirement_name
+
+    offenders: list[str] = []
+    for path in sorted((ROOT / "deploy" / "requirements").glob("*.txt")):
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith((" ", "#")):
+                continue
+            if _requirement_name(line) in RUNTIME_PROVIDED:
+                offenders.append(f"{path.name}: {line.strip()}")
+    assert not offenders, (
+        "these override a library the serverless runtime already provides:\n  "
+        + "\n  ".join(offenders)
+    )

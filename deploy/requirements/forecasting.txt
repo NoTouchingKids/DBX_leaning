@@ -31,16 +31,6 @@ msgpack==1.2.1
     # via dbx-leaning
 narwhals==2.25.0
     # via scikit-learn
-numpy==2.4.6 ; python_full_version < '3.12'
-    # via
-    #   dbx-leaning
-    #   scikit-learn
-    #   scipy
-numpy==2.5.2 ; python_full_version >= '3.12'
-    # via
-    #   dbx-leaning
-    #   scikit-learn
-    #   scipy
 pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
