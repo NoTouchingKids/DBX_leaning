@@ -56,6 +56,14 @@ resources:
           default: ${var.lakebase_user}
         - name: DBX_LAKEBASE_SCHEMA
           default: ${var.lakebase_schema}
+        # Not a secret, and the thing without which no OAuth exchange can
+        # happen at all: `job/auth.py` needs somewhere to POST /oidc/v1/token,
+        # and with no host it declines that source before looking at whether
+        # it has credentials. Lakebase takes the resulting token as its
+        # password and the Apps proxy demands it for the WebSocket, so this
+        # one line gates both live paths.
+        - name: DBX_WORKSPACE_HOST
+          default: ${workspace.host}
 
       environments:
         - environment_key: annealing
@@ -85,3 +93,4 @@ resources:
               - DBX_LAKEBASE_DSN={{job.parameters.DBX_LAKEBASE_DSN}}
               - DBX_LAKEBASE_USER={{job.parameters.DBX_LAKEBASE_USER}}
               - DBX_LAKEBASE_SCHEMA={{job.parameters.DBX_LAKEBASE_SCHEMA}}
+              - DBX_WORKSPACE_HOST={{job.parameters.DBX_WORKSPACE_HOST}}
