@@ -7,8 +7,12 @@ Flush on whichever comes first — size >= 1 MB, age >= 30s, or end of run. The
 **age** bound is the one that caps data loss when the process dies; size
 alone is not a durability guarantee, because a slow run may never reach 1 MB.
 
-Thread-safe: rows arrive from the model's worker thread; flushes happen from
-the event loop side.
+Thread-safe, and every caller is now a thread rather than a coroutine: rows
+arrive from the model's worker thread, periodic flushes from the durable
+flusher's own thread (`job/sink.py`), and the end-of-run flush from the one
+`asyncio.to_thread` hop the runner keeps. No lock here is ever taken on the
+event loop, which is what lets the durable path keep going when the loop is
+wedged.
 """
 
 from __future__ import annotations

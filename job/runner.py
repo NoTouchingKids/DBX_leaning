@@ -17,6 +17,11 @@ What changed when the transport collapsed to one socket:
   then let the queue drain into them, which for a run that finishes faster
   than the socket can flush meant losing the whole live stream, terminal
   status included.
+- The durable path runs on a thread of its own (`DurableFlusher`), not as a
+  task on this loop. Delta is the floor, and a floor that stops ticking
+  whenever the loop is wedged is not one. This file keeps exactly one hop
+  into it, at teardown, so a Spark write taking seconds cannot stall the
+  drain that follows.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from .record import RunRecord
 from .shared.envelope import RunStatus
 from .shared.seq import SeqCounter
 from .shared.tables import TableSet
-from .sink import DurableSink
+from .sink import DurableFlusher, DurableSink
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +194,16 @@ class JobHarness:
 
         if bus is not None:
             await bus.start()
-        flusher = asyncio.create_task(self._flush_loop(sink), name="flush-loop")
+        # The periodic flush, and the one place the record learns how far the
+        # warehouse has caught up — which is half of what a client needs to
+        # decide whether to ask the job or ask SQL. On its own thread, so
+        # neither depends on this loop getting scheduled.
+        flusher = DurableFlusher(
+            sink,
+            tick_s=cfg.flush_tick_s,
+            after_flush=lambda: self._note_flushed(sink),
+        )
+        flusher.start()
 
         status, detail = RunStatus.FAILED, None
         undrained = 0
@@ -211,13 +225,15 @@ class JobHarness:
             # Everything below must happen whatever went wrong above.
             status, detail = await self._finalise(sink, emitter, status, detail)
             await self._report(reporter)
-            flusher.cancel()
+            # Stopped and joined before the drain. `_finalise` has taken the
+            # flush lock twice by now, so any tick still in flight has already
+            # been waited out through it and this join returns at once.
+            flusher.stop()
             if bus is not None:
                 # Drain FIRST, close second. The other order is what dropped
                 # a fast run's whole live stream, terminal status included.
                 undrained = await bus.drain(cfg.ws_drain_s)
                 await bus.close()
-            await asyncio.gather(flusher, return_exceptions=True)
             if reporter is not None and not self._reporter_injected:
                 await reporter.close()
             try:
@@ -244,6 +260,16 @@ class JobHarness:
             observed_live=bool(bus is not None and bus.sent > 0),
         )
         return self.outcome
+
+    def _note_flushed(self, sink: DurableSink) -> None:
+        """How far Delta has caught up, told to the record.
+
+        Runs on the flusher's thread, and again on the loop at the end of
+        `_finalise`. Safe from both: `RunRecord` guards every field with its
+        own lock, and the mark it keeps is a high-water mark, so two threads
+        reporting out of order cannot move it backwards.
+        """
+        self.record.note_flushed(sink.flushed_through_seq(self.seq.issued))
 
     async def _report(self, reporter: LakebaseStatus | None) -> None:
         """Push the current status to Lakebase. Never load-bearing."""
@@ -303,7 +329,10 @@ class JobHarness:
         first is what makes that check possible rather than hopeful.
         """
         try:
-            await sink.flush_all()
+            # The run's one hop to a thread, rather than one per write: the
+            # sink is synchronous now, and a multi-second Spark write here
+            # would otherwise stall the WebSocket drain that comes next.
+            await asyncio.to_thread(sink.flush_all)
         except Exception:  # noqa: BLE001
             log.exception("final flush raised")
 
@@ -318,23 +347,11 @@ class JobHarness:
 
         try:
             emitter.emit("status", status=status, detail=detail)
-            await sink.flush_all()  # the terminal status itself must land
+            await asyncio.to_thread(sink.flush_all)  # the terminal status must land
         except Exception:  # noqa: BLE001
             log.exception("could not record terminal status")
-        self.record.note_flushed(sink.flushed_through_seq(self.seq.issued))
+        self._note_flushed(sink)
         return status, detail
-
-    async def _flush_loop(self, sink: DurableSink) -> None:
-        """Periodic durable flush, and the one place the record learns how far
-        the warehouse has caught up — which is half of what a client needs to
-        decide whether to ask the job or ask SQL."""
-        try:
-            while True:
-                await asyncio.sleep(self.cfg.flush_tick_s)
-                await sink.flush_due()
-                self.record.note_flushed(sink.flushed_through_seq(self.seq.issued))
-        except asyncio.CancelledError:
-            raise
 
 
 def _model_name(spec: str) -> str:
