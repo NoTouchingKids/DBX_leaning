@@ -120,13 +120,22 @@ class JobHarness:
 
     def _build_bus(self) -> WebSocketBus | None:
         if self._bus_injected:
-            # An injected bus was built before this harness existed, so it may
-            # be holding a different RunRecord. There is exactly one record per
-            # run and the backfill answers come out of it, so the harness's
-            # wins — otherwise a test (or a caller assembling its own bus)
-            # gets a socket that serves an empty replay ring and no error.
+            # An injected bus was built before this harness existed, so all
+            # three of its links back into the run are whatever its caller
+            # could supply — which is nothing. The harness's win, because
+            # every one of them fails silently otherwise:
+            #
+            #   record     — a socket serving an empty replay ring, so every
+            #                backfill comes back complete and empty
+            #   on_cancel  — an inbound cancel frame that no-ops, so the run
+            #                ignores the one command the socket exists to carry
+            #   next_seq   — `hello` advertising 0, telling an app that has
+            #                been watching for an hour to expect the run to
+            #                start over
             if self._bus is not None:
                 self._bus.record = self.record
+                self._bus.on_cancel = lambda who: self.token.cancel(f"cancelled by {who}")
+                self._bus.next_seq = lambda: self.seq.issued
             return self._bus
         ws_url = self.cfg.ws_url
         if not self.cfg.app_url or ws_url is None:
