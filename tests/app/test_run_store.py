@@ -363,10 +363,15 @@ async def test_a_re_reported_status_message_cannot_land_twice(store):
 async def test_two_transitions_with_no_seq_can_both_be_appended(store):
     """Why the unique index is partial.
 
-    The app appends at slot-claim time, where there is no envelope message and
-    so no seq. Under a plain UNIQUE (run_id, seq) that would be one NULL row
-    per run at most in any database that treats NULLs as equal, and this table
-    has to tolerate more than one writer without a seq.
+    A writer with no envelope message behind it — the app, at slot-claim time
+    — has no seq, and must still be able to append.
+
+    Being exact about what this catches: Postgres treats NULLs as distinct in
+    a unique index by default, so dropping `WHERE seq IS NOT NULL` changes
+    nothing here (verified). What it catches is `NULLS NOT DISTINCT`, legal
+    since PostgreSQL 15 and exactly the sort of thing added while "tightening"
+    an index — that turns the second seq-less append into a UniqueViolation
+    and the failure surfaces in the job, mid-run.
     """
     await append_transition(store, "r1", "QUEUED", recorded_by="app")
     await append_transition(store, "r1", "QUEUED", recorded_by="app")
@@ -414,8 +419,12 @@ async def test_the_limit_keeps_the_newest_transitions_not_the_oldest(store):
 async def test_seq_compares_as_a_number_not_a_string(store):
     """The lexicographic bug this repo hit twice, in schema form.
 
-    `seq` is BIGINT. Were it TEXT, `seq > 9` would return 2 and not 12 —
-    exactly inverted — because "2" > "9" and "12" is not.
+    `seq` is BIGINT and the bound is bound as an integer, so the comparison is
+    numeric. Declare the column TEXT and this does not silently invert — it
+    fails outright with "no operator matches ... bigint" (verified), because
+    psycopg types the parameter. That is the good failure: on the warehouse
+    side, where an untyped parameter is compared as a string, the same query
+    returns 2 and not 12 and nobody notices. See tests/app/test_sql_params.py.
     """
     for seq in (2, 12):
         await append_transition(store, "r1", "RUNNING", seq=seq, ts=1_000 + seq)
