@@ -191,6 +191,6 @@ deliberately does not constrain — is hand-derived from that model's own
 `app/client/src/components/models/contract.ts` returns a `Partial`: a
 hand-derived interface can go stale, and some fields are genuinely absent
 until a run reaches a given stage. What is still missing is envelope traffic
-from a **deployed** run — `databricks bundle deploy` has never been run
-against a workspace — so the views are built against locally-run models and
-tests, not against production behaviour.
+from a **deployed** run. The bundle has been deployed to a workspace many
+times; the views have not been driven against telemetry from one, so they are
+built against locally-run models and tests rather than production behaviour.

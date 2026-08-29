@@ -334,9 +334,12 @@ Full procedure: `deploy/README.md`.
 4. Frontend was explicitly low-priority until `app/`, `job/` and one model
    worked end to end. That gate is met and the track has started — see
    `app/client/README.md`.
-5. **Not done:** `databricks bundle deploy` has never been run against a
-   workspace, `scripts/probe_sample_data.py` has never been run end to end on
-   one, and there is no CI. Two more, both narrow. The Database REST API's
+5. **Deployed, but not verified end to end.** `databricks bundle deploy` has
+   been run against a workspace many times, so the bundle resolves and creates
+   its resources. That is not the same as a deployed run being checked, and it
+   does not cover the UC DDL, which `deploy/README.md` applies as a separate
+   manual step. Still not done: `scripts/probe_sample_data.py` has never been
+   run end to end on a workspace, and there is no CI. Two more, both narrow. The Database REST API's
    request *envelope* in `job/lakebase.py` — the body `LakebaseStatus._body()`
    builds — has never been sent to a live workspace; the SQL it carries has
    been, because `tests/app/test_run_store.py` imports `REPORT_SQL` and runs

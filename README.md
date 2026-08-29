@@ -190,8 +190,8 @@ Deployment exists as an Asset Bundle — ten jobs, one per model, each with
 its own serverless environment and dependency list exported from `uv.lock`.
 See `deploy/README.md`.
 
-What is **not** done: `databricks bundle deploy` has never actually been run
-against a workspace from here. The bundle validates against the CLI's schema
-and every contract it shares with the application code is tested, but
-validation is not deployment. There is also no CI — nothing runs the suite on
-a push.
+`databricks bundle deploy` has been run against a workspace many times, so
+the bundle resolves and creates its resources. That is not the same as a
+deployed run being verified end to end, and it says nothing about the UC DDL,
+which is applied by a separate manual step. What is **not** done: there is no
+CI — nothing runs the suite on a push.

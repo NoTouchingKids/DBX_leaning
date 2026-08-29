@@ -18,9 +18,12 @@ Only 001 is mandatory. 002 costs you a model's results; 003 is genuinely
 optional and degrades cleanly — see `resources/app.yml` for the grants that go
 with it.
 
-**Neither file has ever been executed.** `databricks bundle deploy` has never
-run against a workspace, so a syntax error in here would not have surfaced
-yet. Read changes carefully rather than trusting that what is committed works.
+**Whether these have been executed is not recorded here, and `bundle deploy`
+does not answer it.** The bundle has been deployed to a workspace many times,
+but it does not apply this DDL — `deploy/README.md` runs each file through
+`databricks sql query` as a separate, manual step. So a syntax error in here
+would not surface from a deploy. Read changes carefully rather than trusting
+that what is committed works.
 
 Four things worth knowing before changing anything here:
 

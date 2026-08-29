@@ -20,7 +20,8 @@ Playwright suite under `e2e/`, and the per-model pages are underway.
 The gate below has been met — `app/`, `job/` and ten models work end to
 end offline, and `tests/integration/test_end_to_end.py` drives real models
 through the real harness. What is still missing is envelope traffic from a
-**deployed** run: `databricks bundle deploy` has never been executed.
+**deployed** run. The bundle deploys; this client has not been driven
+against telemetry from a deployed run.
 
 ## The wire contract: hand-written, with a drift test — not generated
 
