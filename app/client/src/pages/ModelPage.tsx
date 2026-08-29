@@ -40,8 +40,9 @@ export function ModelPage() {
         view ? undefined : (
           <>
             Generic run view — it renders only the fields every model
-            populates, so it is correct for this model whether or not anyone
-            has written a bespoke page for it yet.
+            populates, so it is correct for this model with or without a
+            bespoke page. Some models have one; `heartbeat` deliberately does
+            not, because exercising this page is what it is for.
           </>
         )
       }

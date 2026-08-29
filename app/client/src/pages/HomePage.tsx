@@ -96,8 +96,8 @@ const CTA_SECONDARY =
  * One line per model, saying what KIND of computation it is.
  *
  * Copy, not data. `MODEL_SPECS` has no description field, this page does not
- * own it, and a gallery of ten two-word labels is a list pretending to be a
- * gallery. Keyed by model name and looked up with a fallback, so a model added
+ * own it, and a gallery of eleven two-word labels is a list pretending to be
+ * a gallery. Keyed by model name and looked up with a fallback, so a model added
  * to the registry gets a tile with no blurb rather than an `undefined` — it
  * degrades to exactly the old behaviour. The facts come from the model list in
  * `CLAUDE.md` and each model's own config surface; that is where to re-derive
@@ -114,6 +114,8 @@ const BLURBS: Record<string, string> = {
   bayesian_ab: "A conjugate Bayesian comparison of two slices of the same data.",
   neural_net: "A small torch classifier, an epoch at a time, against a held-out split.",
   panel_fit: "One curve fit per group, across a panel of entities and periods.",
+  heartbeat:
+    "Computes nothing. Emits telemetry on a clock for as long as you ask, so the live path can be watched.",
 };
 
 /**
