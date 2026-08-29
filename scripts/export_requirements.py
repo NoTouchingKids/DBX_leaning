@@ -47,26 +47,13 @@ ENVIRONMENTS: dict[str, list[str]] = {
 APP_EXTRAS = ["app"]
 
 #: Packages that must come from the Databricks serverless runtime, withheld so
-#: pip leaves the runtime's copies alone.
-#:
-#: **These move as a SET, and that is the whole lesson.** A first version of
-#: this withheld numpy alone and left scipy and scikit-learn pinned. Both are
-#: compiled against a specific numpy ABI, so the job then ran our scipy against
-#: the runtime's numpy — which does not raise, it calls abort(). The task died
-#: on `exit code 134 (SIGABRT)` with no Python traceback to read, because by
-#: then there was no Python left to raise one.
-#:
-#: So the rule is: never withhold a package while keeping something pinned that
-#: links its ABI. numpy, pandas, scipy and scikit-learn come from the runtime
-#: together or not at all.
-#:
-#: The failure directions are still not symmetric, and that is what makes this
-#: set the safer end of the trade. Withholding something the runtime does NOT
-#: have fails at import, loudly, naming the module. Shipping a package built
-#: against a different numpy aborts the process. An ImportError can be read;
-#: a SIGABRT cannot.
+#: pip leaves the runtime's copies alone. A pin here does not ADD a library, it
+#: REPLACES the one the runtime already wired pyspark against.
 #:
 #: Deliberately NOT here:
+#:   scipy, scikit-learn — see RESOLVE_AT_INSTALL below. Withholding those was
+#:     the wrong half of the same lesson: safe when the runtime has them,
+#:     an ImportError when it does not.
 #:   torch      — the heavy one, and the reason per-model environments exist.
 #:     It bundles its own numpy interop rather than linking a system ABI, and
 #:     the runtime is not guaranteed to carry it at all.
@@ -75,17 +62,44 @@ APP_EXTRAS = ["app"]
 #:     copy breaks it in a way that reads as a pydantic bug.
 RUNTIME_PROVIDED: frozenset[str] = frozenset(
     {
-        # The numpy ABI set — all four together, see above.
+        # The two the runtime cannot be without: pyspark imports pandas, and
+        # pandas is built against numpy. Replacing either breaks pyspark, not
+        # us, which is why these are withheld outright rather than relaxed.
         "numpy",
         "pandas",
-        "scipy",
-        "scikit-learn",
         # Pure-Python staples the runtime always has. No ABI to mismatch;
         # withheld only to stop pip churning versions it does not need to.
         "python-dateutil",
         "setuptools",
         "six",
         "tzdata",
+    }
+)
+
+#: Packages emitted by NAME ONLY, with the lock's `==` dropped, so pip resolves
+#: them at install time against whatever the runtime already has.
+#:
+#: **This is the middle ground between pinning and withholding, and both ends
+#: burned this repo once.** Pinning `scipy==1.18.1` installs OUR scipy over the
+#: runtime's, compiled against a numpy ABI that may not be the one loaded —
+#: which does not raise, it calls abort(). A task died on `exit code 134
+#: (SIGABRT)` with no traceback, because by then there was no Python left to
+#: raise one. Withholding it instead is safe only while the runtime happens to
+#: carry it; the day it does not, the model fails at import.
+#:
+#: An unpinned name has neither failure. pip treats ANY installed version as
+#: satisfying it and installs nothing, so the runtime's copy and its ABI are
+#: left exactly as found; and when the runtime does not have it, pip resolves
+#: a version compatible with the numpy that is there.
+#:
+#: No lower bound on purpose. A floor is the one thing that could make pip
+#: replace the runtime's copy again, which is the whole failure being designed
+#: out — and the versions Databricks serverless ships are far above any floor
+#: this project would write.
+RESOLVE_AT_INSTALL: frozenset[str] = frozenset(
+    {
+        "scipy",
+        "scikit-learn",
     }
 )
 
@@ -98,25 +112,41 @@ def _requirement_name(line: str) -> str:
     return name.strip().lower()
 
 
-def strip_runtime_provided(body: str) -> str:
-    """Drop runtime-provided pins, and the `# via` block that follows each.
+def apply_runtime_policy(body: str) -> str:
+    """Drop the withheld pins, relax the resolve-at-install ones.
 
-    `uv export` writes a requirement then indents its provenance underneath,
-    so removing the requirement alone would leave orphaned comments attached
-    to whatever came next — which reads as though the wrong package pulled it
-    in, and is exactly the sort of stale comment this repo keeps paying for.
+    `uv export` writes a requirement then indents its provenance underneath, so
+    removing or rewriting the requirement alone would leave orphaned comments
+    attached to whatever came next — which reads as though the wrong package
+    pulled it in, and is exactly the sort of stale comment this repo keeps
+    paying for. A dropped requirement takes its `# via` block with it; a
+    relaxed one keeps its own.
+
+    The lock can also resolve one package to several versions behind
+    environment markers (scipy is two: one for <3.12, one for >=3.12). Relaxed
+    to a bare name those collapse into the same line, so only the first
+    survives — the marker existed to choose a version, and there is no longer a
+    version to choose.
     """
     out: list[str] = []
     skipping = False
+    relaxed: set[str] = set()
     for line in body.splitlines():
         if line.startswith((" ", "\t")) and line.lstrip().startswith("#"):
             if skipping:
                 continue
             out.append(line)
             continue
-        skipping = bool(line.strip()) and _requirement_name(line) in RUNTIME_PROVIDED
-        if not skipping:
-            out.append(line)
+        name = _requirement_name(line) if line.strip() else ""
+        if name in RUNTIME_PROVIDED or (name in RESOLVE_AT_INSTALL and name in relaxed):
+            skipping = True
+            continue
+        skipping = False
+        if name in RESOLVE_AT_INSTALL:
+            relaxed.add(name)
+            out.append(name)
+            continue
+        out.append(line)
     return "\n".join(out).strip() + "\n"
 
 
@@ -167,7 +197,7 @@ def export(extras: list[str], *, strip_runtime: bool = True) -> str:
     body = "\n".join(
         line for line in result.stdout.splitlines() if not line.startswith("#")
     ).strip()
-    return strip_runtime_provided(body) if strip_runtime else body + "\n"
+    return apply_runtime_policy(body) if strip_runtime else body + "\n"
 
 
 def render(name: str, extras: list[str], *, strip_runtime: bool = True) -> str:
@@ -185,7 +215,7 @@ def targets() -> dict[pathlib.Path, str]:
     # `resources/app.yml` points that at `../app`.
     # Not stripped: the app runs on Databricks Apps, a plain Python
     # environment, not the serverless Spark runtime whose preinstalled
-    # scientific stack RUNTIME_PROVIDED is about.
+    # scientific stack RUNTIME_PROVIDED and RESOLVE_AT_INSTALL are about.
     out[ROOT / "app" / "requirements.txt"] = render(
         "databricks-app", APP_EXTRAS, strip_runtime=False
     )

@@ -39,6 +39,10 @@ pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
     # via pydantic
+scikit-learn
+    # via dbx-leaning
+scipy
+    # via scikit-learn
 threadpoolctl==3.6.0
     # via scikit-learn
 typing-extensions==4.16.0

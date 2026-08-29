@@ -51,6 +51,21 @@ def pins(path: pathlib.Path) -> dict[str, str]:
     return found
 
 
+def requirements(path: pathlib.Path) -> set[str]:
+    """Every package the file asks for, pinned or not.
+
+    `pins()` reads versions and so cannot see a deliberately unpinned line.
+    Presence and version are two different questions now, and the microservice
+    property is about presence.
+    """
+    names = set()
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.startswith((" ", "\t", "#")):
+            continue
+        names.add(re.split(r"[=<>~!;\[ ]", line.strip())[0].lower())
+    return names
+
+
 @pytest.mark.parametrize("library", sorted(LIBRARY_OWNER))
 def test_a_library_reaches_exactly_the_models_entitled_to_it(library):
     """The microservice property. A model's library must not appear in an
@@ -63,19 +78,19 @@ def test_a_library_reaches_exactly_the_models_entitled_to_it(library):
 
     owning_extra = LIBRARY_OWNER[library]
     entitled = {m for m, extra in registry().items() if extra == owning_extra}
-    carrying = {path.stem for path in REQUIREMENTS.glob("*.txt") if library in pins(path)}
+    carrying = {p.stem for p in REQUIREMENTS.glob("*.txt") if library in requirements(p)}
 
     if library in RUNTIME_PROVIDED:
-        # Entitled to it, and still must not carry it. The runtime supplies
-        # these, and a pin does not add one — it REPLACES what is installed.
-        # Withholding numpy while leaving this pinned is what aborted a task
-        # with SIGABRT: a scikit-learn built against one numpy ABI, loaded
-        # against another. So the assertion inverts rather than disappearing.
+        # Entitled to it, and still must not appear. Withholding is for what
+        # the runtime is guaranteed to have and pyspark is wired against, so
+        # the assertion inverts rather than disappearing. Nothing in the table
+        # above is withheld today; this branch is what makes moving one here a
+        # deliberate act rather than a silent one.
         assert carrying == set(), (
             f"{library} comes from the serverless runtime, so no environment "
-            f"may pin it — found in {sorted(carrying)}. If this is deliberate, "
-            f"the whole numpy-linked set has to move with it; see "
-            f"RUNTIME_PROVIDED in scripts/export_requirements.py."
+            f"may carry it — found in {sorted(carrying)}. If a model genuinely "
+            f"needs it, RESOLVE_AT_INSTALL is the safer half of the choice; "
+            f"see scripts/export_requirements.py."
         )
         return
 
@@ -116,13 +131,60 @@ def test_every_environment_pins_the_same_version_of_a_shared_dependency():
     assert not conflicts, f"version drift across environments: {conflicts}"
 
 
-def test_nothing_is_left_unpinned():
+def test_nothing_is_left_unpinned_except_by_decision():
+    """Everything is exact except the handful named in RESOLVE_AT_INSTALL.
+
+    The lock is the source of truth for versions, so an unpinned line is
+    normally drift. The exception is deliberate and narrow — see the comment on
+    RESOLVE_AT_INSTALL — and this asserts the exception stays that narrow
+    rather than becoming a habit.
+    """
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from export_requirements import RESOLVE_AT_INSTALL
+
     for path in [*REQUIREMENTS.glob("*.txt"), APP_REQUIREMENTS, JOB_REQUIREMENTS]:
         for line in path.read_text().splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
+            if stripped.lower() in RESOLVE_AT_INSTALL:
+                continue
             assert "==" in stripped, f"{path.name}: unpinned requirement {stripped!r}"
+
+
+def test_the_numpy_linked_libraries_ship_unpinned_and_only_unpinned():
+    """scipy and scikit-learn must appear by NAME, never with a version.
+
+    A pin does not add a library on Databricks serverless, it replaces one —
+    and both of these are compiled against a numpy ABI. Our copy loaded against
+    the runtime's numpy does not raise, it calls abort(): the task dies on
+    `exit code 134 (SIGABRT)` with no traceback. A bare name is satisfied by
+    whatever is already installed, so pip touches nothing; if the runtime
+    turns out not to have it, pip resolves one that fits the numpy that is
+    there. Neither failure is reachable from an unpinned line, which is why
+    this is asserted in both directions.
+    """
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from export_requirements import RESOLVE_AT_INSTALL
+
+    for path in sorted(REQUIREMENTS.glob("*.txt")):
+        for library in RESOLVE_AT_INSTALL:
+            assert library not in pins(path), (
+                f"{path.name} pins {library}, which overwrites the runtime's copy "
+                "and can abort the task; it must be exported unpinned"
+            )
+        for library in requirements(path) & RESOLVE_AT_INSTALL:
+            assert path.read_text().count(f"\n{library}\n") == 1, (
+                f"{path.name} should carry {library} exactly once, as a bare name"
+            )
+
+    forecasting = requirements(REQUIREMENTS / "forecasting.txt")
+    assert "scikit-learn" in forecasting, "the forecasting model imports it"
+    assert "scipy" in forecasting, "scikit-learn needs it, and the lock knows"
 
 
 def test_the_generated_files_still_match_the_lock():
@@ -194,8 +256,12 @@ def test_the_model_environments_withhold_what_the_runtime_already_provides():
     version that got replaced. Seven of the ten model environments carried one
     of these, which is why it showed up as most of the models rather than one.
 
-    Dropping the pin does not leave a model without the library: pip finds the
-    requirement already satisfied and moves on.
+    This is the strict half of the policy, and it applies to what the runtime
+    cannot be without. Anything a model needs and the runtime merely *probably*
+    has goes in RESOLVE_AT_INSTALL instead, which ships the name unpinned —
+    satisfied by the runtime's copy when there is one, resolved by pip when
+    there is not. `test_the_numpy_linked_libraries_ship_unpinned_and_only_
+    unpinned` is that half.
     """
     import sys
 
