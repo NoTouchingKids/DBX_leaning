@@ -87,13 +87,24 @@ variables:
   lakebase_port:
     description: Lakebase port. TLS is required and assumed.
     default: "5432"
-  lakebase_rest_url:
+  lakebase_dsn:
     description: >-
-      Database REST API endpoint the JOB posts its status transitions to.
+      Postgres connection string the JOB uses to report its own status
+      transitions directly to Lakebase (`job/lakebase.py`) — host, port,
+      database and `sslmode=require`, deliberately with NO credential in it,
+      e.g. `postgresql://<host>:5432/databricks_postgres?sslmode=require`.
+      Mirrors the app's own `DBX_LAKEBASE_DSN` (`app/server/config.py`)
+      rather than inventing a second vocabulary for the same database — one
+      deployment, one name for "where is Lakebase".
 
-      The app reaches Lakebase over Postgres; a job cannot, because a
-      Postgres driver in that process would be paid for by all ten model
-      environments. So the job goes over HTTP instead, and this is where.
+      This used to be a Database REST API endpoint (`lakebase_rest_url` /
+      `DBX_LAKEBASE_REST_URL`), on the reasoning that a Postgres driver in
+      the job's process would be paid for by all ten model environments. That
+      endpoint turned out to be a PostgREST base, which does not accept raw
+      SQL — no request shape would have made it work, so this connects
+      directly with psycopg instead, same as the app. The dependency cost is
+      real (`psycopg[binary]` is now in every model environment's
+      requirements) and is being paid deliberately, not by accident.
 
       Empty is a supported deploy: the job simply does not report status live,
       and `run_events` plus the app's own writes still carry it. This travels
@@ -120,17 +131,26 @@ variables:
   # deployment state.
   lakebase_user:
     description: >-
-      Postgres role the app connects as.
+      Postgres role connecting to Lakebase — the app (`resources/app.yml`)
+      AND every model's job (`resources/model_*.job.yml`), one variable for
+      both rather than a separate name per consumer.
 
-      When `oauth_client_id` is set this MUST be the same application id.
-      Lakebase authenticates with an OAuth token and the role Databricks
-      provisions is named after the principal that token belongs to, so
-      connecting as one principal while presenting another's token fails as
-      an ordinary authentication error — which reads as a bad password and
-      sends you looking at the secret. `tests/deploy/test_bundle.py` refuses
-      the mismatch, and `/healthz` reports it at run time.
+      When `oauth_client_id` is set this MUST be the same application id for
+      the app. Lakebase authenticates with an OAuth token and the role
+      Databricks provisions is named after the principal that token belongs
+      to, so connecting as one principal while presenting another's token
+      fails as an ordinary authentication error — which reads as a bad
+      password and sends you looking at the secret. `tests/deploy/test_bundle.py`
+      refuses the app/`oauth_client_id` mismatch; a job authenticates as
+      whichever of `job/auth.py::AppCredential`'s sources succeeds (client
+      credentials, a PAT, or the job's own runtime identity), which the bundle
+      cannot check in advance the way it can the app's single fixed identity
+      — a mismatch there surfaces as a Postgres authentication error in the
+      job's own log rather than at deploy time, and is not load-bearing: the
+      job logs it and carries on (`job/lakebase.py`).
 
-      Empty falls back to the warehouse-backed run store.
+      Empty falls back to the warehouse-backed run store for the app, and to
+      no live status reporting for the job.
     default: ""
 
 # The workspace sync is what puts the tree in the workspace;

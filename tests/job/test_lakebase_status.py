@@ -1,46 +1,60 @@
-"""The job reporting its own status to Lakebase.
+"""The job reporting its own status to Lakebase, over a direct Postgres
+connection.
 
 `run_status` used to be maintained only by the app, from messages arriving
 over the socket — which made a fact about the run depend on the observer
 being up. The job knows its own status, so it reports it.
 
-One report writes two rows — `run_status`, the current state, and
-`run_status_history`, the transition log — in one statement. Most of what is
-asserted here is the statement and the parameters the client is actually
-handed, because an edit that drops the history append would otherwise leave
-every other test in this file passing.
+This used to connect over the Database REST API and these tests asserted on
+the JSON body a fake HTTP client received. That endpoint turned out to be a
+PostgREST base, which does not accept raw SQL — the requests here would never
+have landed against a real instance, however carefully the JSON matched.
+`job/lakebase.py` now speaks psycopg directly, so these tests run `REPORT_SQL`
+and `LakebaseStatus` against a REAL PostgreSQL 16 (`pgserver`, the same
+embedded server `tests/app/test_run_store.py` uses) rather than asserting on
+strings alone — the point of the rewrite is a statement that actually
+behaves, and a fake client cannot tell that apart from one that does not.
 
-Nothing here is load-bearing, and that is the other property most of these
-assert: unconfigured, refused or exploding, the run carries on and the durable
-record still says what happened.
+Two layers:
+
+- **`REPORT_SQL`'s own semantics** (fresh run, later transition, a stale one,
+  a redelivered `(run_id, seq)`, a NULL seq, `requested_by` surviving,
+  `COALESCE(NULLIF(...))` filling in an empty model) — run directly against a
+  real schema, with full control over every column. This is the one thing
+  `RunRecord.summary()` cannot exercise on its own: `updated_ts` is always
+  stamped from the wall clock at call time, so it only ever increases from one
+  report to the next — there is no way to construct a stale write through the
+  public API. `tests/app/test_run_store.py::report_as_the_job_would` runs the
+  same statement from the app's side, against the same table, so the two
+  writers' agreement about which direction is backwards is pinned there; this
+  file is about the statement's OWN behaviour in isolation.
+- **`LakebaseStatus`**, the class: report() wiring `RunRecord.summary()`
+  through correctly, counters, and every degrade path — unconfigured, no
+  credential, an unreachable host, a role that cannot authenticate. Nothing
+  here is load-bearing: unconfigured, refused or exploding, the run carries on
+  and `run_events` on the durable path still carries what happened.
 """
 
 from __future__ import annotations
 
+import pathlib
 import re
-from types import SimpleNamespace
+import tempfile
+
+import pytest
 
 from job.auth import AppCredential
-from job.lakebase import LakebaseStatus
+from job.lakebase import REPORT_SQL, LakebaseStatus
 from job.record import RunRecord
 from job.shared.envelope import make_message
 
+pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
 
-class FakeClient:
-    def __init__(self, status_code: int = 200, raises: Exception | None = None) -> None:
-        self.status_code = status_code
-        self.raises = raises
-        self.calls: list[dict] = []
-        self.closed = False
+from server.store import history_schema_sql, schema_sql  # noqa: E402
 
-    async def post(self, url, json=None, headers=None):
-        self.calls.append({"url": url, "json": json, "headers": headers or {}})
-        if self.raises is not None:
-            raise self.raises
-        return SimpleNamespace(status_code=self.status_code, text="server said no")
-
-    async def aclose(self):
-        self.closed = True
+SCHEMA = "dbx_leaning"
+TABLE = f"{SCHEMA}.run_status"
+HISTORY = f"{SCHEMA}.run_status_history"
 
 
 def record_at(
@@ -53,60 +67,346 @@ def record_at(
     return record
 
 
-def sent(client: FakeClient) -> tuple[str, list]:
-    """The one statement and its parameters, as the REST API would get them."""
-    assert len(client.calls) == 1, "one transition is one round trip"
-    body = client.calls[0]["json"]
-    return body["statement"], body["parameters"]
+def base_params(run_id: str = "r1", **overrides) -> dict:
+    params = {
+        "run_id": run_id,
+        "job_run_id": "jr-1",
+        "model": "scenario",
+        "status": "RUNNING",
+        "detail": None,
+        "started_ts": 1_000,
+        "updated_ts": 1_000,
+        "seq": 0,
+        "ts": 1_000,
+    }
+    params.update(overrides)
+    return params
 
 
-async def test_a_model_the_app_left_empty_is_filled_in_rather_than_kept():
-    """The app inserts `model = ''` when it creates the row for a run it hears
-    about before the job reports, and the column is NOT NULL — so a bare
-    COALESCE sees an empty string rather than a NULL, keeps it, and the run
-    carries no model name for the rest of its life. NULLIF is what lets the
-    job's value win over the placeholder."""
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", schema="dbx_leaning", client=client)
+async def report_sql(dsn: str, **params) -> None:
+    """Run `REPORT_SQL` directly, with full control over every column —
+    including `updated_ts`, which `RunRecord.summary()` always stamps from the
+    wall clock and so can never go backwards through the public API. This is
+    what lets the stale-transition test below exist at all.
+    """
+    import psycopg
 
-    assert await reporter.report(record_at("RUNNING")) is True
+    conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    try:
+        await conn.execute(REPORT_SQL.format(schema=SCHEMA), params)
+    finally:
+        await conn.close()
 
-    statement, _ = sent(client)
-    assert "COALESCE(NULLIF(dbx_leaning.run_status.model, ''), EXCLUDED.model)" in statement
+
+async def current_row(dsn: str, run_id: str) -> dict | None:
+    import psycopg
+
+    conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    try:
+        cur = await conn.execute(
+            f"SELECT status, detail, model, job_run_id, requested_by, started_ts, updated_ts "
+            f"FROM {TABLE} WHERE run_id = %s",
+            (run_id,),
+        )
+        row = await cur.fetchone()
+    finally:
+        await conn.close()
+    if row is None:
+        return None
+    names = ("status", "detail", "model", "job_run_id", "requested_by", "started_ts", "updated_ts")
+    return dict(zip(names, row, strict=True))
 
 
-async def test_a_reported_transition_carries_the_records_own_row():
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", schema="dbx_leaning", client=client)
+async def history_rows(dsn: str, run_id: str) -> list[dict]:
+    import psycopg
+
+    conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    try:
+        cur = await conn.execute(
+            f"SELECT seq, status, detail, ts, recorded_by FROM {HISTORY} "
+            f"WHERE run_id = %s ORDER BY id",
+            (run_id,),
+        )
+        rows = await cur.fetchall()
+    finally:
+        await conn.close()
+    names = ("seq", "status", "detail", "ts", "recorded_by")
+    return [dict(zip(names, r, strict=True)) for r in rows]
+
+
+@pytest.fixture(scope="module")
+def postgres():
+    directory = pathlib.Path(tempfile.mkdtemp()) / "pg"
+    server = pgserver.get_server(directory)
+    try:
+        yield server.get_uri()
+    finally:
+        server.cleanup()
+
+
+@pytest.fixture
+async def lakebase_dsn(postgres):
+    """A clean schema for every test. Module-scoped Postgres, function-scoped
+    truncate — standing up embedded Postgres per test is slow, and a run_id
+    left over from a previous test's assertions would leak into the next's.
+    """
+    import psycopg
+
+    conn = await psycopg.AsyncConnection.connect(postgres, autocommit=True)
+    try:
+        await conn.execute(schema_sql(SCHEMA) + history_schema_sql(SCHEMA))
+        await conn.execute(f"TRUNCATE {TABLE}, {HISTORY}")
+    finally:
+        await conn.close()
+    return postgres
+
+
+# --- REPORT_SQL's own semantics, against a real PostgreSQL 16 --------------
+
+
+async def test_a_fresh_run_inserts_both_rows(lakebase_dsn):
+    await report_sql(lakebase_dsn, **base_params(status="QUEUED", seq=None))
+
+    assert (await current_row(lakebase_dsn, "r1"))["status"] == "QUEUED"
+    assert len(await history_rows(lakebase_dsn, "r1")) == 1
+
+
+async def test_a_later_transition_updates_current_state_and_appends_history(lakebase_dsn):
+    await report_sql(
+        lakebase_dsn, **base_params(status="QUEUED", seq=0, ts=1_000, updated_ts=1_000)
+    )
+    await report_sql(
+        lakebase_dsn, **base_params(status="RUNNING", seq=1, ts=2_000, updated_ts=2_000)
+    )
+
+    row = await current_row(lakebase_dsn, "r1")
+    assert row["status"] == "RUNNING" and row["updated_ts"] == 2_000
+    assert [h["status"] for h in await history_rows(lakebase_dsn, "r1")] == ["QUEUED", "RUNNING"]
+
+
+async def test_a_stale_transition_leaves_current_state_untouched_but_still_appends_to_history(
+    lakebase_dsn,
+):
+    """The two tables answer different questions. Current state is what is
+    true, so a stale RUNNING arriving after SUCCEEDED must not move it
+    backwards. History is what was *reported*, and the stale transition
+    having arrived at all is the fact you want when working out why the row
+    looks the way it does.
+    """
+    await report_sql(
+        lakebase_dsn, **base_params(status="RUNNING", seq=0, ts=1_000, updated_ts=1_000)
+    )
+    await report_sql(
+        lakebase_dsn, **base_params(status="SUCCEEDED", seq=1, ts=3_000, updated_ts=3_000)
+    )
+
+    await report_sql(
+        lakebase_dsn, **base_params(status="STALE", seq=2, ts=2_000, updated_ts=2_000)
+    )
+
+    row = await current_row(lakebase_dsn, "r1")
+    assert row["status"] == "SUCCEEDED" and row["updated_ts"] == 3_000, (
+        "the guard must refuse a write carrying an earlier updated_ts"
+    )
+    assert [h["status"] for h in await history_rows(lakebase_dsn, "r1")] == [
+        "RUNNING",
+        "SUCCEEDED",
+        "STALE",
+    ], "the stale write must still be recorded, even though it did not take"
+
+
+async def test_a_redelivered_run_id_and_seq_appends_nothing_the_second_time(lakebase_dsn):
+    """A job that reconnects re-reports; `seq` identifies the message.
+    Without the partial unique index this accumulates a row per retry."""
+    params = base_params(status="RUNNING", seq=5, ts=1_000, updated_ts=1_000)
+    await report_sql(lakebase_dsn, **params)
+    await report_sql(lakebase_dsn, **params)
+
+    assert len(await history_rows(lakebase_dsn, "r1")) == 1
+
+
+async def test_a_different_run_reusing_the_same_seq_is_a_different_message(lakebase_dsn):
+    """Per-run counters mean seq 5 exists once for every run there has ever
+    been — the unique index is on (run_id, seq), not seq alone."""
+    await report_sql(lakebase_dsn, **base_params(run_id="r1", status="RUNNING", seq=5))
+    await report_sql(lakebase_dsn, **base_params(run_id="r2", status="RUNNING", seq=5))
+
+    assert len(await history_rows(lakebase_dsn, "r1")) == 1
+    assert len(await history_rows(lakebase_dsn, "r2")) == 1
+
+
+async def test_a_null_seq_appends_every_time(lakebase_dsn):
+    """A report made before any status message exists has no message identity
+    to dedupe by, and must still be able to append every time."""
+    await report_sql(lakebase_dsn, **base_params(status="X1", seq=None, ts=1_000, updated_ts=1_000))
+    await report_sql(lakebase_dsn, **base_params(status="X2", seq=None, ts=1_001, updated_ts=1_001))
+
+    rows = await history_rows(lakebase_dsn, "r1")
+    assert [r["status"] for r in rows] == ["X1", "X2"]
+    assert all(r["seq"] is None for r in rows)
+
+
+async def test_requested_by_written_by_the_app_survives_the_jobs_upsert(lakebase_dsn):
+    """`requested_by` is the app's column: the job's upsert does not bind it
+    (see `REPORT_SQL`'s own comment), so it must ride through untouched."""
+    import psycopg
+
+    conn = await psycopg.AsyncConnection.connect(lakebase_dsn, autocommit=True)
+    try:
+        await conn.execute(
+            f"INSERT INTO {TABLE} "
+            f"(run_id, job_run_id, model, status, detail, started_ts, updated_ts, requested_by) "
+            f"VALUES ('r1', NULL, '', 'QUEUED', NULL, 500, 500, 'kp')"
+        )
+    finally:
+        await conn.close()
+
+    await report_sql(
+        lakebase_dsn, **base_params(status="RUNNING", seq=0, ts=600, updated_ts=600, started_ts=500)
+    )
+
+    assert (await current_row(lakebase_dsn, "r1"))["requested_by"] == "kp"
+
+
+async def test_coalesce_nullif_fills_in_a_model_the_app_left_empty(lakebase_dsn):
+    """The app inserts `model = ''` when it creates the row for a run it
+    hears about before the job reports, and the column is NOT NULL — so a
+    bare COALESCE would see an empty string, keep it, and the run would carry
+    no model name for the rest of its life."""
+    import psycopg
+
+    conn = await psycopg.AsyncConnection.connect(lakebase_dsn, autocommit=True)
+    try:
+        await conn.execute(
+            f"INSERT INTO {TABLE} "
+            f"(run_id, job_run_id, model, status, detail, started_ts, updated_ts) "
+            f"VALUES ('r1', NULL, '', 'QUEUED', NULL, 500, 500)"
+        )
+    finally:
+        await conn.close()
+
+    params = base_params(
+        status="RUNNING", model="scenario", seq=0, ts=600, updated_ts=600, started_ts=500
+    )
+    await report_sql(lakebase_dsn, **params)
+
+    assert (await current_row(lakebase_dsn, "r1"))["model"] == "scenario"
+
+
+# --- cheap structural checks: no database needed ----------------------------
+
+
+def test_every_named_placeholder_is_a_key_record_summary_produces():
+    """A typo in a placeholder name only fails at execution time against a
+    real database. This catches it at collection time instead."""
+    names = set(re.findall(r"%\((\w+)\)s", REPORT_SQL))
+    produced = set(RunRecord("r", model="m").summary(requested_by="x"))
+    assert names <= produced, names - produced
+
+
+def test_run_id_status_and_detail_are_each_reused_between_the_two_inserts():
+    """The whole reason for named over positional placeholders: the upsert
+    and the history insert must bind these three from the SAME named
+    parameter, so the two rows can never end up describing different
+    transitions. Positional `$1..$9` needed a comment to say so; a named
+    placeholder says it by using the same name twice."""
+    for name in ("run_id", "status", "detail"):
+        assert REPORT_SQL.count(f"%({name})s") == 2, name
+
+
+# --- LakebaseStatus, wiring RunRecord.summary() through ---------------------
+
+
+async def test_a_reported_transition_lands_in_both_tables(lakebase_dsn):
+    reporter = LakebaseStatus(lakebase_dsn, schema=SCHEMA)
 
     assert await reporter.report(record_at("RUNNING", "run started")) is True
 
     assert reporter.writes == 1 and reporter.failures == 0
-    statement, parameters = sent(client)
-    # `run_status` is a prefix of `run_status_history`, so the current-state
-    # insert has to be matched with the newline that follows its table name —
-    # without it this passes on the history insert alone, and the assertion
-    # stops being able to fail the way it exists to fail.
-    assert "INSERT INTO dbx_leaning.run_status\n" in statement
-    # Positional, and the order is the contract with $1..$9 in the statement.
-    assert parameters[:5] == ["run-1", "jr-7", "scenario", "RUNNING", "run started"]
+    row = await current_row(lakebase_dsn, "run-1")
+    assert row["status"] == "RUNNING" and row["detail"] == "run started"
+    assert row["job_run_id"] == "jr-7" and row["model"] == "scenario"
+    assert len(await history_rows(lakebase_dsn, "run-1")) == 1
 
 
-async def test_a_rejected_write_is_counted_and_not_raised():
-    client = FakeClient(500)
-    reporter = LakebaseStatus("https://db/statements", client=client)
+async def test_a_report_before_any_status_message_binds_a_null_seq(lakebase_dsn):
+    """A job that died before emitting anything still reports, and NULL seq
+    is what keeps that row outside the history table's partial unique
+    index — there is no message identity to dedupe it by."""
+    reporter = LakebaseStatus(lakebase_dsn, schema=SCHEMA)
 
-    assert await reporter.report(record_at("SUCCEEDED")) is False
+    assert await reporter.report(RunRecord("run-1", model="scenario")) is True
 
-    assert reporter.writes == 0 and reporter.failures == 1
-    assert "HTTP 500" in (reporter.last_error or "")
+    row = await current_row(lakebase_dsn, "run-1")
+    assert row["status"] == "FAILED", "nothing arrived is not a success"
+    rows = await history_rows(lakebase_dsn, "run-1")
+    assert len(rows) == 1 and rows[0]["seq"] is None
 
 
-async def test_a_client_that_explodes_is_counted_and_not_raised():
+async def test_both_tables_are_qualified_with_the_configured_schema(postgres):
+    """Every statement qualifies its table rather than trusting a
+    search_path: a session that had reverted to `public` would find a
+    different, empty table instead of failing."""
+    import psycopg
+
+    other = "other_schema"
+    conn = await psycopg.AsyncConnection.connect(postgres, autocommit=True)
+    try:
+        await conn.execute(schema_sql(other) + history_schema_sql(other))
+        await conn.execute(f"TRUNCATE {other}.run_status, {other}.run_status_history")
+    finally:
+        await conn.close()
+
+    reporter = LakebaseStatus(postgres, schema=other)
+    assert await reporter.report(record_at("RUNNING")) is True
+
+    conn = await psycopg.AsyncConnection.connect(postgres, autocommit=True)
+    try:
+        cur = await conn.execute(f"SELECT status FROM {other}.run_status WHERE run_id = 'run-1'")
+        row = await cur.fetchone()
+    finally:
+        await conn.close()
+    assert row is not None and row[0] == "RUNNING"
+
+
+async def test_role_overrides_who_the_connection_authenticates_as(lakebase_dsn):
+    """`role` is passed as psycopg's `user=` override — proven here by making
+    it wrong: a role that does not exist must fail authentication rather than
+    silently falling back to whatever the DSN's own authority carries."""
+    reporter = LakebaseStatus(lakebase_dsn, schema=SCHEMA, role="a-role-that-does-not-exist")
+
+    assert await reporter.report(record_at("RUNNING")) is False
+
+    assert reporter.failures == 1
+    assert "does not exist" in (reporter.last_error or "").lower()
+
+
+# --- degrade paths: never raises, nothing here is load-bearing -------------
+
+
+async def test_an_unconfigured_reporter_says_nothing_to_nobody():
+    """No `DBX_LAKEBASE_DSN` is a normal deploy, not a broken one."""
+    attempted = []
+
+    async def connect(password):
+        attempted.append(password)
+        raise AssertionError("must not be called")
+
+    reporter = LakebaseStatus("", connect=connect)
+
+    assert reporter.available is False
+    assert await reporter.report(record_at("RUNNING")) is False
+    assert attempted == [] and reporter.failures == 0
+
+
+async def test_a_connection_failure_is_counted_and_not_raised():
     """Unreachable Lakebase is a live-path problem. `run_events` and the
     end-of-run Delta write still carry the outcome."""
-    client = FakeClient(raises=ConnectionError("no route to host"))
-    reporter = LakebaseStatus("https://db/statements", client=client)
+
+    async def connect(password):
+        raise ConnectionError("no route to host")
+
+    reporter = LakebaseStatus("postgresql://unreachable/db", connect=connect)
 
     assert await reporter.report(record_at("FAILED")) is False
 
@@ -114,152 +414,94 @@ async def test_a_client_that_explodes_is_counted_and_not_raised():
     assert "ConnectionError" in (reporter.last_error or "")
 
 
-async def test_an_unconfigured_reporter_says_nothing_to_nobody():
-    """No `DBX_LAKEBASE_REST_URL` is a normal deploy, not a broken one."""
-    client = FakeClient()
-    reporter = LakebaseStatus("", client=client)
+async def test_a_credential_with_no_token_skips_without_connecting():
+    """`AppCredential.token()` returning None means this job has no
+    Databricks identity to offer. Lakebase's instance runs
+    `enable_pg_native_login: false`, so a token IS the password and there is
+    no connection to attempt without one — this is that degrade, kept
+    meaningful rather than papered over with a doomed connection attempt.
+    """
+    attempted = []
 
-    assert reporter.available is False
-    assert await reporter.report(record_at("RUNNING")) is False
-    assert client.calls == [] and reporter.failures == 0
+    async def connect(password):
+        attempted.append(password)
+        raise AssertionError("must not attempt a connection with no token")
 
-
-async def test_the_databricks_token_travels_on_the_request():
-    """The Database REST API is behind the same OAuth the Apps ingress wants —
-    see job/auth.py for why the app's own shared secret is a different header."""
-    client = FakeClient(200)
     reporter = LakebaseStatus(
-        "https://db/statements",
+        "postgresql://lakebase/db",
+        credential=AppCredential(env={}),  # no auth-related env vars at all
+        connect=connect,
+    )
+
+    assert await reporter.report(record_at("RUNNING")) is False
+
+    assert attempted == []
+    assert reporter.failures == 1
+    assert "credential" in (reporter.last_error or "").lower()
+
+
+async def test_the_credentials_token_is_used_as_the_connection_password():
+    """The Databricks OAuth token IS the password Lakebase accepts —
+    `enable_pg_native_login: false` means there is no other kind."""
+    seen: list[str | None] = []
+
+    class FakeConn:
+        async def execute(self, *_a, **_k):
+            return None
+
+        async def close(self):
+            pass
+
+    async def connect(password):
+        seen.append(password)
+        return FakeConn()
+
+    reporter = LakebaseStatus(
+        "postgresql://lakebase/db",
         credential=AppCredential(env={"DBX_APP_OAUTH_TOKEN": "oauth-token"}),
-        client=client,
+        connect=connect,
+    )
+
+    assert await reporter.report(record_at("RUNNING")) is True
+    assert seen == ["oauth-token"]
+
+
+async def test_the_password_is_resolved_on_every_connection_not_once():
+    """Mirrors `PostgresRunStore`'s own equivalent test
+    (`tests/app/test_run_store.py`): a connection is opened and closed per
+    report rather than pooled, so a token that rotates mid-run is picked up
+    on the very next report rather than staying stale for the rest of it."""
+    tokens = iter(["tok-1", "tok-2"])
+    seen: list[str | None] = []
+
+    class FakeConn:
+        async def execute(self, *_a, **_k):
+            return None
+
+        async def close(self):
+            pass
+
+    async def connect(password):
+        seen.append(password)
+        return FakeConn()
+
+    class RotatingCredential:
+        async def token(self):
+            return next(tokens)
+
+    reporter = LakebaseStatus(
+        "postgresql://lakebase/db", credential=RotatingCredential(), connect=connect
     )
 
     await reporter.report(record_at("RUNNING"))
+    await reporter.report(record_at("SUCCEEDED"))
 
-    assert client.calls[0]["headers"]["Authorization"] == "Bearer oauth-token"
-
-
-async def test_an_injected_client_is_not_closed_out_from_under_its_owner():
-    client = FakeClient()
-    reporter = LakebaseStatus("https://db/statements", client=client)
-
-    await reporter.close()
-
-    assert client.closed is False
+    assert seen == ["tok-1", "tok-2"]
 
 
-# --- the history row, appended alongside the current one -------------------
+async def test_close_is_a_harmless_no_op():
+    """No persistent connection to release — every report opens and closes
+    its own (`_conn`), so there is nothing for `close()` to do."""
+    reporter = LakebaseStatus("postgresql://lakebase/db")
 
-
-async def test_one_report_writes_the_current_row_and_its_history_in_one_statement():
-    """One round trip, one transaction. Two requests would be two failure
-    modes, and the one that fails second leaves history holding a transition
-    the current-state row never got — a worse record than either table alone.
-    """
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", schema="dbx_leaning", client=client)
-
-    await reporter.report(record_at("RUNNING", "run started"))
-
-    statement, _ = sent(client)
-    assert statement.startswith("WITH upsert_current AS (")
-    assert "INSERT INTO dbx_leaning.run_status\n" in statement
-    assert "INSERT INTO dbx_leaning.run_status_history" in statement
-
-
-async def test_the_history_row_carries_the_status_messages_own_seq_and_ts():
-    """The history table dedupes on (run_id, seq). Bind anything but the
-    message's own seq — a counter of this reporter's writes, say — and a
-    report redelivered after a retry appends a second row for one transition.
-    """
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", client=client)
-
-    await reporter.report(record_at("SUCCEEDED", "done", seq=12, ts=1_700))
-
-    statement, parameters = sent(client)
-    assert parameters[7] == 12 and parameters[8] == 1_700
-    # $8/$9 are the history row's alone; run_id, status and detail it shares
-    # with the current row rather than repeating, so the two rows cannot end
-    # up describing different transitions.
-    assert "VALUES ($1, $8, $4, $5, $9, 'job')" in statement
-
-
-async def test_the_out_of_order_guard_still_protects_the_current_row():
-    """The app writes this row too and Databricks can deliver a retry out of
-    order; without the guard a late RUNNING overwrites a SUCCEEDED that has
-    already landed."""
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", client=client)
-
-    await reporter.report(record_at("RUNNING"))
-
-    statement, _ = sent(client)
-    assert "WHERE dbx_leaning.run_status.updated_ts <= EXCLUDED.updated_ts" in statement
-
-
-async def test_the_history_append_sits_outside_the_guarded_upsert():
-    """It looks like a bug and is the point: when the guard makes the upsert a
-    no-op, the history row still appends. Current state is what is true, so a
-    stale transition must not move it backwards; history is what was
-    *reported*, and that the stale one arrived is the fact you want later.
-
-    Structural, because it is the placement that does it: the guard has to
-    close with the CTE, before the INSERT that appends.
-    """
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", client=client)
-
-    await reporter.report(record_at("RUNNING"))
-
-    statement, _ = sent(client)
-    guard = statement.index("WHERE dbx_leaning.run_status.updated_ts <= EXCLUDED.updated_ts")
-    append = statement.index("INSERT INTO dbx_leaning.run_status_history")
-    assert guard < append
-    assert ")\nINSERT INTO dbx_leaning.run_status_history" in statement
-    # And a retried report of the same message is one history row, not two.
-    assert "ON CONFLICT DO NOTHING" in statement
-
-
-async def test_a_report_before_any_status_message_binds_a_null_seq():
-    """A job that died before emitting anything still reports, and NULL seq is
-    what keeps that row outside the history table's partial unique index —
-    there is no message identity to dedupe it by."""
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", client=client)
-
-    assert await reporter.report(RunRecord("run-1", model="scenario")) is True
-
-    _, parameters = sent(client)
-    assert parameters[3] == "FAILED", "nothing arrived is not a success"
-    assert parameters[7] is None
-    assert parameters[8] == parameters[6], "no message clock, so the report's own"
-
-
-async def test_every_placeholder_in_the_statement_is_bound_and_no_parameter_is_spare():
-    """Binding is positional: a parameter inserted anywhere but the end
-    rebinds every one after it, silently, and Postgres would read a detail as
-    a started_ts. `tests/job/test_runner.py` reads the status at index 3."""
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", client=client)
-
-    await reporter.report(record_at("RUNNING"))
-
-    statement, parameters = sent(client)
-    assert len(parameters) == 9
-    assert {int(n) for n in re.findall(r"\$(\d+)", statement)} == set(range(1, 10))
-
-
-async def test_both_tables_are_qualified_with_the_configured_schema():
-    """Every statement qualifies its table rather than trusting a search_path:
-    this posts one request per transition, and a session that had reverted to
-    `public` would find a different, empty table instead of failing."""
-    client = FakeClient(200)
-    reporter = LakebaseStatus("https://db/statements", schema="other_schema", client=client)
-
-    await reporter.report(record_at("RUNNING"))
-
-    statement, _ = sent(client)
-    assert "other_schema.run_status\n" in statement
-    assert "other_schema.run_status_history" in statement
-    assert "dbx_leaning" not in statement and "{schema}" not in statement
+    await reporter.close()  # must not raise

@@ -185,10 +185,23 @@ a run triggered at 3am with the app down sat at whatever the app last saw
 until startup reconciliation noticed. The job knows its own status, so the job
 reports it (`job/lakebase.py`).
 
-Over the Database REST API rather than a Postgres driver, because a driver in
-this process would be paid for by all ten model environments — one job per
-model, each with its own dependency list — and `httpx` is already present for
-the OAuth exchange in `job/auth.py`.
+With psycopg, straight to Postgres. This was the Database REST API first, and
+the reasoning was sound: a Postgres driver in this process is paid for by all
+ten model environments — one job per model, each with its own dependency list
+— while `httpx` was already present for the OAuth exchange in `job/auth.py`.
+
+It does not work. The endpoint a Lakebase instance exposes is a PostgREST base
+(`/api/2.0/workspace/<id>/rest/<database>`), which serves tables and functions
+and will not accept raw SQL at all — so the CTE that keeps the current-state
+upsert and the history append in one transaction had nowhere to go. Reshaping
+around PostgREST would have meant either two calls that can drift apart, or
+moving the statement into a database function and calling it by RPC.
+
+So the driver is the cost of having this path at all: `psycopg[binary]`, about
+5 MB per model environment. What it buys back is that both writers on that row
+now speak the same dialect to the same database, and the statement is exercised
+by the same embedded PostgreSQL the app's store tests use rather than asserted
+against a fake HTTP body.
 
 The split is by concern, not by row. The **app** owns the slot claim: the
 count-and-claim transaction that makes the 5-concurrent-task ceiling real
@@ -495,11 +508,17 @@ arrive promptly or in held-and-released batches. `DBX_WS_PING_S` (20s) and
 `DBX_SSE_KEEPALIVE_S` (10s) are conservative guesses from community reports
 until those land. `docs/spike-results.md` has the table to fill in.
 
-One more thing is unverified, and it is narrower than it was. The Database
-REST API's request *envelope* in `job/lakebase.py` has never been sent to a
-live workspace — see "Who writes `run_status`" above; the `run_status` upsert
-and the `run_status_history` append both travel over it, so one real request
-settles both. What is no longer unverified is the statement inside it:
+One thing is unverified, and it is no longer the shape of the request. The job
+has never held a Databricks OAuth token on a real workspace — and it needs one
+twice over: Lakebase runs `enable_pg_native_login: false`, so the token IS the
+Postgres password, and the Apps proxy refuses the WebSocket handshake without
+one. Nothing in `resources/model_*.job.yml` passes a credential, and
+`AppCredential`'s `dbutils` route uses a classic-runtime gateway API that
+serverless does not have. One credential settles both paths; until it exists
+neither can be exercised. `job/auth.py` now logs every source that declined and
+which auth variables the runtime actually offers, so one run answers it.
+
+What is no longer unverified is the statement:
 `tests/app/test_run_store.py` imports `REPORT_SQL` rather than retyping it and
 executes it against a real PostgreSQL 16, over the `run_status_history` DDL
 this repo ships, against the same table the app's own `set_status` writes. So

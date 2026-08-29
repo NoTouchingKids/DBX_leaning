@@ -1,4 +1,4 @@
-"""Reporting the run's status to Lakebase, over the Database REST API.
+"""Reporting the run's status to Lakebase, over a direct Postgres connection.
 
 **Why the job writes this at all.** `run_status` is the record of truth for
 "what is this run doing", and until now only the app maintained it — from
@@ -17,10 +17,25 @@ creation at trigger time. The job owns the status transitions on that row.
 One writer per concern, and the UPSERT's `updated_ts` guard means an
 out-of-order write cannot move the row backwards even so.
 
-**REST rather than psycopg**, because a Postgres driver in this process
-would be paid for by all ten model environments (`CLAUDE.md`: one job per
-model, each with its own dependency list). `httpx` is already here for the
-OAuth exchange in `job/auth.py`.
+**psycopg, not the Database REST API — this changed once, for real.** The
+original design here posted `{"statement": ..., "parameters": [...]}` to a
+Database REST API endpoint, on the reasoning that a Postgres driver in this
+process would be paid for by all ten model environments (one job per model,
+each with its own dependency list — `CLAUDE.md`) while `httpx` was already
+here for the OAuth exchange in `job/auth.py`. That reasoning was sound and
+the conclusion was wrong: the URL Lakebase actually hands out is a PostgREST
+base (`/api/2.0/workspace/<id>/rest/<database>`), which does not accept raw
+SQL at all. There was no shape of request that would have made the REST
+version work — this was not a tuning problem, it was the wrong protocol.
+`app/server/store.py::PostgresRunStore` already had the answer: psycopg 3,
+connecting directly, with the password resolved fresh per connection because
+Lakebase's instance runs `enable_pg_native_login: false` and accepts nothing
+else. `_conn` below mirrors that method rather than inventing a second
+dialect for one database. The dependency cost is real and is paid by every
+model environment — `psycopg[binary]` is now in the `job` extra in
+`pyproject.toml`, next to the comment recording why — but it buys a
+connection that actually reaches the database, which the REST version never
+did.
 
 **Two rows per report, one statement.** `run_status` holds current state, one
 row per run; `run_status_history` holds every transition that was reported,
@@ -29,11 +44,19 @@ transaction — history holding a transition the current-state row never got
 would be a worse record than either table alone — and so a path that runs on
 the way into and out of every run costs one round trip, not two.
 
-**Nothing here is load-bearing.** Unconfigured, unreachable, refused — all of
-them log and carry on. The durable record of a status transition is the
-`run_events` row the harness writes for every status message (`shared/tables.py`
-routes it there); this is the live, point-lookup copy that the app and a
-browser read. Losing it costs freshness, not the record.
+**Named placeholders, not positional.** The statement reuses `run_id`,
+`status` and `detail` between the upsert and the history insert on purpose,
+so the two rows cannot end up describing different transitions — see the
+comment on `REPORT_SQL`. Positional `%s` cannot express "the same parameter,
+twice"; psycopg's `%(name)s` form can, directly off `RunRecord.summary()`'s
+own keys, with no positional re-mapping to keep in step with the SQL text.
+
+**Nothing here is load-bearing.** Unconfigured, no credential, unreachable,
+refused — all of them log and carry on. The durable record of a status
+transition is the `run_events` row the harness writes for every status
+message (`shared/tables.py` routes it there); this is the live, point-lookup
+copy that the app and a browser read. Losing it costs freshness, not the
+record.
 """
 
 from __future__ import annotations
@@ -84,11 +107,23 @@ __all__ = ["LakebaseStatus", "REPORT_SQL"]
 #:
 #: `recorded_by` is stated rather than left to the column default, so these
 #: rows stay labelled as the job's if the app ever writes this table too.
+#:
+#: **Named placeholders, bound from a dict** (`RunRecord.summary()`, plus
+#: `requested_by` which nothing here binds — see its own docstring). psycopg
+#: only pulls the names this statement actually references out of that dict,
+#: so the extra key costs nothing and does not have to be filtered out before
+#: the call. `%(run_id)s`, `%(status)s` and `%(detail)s` each appear twice —
+#: once in the upsert, once in the history insert — which is what keeps the
+#: two rows from ever disagreeing about the transition they describe; a
+#: positional `$1..$9` statement had to say so in a comment; a named one says
+#: it by using the same name.
 REPORT_SQL = """
 WITH upsert_current AS (
     INSERT INTO {schema}.run_status
         (run_id, job_run_id, model, status, detail, started_ts, updated_ts)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    VALUES
+        (%(run_id)s, %(job_run_id)s, %(model)s, %(status)s, %(detail)s,
+         %(started_ts)s, %(updated_ts)s)
     ON CONFLICT (run_id) DO UPDATE SET
         status      = EXCLUDED.status,
         detail      = EXCLUDED.detail,
@@ -100,80 +135,81 @@ WITH upsert_current AS (
 )
 INSERT INTO {schema}.run_status_history
     (run_id, seq, status, detail, ts, recorded_by)
-VALUES ($1, $8, $4, $5, $9, 'job')
+VALUES (%(run_id)s, %(seq)s, %(status)s, %(detail)s, %(ts)s, 'job')
 ON CONFLICT DO NOTHING
 """.strip()
 
 
 class LakebaseStatus:
-    """One status row kept current, and one history row per report, over HTTP.
+    """One status row kept current, and one history row per report, over a
+    direct Postgres connection.
 
-    ``endpoint`` is the full URL of the Database REST API's statement
-    execution path for the target instance. It is configuration rather than
-    something derived here, because the path is a property of how the
-    instance was provisioned and this process should not have to guess it —
-    see ``DBX_LAKEBASE_REST_URL`` in ``job/config.py``.
+    ``dsn`` is a connection string with no credential in it — host, port,
+    database and ``sslmode=require`` — mirroring
+    ``app/server/store.py::PostgresRunStore``: Lakebase's password is a
+    short-lived Databricks OAuth token, so baking one in here would be stale
+    within the hour. ``role`` is the Postgres role to connect as, kept
+    alongside the DSN rather than folded into it for the same reason the app
+    keeps ``lakebase_user`` beside ``lakebase_dsn`` — see
+    ``DBX_LAKEBASE_DSN`` / ``DBX_LAKEBASE_USER`` in ``job/config.py``.
+
+    A connection is opened and closed per report rather than pooled, the same
+    trade `PostgresRunStore` makes and for the same reason: the volume is a
+    handful of statements per run, and resolving the credential fresh on each
+    connect makes token rotation a non-issue instead of a pool-invalidation
+    problem.
     """
 
     def __init__(
         self,
-        endpoint: str,
+        dsn: str,
         *,
         schema: str = "dbx_leaning",
+        role: str | None = None,
         credential: AppCredential | None = None,
-        timeout_s: float = 10.0,
-        client: Any = None,
+        connect_timeout_s: float = 10.0,
+        connect: Any = None,
     ) -> None:
-        self.endpoint = endpoint.rstrip("/")
+        self.dsn = dsn
         self.schema = schema
+        self.role = role
         self.credential = credential
-        self.timeout_s = timeout_s
-        self._client = client
-        self._owns_client = client is None
+        self.connect_timeout_s = connect_timeout_s
+        self._connect = connect  # injectable for tests
         self.writes = 0
         self.failures = 0
         self.last_error: str | None = None
 
     @property
     def available(self) -> bool:
-        return bool(self.endpoint)
+        return bool(self.dsn)
 
-    async def _http(self) -> Any:
-        if self._client is None:
-            import httpx
-
-            self._client = httpx.AsyncClient(timeout=self.timeout_s)
-        return self._client
-
-    def _body(self, record: RunRecord, summary: dict[str, Any]) -> dict[str, Any]:
-        """The request the REST API is handed.
-
-        Isolated in one method on purpose: it is the only part of this file
-        that depends on the Database REST API's exact envelope, so pointing
-        it at a different shape is a change here and nowhere else. That
-        matters more than usual while the envelope is **still unverified
-        against a live workspace**: one real request settles it, and it
-        settles it in one place.
+    async def _conn(self, password: str | None) -> Any:
+        """One connection. ``password`` is whatever `report` resolved —
+        already-fetched, so this never touches `self.credential` itself and
+        stays trivial to fake in tests.
         """
-        return {
-            "statement": REPORT_SQL.format(schema=self.schema),
-            "parameters": [
-                # Positional, and the order is the contract with $1..$9. The
-                # first seven are the current-state row; $8/$9 are the status
-                # message's own seq and ts, which only the history row binds.
-                # It shares $1, $4 and $5 rather than repeating them, so the
-                # two rows cannot disagree about the transition they describe.
-                summary["run_id"],
-                summary["job_run_id"],
-                summary["model"],
-                summary["status"],
-                summary["detail"],
-                summary["started_ts"],
-                summary["updated_ts"],
-                summary["seq"],
-                summary["ts"],
-            ],
+        if self._connect is not None:
+            return await self._connect(password)
+        import psycopg
+
+        params: dict[str, Any] = {
+            "autocommit": True,
+            # libpq's own connect timeout, in seconds: bounds how long a
+            # report can hang reaching a Lakebase instance that is
+            # unreachable rather than merely slow. Distinct from the
+            # statement itself having no timeout — a report is one small
+            # statement and is not worth a second knob.
+            "connect_timeout": max(1, int(self.connect_timeout_s)),
         }
+        if self.role:
+            # A keyword overrides whatever the DSN says, so the DSN never has
+            # to carry a role at all — the same reason `password` below is a
+            # keyword rather than baked into `self.dsn`.
+            params["user"] = self.role
+        if password is not None:
+            params["password"] = password
+        return await psycopg.AsyncConnection.connect(self.dsn, **params)
 
     async def report(self, record: RunRecord, *, requested_by: str | None = None) -> bool:
         """Report the record's current status — both rows. True when it landed.
@@ -184,20 +220,46 @@ class LakebaseStatus:
         if not self.available:
             return False
         summary = record.summary(requested_by=requested_by)
-        headers: dict[str, str] = {}
+
+        password: str | None = None
         if self.credential is not None:
-            token = await self.credential.token()
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
+            password = await self.credential.token()
+            if not password:
+                # Lakebase's instance runs `enable_pg_native_login: false`,
+                # so a token IS the password and there is no connection to
+                # attempt without one. Skip rather than dial Postgres with no
+                # password and let THAT fail: the log then names the real
+                # reason ("no credential") instead of a generic Postgres
+                # authentication error, and a host known in advance not to
+                # answer costs no round trip. `AppCredential.token()`
+                # returning None here is the same "no Databricks identity to
+                # offer" case the WS bus degrades from quietly; this is that
+                # same degrade, kept meaningful rather than papered over with
+                # a doomed connection attempt.
+                self.last_error = "no Databricks credential available for Lakebase"
+                self.failures += 1
+                log.info(
+                    "no Databricks credential for %s -> %s; Lakebase accepts only a "
+                    "short-lived OAuth token as its password, so this report is "
+                    "skipped rather than attempted. the run_events row on the "
+                    "durable path still carries this transition.",
+                    summary["run_id"],
+                    summary["status"],
+                )
+                return False
 
         try:
-            client = await self._http()
-            response = await client.post(
-                self.endpoint, json=self._body(record, summary), headers=headers
-            )
-            ok = 200 <= response.status_code < 300
-            if not ok:
-                self.last_error = f"HTTP {response.status_code} {response.text[:200]}"
+            conn = await self._conn(password)
+            try:
+                # `summary` carries `requested_by` too, which nothing in
+                # REPORT_SQL references — psycopg only pulls the names the
+                # statement actually uses, so passing the whole dict is
+                # correct, not merely convenient. See the comment on
+                # REPORT_SQL.
+                await conn.execute(REPORT_SQL.format(schema=self.schema), summary)
+            finally:
+                await conn.close()
+            ok = True
         except Exception as exc:  # noqa: BLE001 - every failure mode is "log and carry on"
             ok = False
             self.last_error = f"{type(exc).__name__}: {exc}"
@@ -216,9 +278,10 @@ class LakebaseStatus:
         return False
 
     async def close(self) -> None:
-        client, self._client = self._client, None
-        if client is not None and self._owns_client:
-            try:
-                await client.aclose()
-            except Exception:  # noqa: BLE001
-                log.debug("lakebase client close failed", exc_info=True)
+        """No persistent connection to release — every report opens and
+        closes its own (see `_conn`), so this is a no-op. Kept because
+        callers (`job/runner.py`) call it unconditionally at teardown and
+        should not have to know that this implementation has nothing to
+        clean up.
+        """
+        return None

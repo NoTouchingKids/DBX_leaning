@@ -199,6 +199,7 @@ gurobi = [
 ]
 job = [
     { name = "httpx" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "websockets" },
 ]
 mcmc = [
@@ -259,6 +260,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'scenario'", specifier = ">=1.26" },
     { name = "ortools", marker = "extra == 'ortools'", specifier = ">=9.14,<10" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'app'", specifier = ">=3.2" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'job'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "scikit-learn", marker = "extra == 'forecasting'", specifier = ">=1.4" },
     { name = "torch", marker = "extra == 'nn'", specifier = ">=2.4" },

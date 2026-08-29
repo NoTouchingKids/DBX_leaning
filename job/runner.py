@@ -174,14 +174,15 @@ class JobHarness:
     def _build_status_reporter(self) -> LakebaseStatus | None:
         if self._reporter_injected:
             return self._status_reporter
-        if not self.cfg.lakebase_rest_url:
-            log.info("no DBX_LAKEBASE_REST_URL — run_status is not reported live from here")
+        if not self.cfg.lakebase_dsn:
+            log.info("no DBX_LAKEBASE_DSN — run_status is not reported live from here")
             return None
         return LakebaseStatus(
-            self.cfg.lakebase_rest_url,
+            self.cfg.lakebase_dsn,
             schema=self.cfg.lakebase_schema,
+            role=self.cfg.lakebase_user,
             credential=self._credential(),
-            timeout_s=self.cfg.http_timeout_s,
+            connect_timeout_s=self.cfg.lakebase_connect_timeout_s,
         )
 
     def _results_table(self, handle: ModelHandle) -> str:

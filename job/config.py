@@ -71,9 +71,26 @@ class JobConfig:
     #: catalog/schema above.
     results_table: str | None = None
 
-    #: Where run status is reported live, over the Database REST API. Absent
-    #: = no live status reporting; the end-of-run Delta write still lands.
-    lakebase_rest_url: str | None = None
+    #: Where run status is reported live: a Postgres connection string with
+    #: NO credential in it (host, port, database, `sslmode=require`) —
+    #: mirrors the app's `DBX_LAKEBASE_DSN` (`app/server/config.py`) rather
+    #: than inventing a second vocabulary for the same database. Absent = no
+    #: live status reporting; the end-of-run Delta write still lands.
+    #:
+    #: This used to be `DBX_LAKEBASE_REST_URL`, a Database REST API endpoint.
+    #: That never actually worked: the URL Lakebase hands out is a PostgREST
+    #: base, which does not accept raw SQL, so every report would have failed
+    #: — quietly, since nothing here is load-bearing, which is exactly how it
+    #: went unnoticed. See `job/lakebase.py` for the replacement.
+    lakebase_dsn: str | None = None
+    #: The Postgres role to connect as. Kept alongside the DSN rather than
+    #: folded into it, same as the app's `lakebase_user` beside
+    #: `lakebase_dsn`: Lakebase names the role after the principal whose
+    #: OAuth token is presented (`job/auth.py::AppCredential`), so this and
+    #: the credential this job manages to obtain have to agree, and keeping
+    #: them as two values rather than one embedded in a URL is what makes
+    #: that checkable instead of buried in a connection-string parse.
+    lakebase_user: str | None = None
     lakebase_schema: str = "dbx_leaning"
 
     writer: WriterKind = "auto"
@@ -103,7 +120,11 @@ class JobConfig:
     #: the socket. The bound is what stops a wedged socket holding a finished
     #: run open; anything still unsent is durable and BACKFILL-able.
     ws_drain_s: float = 5.0
-    http_timeout_s: float = 10.0
+    #: libpq's own connect timeout for the Lakebase status connection
+    #: (`job/lakebase.py`). Named for what it bounds now, not what it bounded
+    #: when this was an HTTP endpoint (`DBX_HTTP_TIMEOUT_S`, before psycopg
+    #: replaced the Database REST API — see `job/lakebase.py`'s docstring).
+    lakebase_connect_timeout_s: float = 10.0
 
     #: How often the model's blocking call should look at the cancel flag.
     cancel_poll_s: float = 0.5
@@ -141,7 +162,8 @@ class JobConfig:
             catalog=e.get("DBX_CATALOG", "main"),
             schema=e.get("DBX_SCHEMA", "dbx_leaning"),
             results_table=(e.get("DBX_RESULTS_TABLE") or "").strip() or None,
-            lakebase_rest_url=(e.get("DBX_LAKEBASE_REST_URL") or "").strip() or None,
+            lakebase_dsn=(e.get("DBX_LAKEBASE_DSN") or "").strip() or None,
+            lakebase_user=(e.get("DBX_LAKEBASE_USER") or "").strip() or None,
             lakebase_schema=e.get("DBX_LAKEBASE_SCHEMA", "dbx_leaning"),
             writer=e.get("DBX_WRITER", "auto"),
             local_root=e.get("DBX_LOCAL_ROOT", ".delta-local"),
@@ -153,7 +175,7 @@ class JobConfig:
             ws_ping_s=_env_float(e, "DBX_WS_PING_S", 20.0),
             ws_send_batch=_env_int(e, "DBX_WS_SEND_BATCH", 50),
             ws_drain_s=_env_float(e, "DBX_WS_DRAIN_S", 5.0),
-            http_timeout_s=_env_float(e, "DBX_HTTP_TIMEOUT_S", 10.0),
+            lakebase_connect_timeout_s=_env_float(e, "DBX_LAKEBASE_CONNECT_TIMEOUT_S", 10.0),
             cancel_poll_s=_env_float(e, "DBX_CANCEL_POLL_S", 0.5),
         )
 

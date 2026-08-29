@@ -27,6 +27,10 @@ idna==3.19
     #   httpx
 msgpack==1.2.1
     # via dbx-leaning
+psycopg==3.3.4
+    # via dbx-leaning
+psycopg-binary==3.3.4 ; implementation_name != 'pypy'
+    # via psycopg
 pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
@@ -34,6 +38,7 @@ pydantic-core==2.46.4
 typing-extensions==4.16.0
     # via
     #   anyio
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   typing-inspection

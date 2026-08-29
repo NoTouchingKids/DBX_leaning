@@ -6,7 +6,6 @@ import asyncio
 import json
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -357,14 +356,16 @@ async def test_status_transitions_are_reported_live_with_no_socket_at_all(cfg, w
     it from the socket: a run nobody watched still keeps the row current."""
     posted: list[str] = []
 
-    class Client:
-        async def post(self, url, json=None, headers=None):
-            posted.append(json["parameters"][3])
-            return SimpleNamespace(status_code=200, text="")
+    class FakeConn:
+        async def execute(self, statement, params=None):
+            posted.append(params["status"])
 
-        async def aclose(self): ...
+        async def close(self): ...
 
-    reporter = LakebaseStatus("https://db/statements", client=Client())
+    async def connect(password):
+        return FakeConn()
+
+    reporter = LakebaseStatus("postgresql://lakebase/db", connect=connect)
     conf = cfg(app_url=None, model_config={"steps": 1})
 
     outcome = await JobHarness(conf, writer=writer, status_reporter=reporter).run()
@@ -374,13 +375,10 @@ async def test_status_transitions_are_reported_live_with_no_socket_at_all(cfg, w
 
 
 async def test_a_status_report_that_cannot_be_delivered_is_not_the_run(cfg, writer):
-    class Client:
-        async def post(self, url, json=None, headers=None):
-            raise ConnectionError("lakebase unreachable")
+    async def connect(password):
+        raise ConnectionError("lakebase unreachable")
 
-        async def aclose(self): ...
-
-    reporter = LakebaseStatus("https://db/statements", client=Client())
+    reporter = LakebaseStatus("postgresql://lakebase/db", connect=connect)
     conf = cfg(model_config={"steps": 1})
 
     outcome = await JobHarness(conf, writer=writer, status_reporter=reporter).run()

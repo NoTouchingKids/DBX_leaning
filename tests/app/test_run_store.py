@@ -104,32 +104,34 @@ async def report_as_the_job_would(
     and a copy of the statement here would agree with the job right up until
     somebody edited one of them.
 
-    Only the transport differs from production: the job POSTs this to the
-    Database REST API, which takes `$1`-style positional parameters, and
-    psycopg takes `%s`. `$1`, `$4` and `$5` each appear twice — the history
-    row shares them with the current-state row on purpose — so they are
-    rewritten as named placeholders instead of being flattened into a
-    positional tuple whose order would become a second thing to keep in step.
+    The job used to POST this to a Database REST API taking `$1`-style
+    positional parameters, which needed translating to psycopg's `%s` here.
+    That endpoint turned out to be a PostgREST base that does not accept raw
+    SQL at all, so `job/lakebase.py` now speaks psycopg directly and
+    `REPORT_SQL` already uses its named-placeholder syntax natively —
+    `%(run_id)s`, not `$1` — so there is nothing left to translate. `run_id`,
+    `status` and `detail` each appear twice in the statement — the history row
+    shares them with the current-state row on purpose — which a named
+    placeholder expresses by using the same name twice, the same way
+    `job/lakebase.py::LakebaseStatus.report` builds its params dict straight
+    off `RunRecord.summary()`.
     """
-    import re
-
     from job.lakebase import REPORT_SQL
 
-    sql = re.sub(r"\$(\d+)", r"%(p\1)s", REPORT_SQL.format(schema=store._schema))
     params = {
-        "p1": run_id,
-        "p2": job_run_id,
-        "p3": model,
-        "p4": status,
-        "p5": detail,
-        "p6": ts,  # started_ts
-        "p7": ts,  # updated_ts — the guarded column, the message's own clock
-        "p8": seq,
-        "p9": ts,  # the history row's ts
+        "run_id": run_id,
+        "job_run_id": job_run_id,
+        "model": model,
+        "status": status,
+        "detail": detail,
+        "started_ts": ts,
+        "updated_ts": ts,  # the guarded column, the message's own clock
+        "seq": seq,
+        "ts": ts,  # the history row's ts
     }
     conn = await store._conn()
     try:
-        await conn.execute(sql, params)
+        await conn.execute(REPORT_SQL.format(schema=store._schema), params)
     finally:
         await conn.close()
 

@@ -31,6 +31,10 @@ msgpack==1.2.1
     # via dbx-leaning
 narwhals==2.25.0
     # via scikit-learn
+psycopg==3.3.4
+    # via dbx-leaning
+psycopg-binary==3.3.4 ; implementation_name != 'pypy'
+    # via psycopg
 pydantic==2.13.4
     # via dbx-leaning
 pydantic-core==2.46.4
@@ -46,6 +50,7 @@ threadpoolctl==3.6.0
 typing-extensions==4.16.0
     # via
     #   anyio
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   typing-inspection

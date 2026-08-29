@@ -30,6 +30,18 @@ app = [
 job = [
     "websockets>=12",
     "httpx>=0.27",
+    # psycopg, not the Database REST API: `job/lakebase.py` used to POST raw
+    # SQL to a Database REST API endpoint, on the reasoning that a Postgres
+    # driver in this process would be paid for by all ten model environments.
+    # That endpoint turned out to be a PostgREST base, which does not accept
+    # raw SQL at all — no request shape would have made it work, so the
+    # dependency cost below is being paid, not avoided. `psycopg[binary]` now
+    # lands in every model environment's requirements file (`deploy/requirements/`)
+    # because `job` is the harness's own floor, which every model extra sits
+    # on top of. Pinned to the same version the app already carries
+    # (`psycopg[binary]>=3.2` above) so there is one driver and one dialect in
+    # the repo, not two to keep in step.
+    "psycopg[binary]>=3.2",
 ]
 # Spark is THE write path, and it needs no pin because a session already
 # exists on Databricks serverless. There is deliberately no `delta` extra:

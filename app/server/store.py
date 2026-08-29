@@ -563,9 +563,10 @@ class PostgresRunStore:
         reports its own transitions straight to Lakebase (`job/lakebase.py`)
         and is the authority on them, which makes this look like a redundant
         second writer. It is not, and deleting it costs the case it exists
-        for: the job's path is an HTTP POST to the Database REST API, and
-        unconfigured (no `DBX_LAKEBASE_REST_URL`), refused or timed out it
-        logs and carries on — nothing on the job's live path is allowed to be
+        for: the job's path is its own Postgres connection, and unconfigured
+        (no `DBX_LAKEBASE_DSN`), unauthenticated — Lakebase takes a Databricks
+        OAuth token as its password and a job may hold none — or refused, it
+        logs and carries on. Nothing on the job's live path is allowed to be
         load-bearing. When that write is the one that failed the socket is
         usually still up, so the app is holding the status message and is the
         only writer left that can keep `run_status` current. Drop this and the

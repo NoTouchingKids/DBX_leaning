@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -615,14 +614,16 @@ async def test_a_lost_durable_write_is_reported_as_failed_on_every_channel_the_j
 
     posted: list[str] = []
 
-    class Client:
-        async def post(self, url, json=None, headers=None):
-            posted.append(json["parameters"][3])
-            return SimpleNamespace(status_code=200, text="")
+    class FakeConn:
+        async def execute(self, statement, params=None):
+            posted.append(params["status"])
 
-        async def aclose(self) -> None: ...
+        async def close(self) -> None: ...
 
-    reporter = LakebaseStatus("https://db/statements", client=Client())
+    async def connect(password):
+        return FakeConn()
+
+    reporter = LakebaseStatus("postgresql://lakebase/db", connect=connect)
     conf = cfg(model_config={"steps": 2})
 
     outcome = await JobHarness(conf, writer=DeadWriter(), status_reporter=reporter).run()

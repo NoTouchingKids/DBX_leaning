@@ -54,7 +54,7 @@ sources. Design against them; do not build past them speculatively.
 Live path    (job → app):      WebSocket, the only one, both directions
 Live path    (app → client):   SSE, one-way
 Durable path (job → UC):       Delta writer, ALWAYS, in parallel with the live path
-Status path  (job → Lakebase): run_status + history, over the Database REST API
+Status path  (job → Lakebase): run_status + history, psycopg straight to Postgres
 ```
 
 - **Delta is the floor, not a fallback tier.** It runs regardless of whether
@@ -157,17 +157,17 @@ back in a backfill reply, or is read back from Delta. Full spec:
 - **Two writers on that row, one concern each.** The **app** claims the slot —
   the count-and-claim transaction, and the row's creation at trigger time. The
   **job** owns the status transitions — the upsert on `run_status` and the
-  append to `run_status_history` — over the Database REST API
-  (`job/lakebase.py`, `DBX_LAKEBASE_REST_URL`), so `run_status` stays current
-  for a run no socket ever attached to instead of sitting at whatever the app
-  last saw. The job's upsert carries an `updated_ts` guard, so a retry
-  delivered out of order cannot move the row backwards; the app's `set_status`
-  does not, which `docs/architecture.md` records. **The REST request envelope
-  is unverified against a live workspace** — `LakebaseStatus._body()` is the
-  one place it is built, and it needs a single real request to confirm. The
-  statement it carries is not in that position — `tests/app/test_run_store.py`
-  imports `REPORT_SQL` and runs it against a real Postgres — so what is
-  unconfirmed is the HTTP shape around the SQL, not the SQL.
+  append to `run_status_history` — with psycopg straight to Postgres
+  (`job/lakebase.py`, `DBX_LAKEBASE_DSN`), so `run_status` stays current for a
+  run no socket ever attached to instead of sitting at whatever the app last
+  saw. The job's upsert carries an `updated_ts` guard, so a retry delivered
+  out of order cannot move the row backwards; the app's `set_status` does not,
+  which `docs/architecture.md` records. This went over the Database REST API
+  first, to keep a Postgres driver out of ten model environments. It does not
+  work: that endpoint is a PostgREST base and will not take raw SQL, so the
+  driver is the cost of having the path at all — about 5 MB per environment.
+  Both writers now speak the same dialect to the same database, which is worth
+  something on its own.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -339,11 +339,15 @@ Full procedure: `deploy/README.md`.
    its resources. That is not the same as a deployed run being checked, and it
    does not cover the UC DDL, which `deploy/README.md` applies as a separate
    manual step. Still not done: `scripts/probe_sample_data.py` has never been
-   run end to end on a workspace, and there is no CI. Two more, both narrow. The Database REST API's
-   request *envelope* in `job/lakebase.py` — the body `LakebaseStatus._body()`
-   builds — has never been sent to a live workspace; the SQL it carries has
-   been, because `tests/app/test_run_store.py` imports `REPORT_SQL` and runs
-   it against a real PostgreSQL 16 over the `run_status_history` DDL. And
+   run end to end on a workspace, and there is no CI. The job's Lakebase
+   writer is no longer on that list — `tests/job/test_lakebase_status.py`
+   runs `REPORT_SQL` against a real PostgreSQL 16 over the real DDL, including
+   the case that matters most: a stale transition leaves current state alone
+   and still appends to history. What has never been exercised on a workspace
+   is the job holding a Databricks OAuth token at all, which Lakebase requires
+   as its password (`enable_pg_native_login: false`) and which the Apps proxy
+   requires for the WebSocket — one credential, two paths, neither confirmed.
+   And
    nothing writes `run_status_history` with `recorded_by='app'`, so a run's
    history starts at the job's first report and never records `QUEUED`. Do not
    read "built and tested" as "deployed".
