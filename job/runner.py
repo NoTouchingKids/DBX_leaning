@@ -223,12 +223,17 @@ class JobHarness:
             status, detail = await self._drive(handle, emitter)
         finally:
             # Everything below must happen whatever went wrong above.
+            #
+            # The flush thread is stopped FIRST, and the order is load-bearing
+            # twice over. `stop()` joins, and a join blocks this loop — put it
+            # after `_finalise` and that block lands between the terminal
+            # status being queued and `bus.drain()`, which is the worst place
+            # for it. And stopping here leaves `_finalise` as the only thing
+            # touching the sink, so the "unflushed rows means not SUCCEEDED"
+            # decision is made against a buffer nothing else can move.
+            flusher.stop()
             status, detail = await self._finalise(sink, emitter, status, detail)
             await self._report(reporter)
-            # Stopped and joined before the drain. `_finalise` has taken the
-            # flush lock twice by now, so any tick still in flight has already
-            # been waited out through it and this join returns at once.
-            flusher.stop()
             if bus is not None:
                 # Drain FIRST, close second. The other order is what dropped
                 # a fast run's whole live stream, terminal status included.

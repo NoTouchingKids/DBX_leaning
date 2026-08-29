@@ -118,12 +118,12 @@ async def test_a_chunked_model_writes_each_chunk_as_it_goes(run_config, tmp_path
 
 async def test_a_run_cancelled_partway_keeps_what_it_produced(run_config, tmp_path):
     writer = JsonlWriter(tmp_path / "delta")
-    # A panel big enough that the run lasts well beyond the cancel — the
-    # default 48 groups fit in about 70ms, which would race the cancel rather
-    # than test it.
+    # A panel big enough that plenty of the run is still ahead when the first
+    # chunk lands — the default 48 groups all fit in about 70ms, so a cancel
+    # would be racing the model rather than interrupting it.
     panel = [
         {"entity": f"g{g}", "code": f"C{g}", "year": float(1960 + i), "life_expectancy": 50.0 + i}
-        for g in range(4000)
+        for g in range(600)
         for i in range(8)
     ]
     cfg = run_config(
