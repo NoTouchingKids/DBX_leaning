@@ -83,7 +83,8 @@ databricks database create-database-instance dbx-leaning --capacity CU_1
 databricks database get-database-instance dbx-leaning -o json
 
 psql "host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslmode=require" \
-  -f lakebase_ddl/001_run_status.sql
+  -f lakebase_ddl/001_run_status.sql \
+  -f lakebase_ddl/002_run_status_history.sql
 ```
 
 `databricks database` is Public Preview and its flags may move; check
@@ -110,9 +111,9 @@ served a run, since `run_status` is the only table here and `ensure_schema()`
 rebuilds it at startup. No telemetry lives in Postgres; that is all in Delta.
 The DNS name changes, so redeploy with the new `--var="lakebase_host=..."`.
 
-**Nothing here needs a particular version.** `lakebase_ddl/001_run_status.sql`
-uses primary keys, `ON CONFLICT`, advisory locks and a partial index, none of
-which changed between 16 and 18. Rather than assert what a deployment got,
+**Nothing here needs a particular version.** The two files in `lakebase_ddl/`
+use primary keys, `ON CONFLICT`, advisory locks, `BIGSERIAL` and partial
+indexes, none of which changed between 16 and 18. Rather than assert what a deployment got,
 the app reads it: `PostgresRunStore.ensure_schema()` runs `SHOW
 server_version` on the connection it already has open, and `GET /healthz`
 returns it:
@@ -587,10 +588,13 @@ fails; it simply stops being the design in `CLAUDE.md`. `GET /healthz` reports
 which store is live and `app/server/services.py` logs it at startup, which is what
 keeps that from being silent.
 
-Apply `lakebase_ddl/001_run_status.sql` before the first run. The app applies
-it at startup too, but a deploy that cannot reach the instance reports
-`degraded: lakebase` rather than failing, so do not rely on that to tell you
-the schema is there.
+Apply both files in `lakebase_ddl/` before the first run — `001_run_status.sql`
+and `002_run_status_history.sql`. The app applies them at startup too, in one
+statement so the pair is all-or-nothing: applied separately, `run_status` could
+land while the history table did not, leaving an app that is up, healthy, and
+silently dropping every transition the job appends. A deploy that cannot reach
+the instance reports `degraded: lakebase` rather than failing, so do not rely
+on startup to tell you the schema is there.
 
 ### Running as a service principal you granted yourself
 

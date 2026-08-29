@@ -109,7 +109,7 @@ variables:
       `permission denied for schema public` the first time the app applies
       its DDL, and /healthz reports `lakebase` degraded for a reason nobody
       expects. The app creates this schema itself at startup
-      (lakebase_ddl/001_run_status.sql is the same DDL, reviewable).
+      (lakebase_ddl/ carries the same DDL, reviewable).
     default: dbx_leaning
   # There is deliberately NO lakebase_password variable, and there never will
   # be one. An instance created with `enable_pg_native_login: false` — the
