@@ -11,6 +11,7 @@ from server.jobs_api import JobsApi
 from server.reconcile import reconcile_once
 from server.repository import RunRepository
 from server.sql import SqlClient
+from server.store import StatusTransition
 from shared.envelope import RunStatus
 from shared.tables import TableSet
 
@@ -115,17 +116,240 @@ class MemoryStore:
     Reconciliation used to require a `RunRepository`, which requires the SQL
     warehouse. `run_status` now lives in Postgres, so this is the shape of a
     real deploy, not a test convenience.
+
+    No `history` method, deliberately: that is what `WarehouseRunStore` looks
+    like, and reconciliation has to work against it.
     """
 
     def __init__(self, rows: list[dict]):
         self.rows = rows
         self.set: list[tuple[str, RunStatus, str | None]] = []
+        #: The `ts` each correction was written with, kept apart from `set` so
+        #: the assertions above it stay three-tuples.
+        self.stamps: list[int | None] = []
 
     async def non_terminal(self):
         return [SimpleNamespace(as_dict=lambda r=r: r) for r in self.rows]
 
-    async def set_status(self, run_id, status, detail=None):
+    async def set_status(self, run_id, status, detail=None, ts=None):
         self.set.append((run_id, status, detail))
+        self.stamps.append(ts)
+
+
+class StoreWithHistory(MemoryStore):
+    """A store that also has `run_status_history` — i.e. Lakebase, configured.
+
+    `history` is deliberately not on the `RunStore` Protocol (see
+    `store.py::PostgresRunStore.history`), so reconciliation feature-detects it
+    on whatever store it was handed. Having one and not having one is therefore
+    two classes here, exactly as it is two stores in the app.
+    """
+
+    def __init__(self, rows: list[dict], transitions: list, fail: bool = False):
+        super().__init__(rows)
+        self.transitions = transitions
+        self.fail = fail
+        self.reads: list[str] = []
+
+    async def history(self, run_id, *, limit=500):
+        self.reads.append(run_id)
+        if self.fail:
+            raise RuntimeError("lakebase unreachable")
+        # Sorted here rather than trusting the order the test wrote them in:
+        # the real one returns oldest first by the transition's own `ts`,
+        # tie-broken by insertion order, and a fake that returned list order
+        # would let a test assert behaviour the real store cannot produce.
+        rows = [t for t in self.transitions if t.run_id == run_id]
+        return sorted(rows, key=lambda t: (t.ts, t.id))[-limit:]
+
+
+def transition(run_id: str, status: str, ts: int, seq: int) -> StatusTransition:
+    return StatusTransition(run_id=run_id, status=status, ts=ts, seq=seq, id=seq)
+
+
+async def test_the_transition_history_answers_before_the_warehouse_is_woken():
+    """Lakebase holds the same transitions `run_events` does, and reading it
+    costs no warehouse uptime — which is the cost this platform is built
+    around, uptime and not statement count.
+
+    The two sources are given deliberately different answers, so this asserts
+    which one won rather than merely that something did.
+    """
+    repo, sql = repo_for(
+        {"ORDER BY seq DESC": [{"status": "FAILED", "detail": "x", "seq": 9, "ts": 1}]}
+    )
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}],
+        [transition("r1", "RUNNING", 1, 0), transition("r1", "SUCCEEDED", 2, 1)],
+    )
+
+    report = await reconcile_once(repo, None, store)
+
+    assert report.corrected == [("r1", "SUCCEEDED")]
+    assert store.reads == ["r1"]
+    assert sql.count("ORDER BY seq DESC") == 0, (
+        "the history answered, so nothing should have woken the SQL warehouse"
+    )
+    assert store.set[0][2] == "reconciled from run_status_history"
+
+
+async def test_a_transition_recorded_after_a_terminal_one_does_not_hide_it():
+    """The history is append-only and keeps what was *reported*, including the
+    reports the current-state row's guard refused as stale — so a RUNNING can
+    be appended after a SUCCEEDED.
+
+    It does not confuse this read, and the reason is the ordering: the rows
+    come back by the transition's OWN `ts`, not by when they were recorded, so
+    a redelivered RUNNING sorts back to where it happened.
+    """
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}],
+        [
+            transition("r1", "RUNNING", 1, 0),
+            transition("r1", "SUCCEEDED", 3, 2),
+            transition("r1", "RUNNING", 2, 1),  # redelivered late, appended anyway
+        ],
+    )
+
+    report = await reconcile_once(None, None, store)
+
+    assert report.corrected == [("r1", "SUCCEEDED")]
+
+
+async def test_a_retried_task_running_again_is_not_read_as_the_failure_before_it():
+    """Why this takes the newest transition rather than the newest TERMINAL
+    one anywhere in the log.
+
+    A run can legitimately go terminal and then non-terminal again: Databricks
+    retries a failed task and hands the retried attempt the same `run_id`, so
+    FAILED is followed by a fresh RUNNING. Resolving that as FAILED would mark
+    a live run finished and hand back one of the account's five task slots
+    while it is still being used — worse than the alternative, which is simply
+    to let the sources behind this one answer.
+    """
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}],
+        [
+            transition("r1", "RUNNING", 1, 0),
+            transition("r1", "FAILED", 2, 1),
+            transition("r1", "RUNNING", 3, 2),  # attempt two
+        ],
+    )
+    jobs = JobsApi("https://x", "t", client=FakeHttp({"status": {"state": "RUNNING"}}))
+
+    report = await reconcile_once(None, jobs, store)
+
+    assert report.still_running == ["r1"] and report.corrected == []
+    assert store.set == []
+
+
+async def test_the_warehouse_is_still_read_when_the_history_has_no_ending():
+    """The history is the first source, not the only one. A job whose REST
+    report never reached Lakebase still wrote `run_events` on the durable
+    path, and that read is what the warehouse wake-up buys."""
+    repo, sql = repo_for(
+        {"ORDER BY seq DESC": [{"status": "SUCCEEDED", "detail": "done", "seq": 12, "ts": 1}]}
+    )
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}],
+        [transition("r1", "RUNNING", 1, 0)],
+    )
+
+    report = await reconcile_once(repo, None, store)
+
+    assert report.corrected == [("r1", "SUCCEEDED")]
+    assert store.set[0][2] == "reconciled from run_events"
+    assert sql.count("ORDER BY seq DESC") == 1
+
+
+async def test_a_run_with_no_history_row_at_all_still_reconciles():
+    """A run triggered before this table existed, or a job that died before
+    its first report, has an empty history and no `run_events` either. The
+    Jobs API is the source of last resort and must still be reached."""
+    store = StoreWithHistory([{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}], [])
+    http = FakeHttp({"status": {"state": "TERMINATED", "termination_details": {"code": "FAILED"}}})
+
+    report = await reconcile_once(None, JobsApi("https://x", "t", client=http), store)
+
+    assert store.reads == ["r1"], "an empty history is not a reason to skip the read"
+    assert report.corrected == [("r1", "FAILED")]
+
+
+async def test_a_history_read_that_fails_falls_through_instead_of_stranding_the_run():
+    """The cheap source failing is not the end of the search.
+
+    Treating it as fatal for the run would turn a Lakebase hiccup into a task
+    slot held against the account's five until someone edits the table by
+    hand — while the two sources behind it had the answer all along.
+    """
+    repo, sql = repo_for(
+        {"ORDER BY seq DESC": [{"status": "SUCCEEDED", "detail": "done", "seq": 4, "ts": 1}]}
+    )
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}], [], fail=True
+    )
+
+    report = await reconcile_once(repo, None, store)
+
+    assert report.corrected == [("r1", "SUCCEEDED")]
+    assert report.errors == [], "a recovered read is not a failure to resolve"
+
+
+async def test_an_unrecognised_status_in_the_history_is_not_read_as_an_ending():
+    """The history keeps what was reported verbatim — `StatusTransition` does
+    not map an unknown status onto FAILED the way `RunRecord` does, precisely
+    so a data problem stays visible. It must not be resolved as a run's ending
+    either: the sources behind it get their turn."""
+    repo, sql = repo_for(
+        {"ORDER BY seq DESC": [{"status": "CANCELLED", "detail": "by hand", "seq": 2, "ts": 1}]}
+    )
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}],
+        [transition("r1", "RUNNING", 1, 0), transition("r1", "WEDGED", 2, 1)],
+    )
+
+    report = await reconcile_once(repo, None, store)
+
+    assert report.corrected == [("r1", "CANCELLED")]
+    assert sql.count("ORDER BY seq DESC") == 1
+
+
+async def test_the_history_is_only_asked_about_the_run_being_reconciled():
+    """One read per stale run, scoped to it. A reconciliation that pulled the
+    whole table would be reading thousands of rows to answer a question about
+    the handful of runs that were live when the app went down."""
+    store = StoreWithHistory(
+        [
+            {"run_id": "r1", "job_run_id": "1", "status": "RUNNING"},
+            {"run_id": "r2", "job_run_id": "2", "status": "QUEUED"},
+        ],
+        [transition("r1", "SUCCEEDED", 2, 1), transition("r2", "FAILED", 2, 1)],
+    )
+
+    report = await reconcile_once(None, None, store)
+
+    assert store.reads == ["r1", "r2"]
+    assert report.corrected == [("r1", "SUCCEEDED"), ("r2", "FAILED")]
+
+
+async def test_a_correction_is_written_without_a_message_timestamp():
+    """Reconciliation must not stamp its write with a timestamp that could be
+    refused.
+
+    `PostgresRunStore.set_status` guards a write that carries a `ts` against
+    the row's own — and the timestamps in play here come from another
+    machine's clock, so a correction handed one could be rejected as stale.
+    The run would then keep one of the account's five task slots, and nothing
+    would try again: this pass is startup-only, deliberately.
+    """
+    store = StoreWithHistory(
+        [{"run_id": "r1", "job_run_id": "99", "status": "RUNNING"}],
+        [transition("r1", "SUCCEEDED", 2, 1)],
+    )
+
+    await reconcile_once(None, None, store)
+
+    assert store.stamps == [None]
 
 
 async def test_reconciliation_works_with_no_warehouse_at_all():

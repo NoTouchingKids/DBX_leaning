@@ -596,7 +596,7 @@ class ServiceHub:
             # Bound above, not re-read here: the None-check happens now, the
             # await happens later, and the attribute could have changed.
             try:
-                await store.set_status(run_id, msg.status, detail=msg.detail)
+                await store.set_status(run_id, msg.status, detail=msg.detail, ts=msg.ts)
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(

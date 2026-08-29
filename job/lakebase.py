@@ -77,6 +77,11 @@ __all__ = ["LakebaseStatus", "REPORT_SQL"]
 #: before any status message exists binds a NULL `seq`, falls outside the
 #: index and always appends — there is no message identity to dedupe it by.
 #:
+#: `NULLIF` on `model`, not a bare `COALESCE`. The column is NOT NULL and the
+#: app inserts `''` when it creates the row for a run it hears about before
+#: the job reports — so a plain COALESCE sees an empty string rather than a
+#: NULL, keeps it, and the run carries `model=''` for the rest of its life.
+#:
 #: `recorded_by` is stated rather than left to the column default, so these
 #: rows stay labelled as the job's if the app ever writes this table too.
 REPORT_SQL = """
@@ -89,7 +94,7 @@ WITH upsert_current AS (
         detail      = EXCLUDED.detail,
         updated_ts  = EXCLUDED.updated_ts,
         job_run_id  = COALESCE(EXCLUDED.job_run_id, {schema}.run_status.job_run_id),
-        model       = COALESCE({schema}.run_status.model, EXCLUDED.model),
+        model       = COALESCE(NULLIF({schema}.run_status.model, ''), EXCLUDED.model),
         started_ts  = COALESCE({schema}.run_status.started_ts, EXCLUDED.started_ts)
     WHERE {schema}.run_status.updated_ts <= EXCLUDED.updated_ts
 )

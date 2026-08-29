@@ -60,6 +60,21 @@ def sent(client: FakeClient) -> tuple[str, list]:
     return body["statement"], body["parameters"]
 
 
+async def test_a_model_the_app_left_empty_is_filled_in_rather_than_kept():
+    """The app inserts `model = ''` when it creates the row for a run it hears
+    about before the job reports, and the column is NOT NULL — so a bare
+    COALESCE sees an empty string rather than a NULL, keeps it, and the run
+    carries no model name for the rest of its life. NULLIF is what lets the
+    job's value win over the placeholder."""
+    client = FakeClient(200)
+    reporter = LakebaseStatus("https://db/statements", schema="dbx_leaning", client=client)
+
+    assert await reporter.report(record_at("RUNNING")) is True
+
+    statement, _ = sent(client)
+    assert "COALESCE(NULLIF(dbx_leaning.run_status.model, ''), EXCLUDED.model)" in statement
+
+
 async def test_a_reported_transition_carries_the_records_own_row():
     client = FakeClient(200)
     reporter = LakebaseStatus("https://db/statements", schema="dbx_leaning", client=client)
