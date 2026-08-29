@@ -363,13 +363,22 @@ Full procedure: `deploy/README.md`.
    writer is no longer on that list — `tests/job/test_lakebase_status.py`
    runs `REPORT_SQL` against a real PostgreSQL 16 over the real DDL, including
    the case that matters most: a stale transition leaves current state alone
-   and still appends to history. The job **does** now hold a Databricks
-   credential on a real workspace — `job.auth: app credential from the job's
-   runtime identity`, from a serverless task on 2026-08-29 — which was the one
-   thing gating both paths at once, since Lakebase takes an OAuth token as its
-   password (`enable_pg_native_login: false`) and the Apps proxy wants one for
-   the WebSocket. Neither path has been watched all the way through with it
-   yet. And nothing writes `run_status_history` with `recorded_by='app'`, so a
+   and still appends to history. The job **resolves a credential** on a real
+   workspace — `job.auth: app credential from the job's runtime identity`, from
+   a serverless task on 2026-08-29 — but resolving one is not the same as
+   holding an accepted one, and the same run showed it is not: **the Apps proxy
+   refused the handshake** (a redirect, which is how it says no; see
+   `_diagnosis` in `job/bus.py`) and **Lakebase refused the password**. That
+   source is `dbutils`' `context.apiToken()`, a workspace REST API token —
+   which is not what either of those two wants. Both want a Databricks OAuth
+   token, and the one path in `job/auth.py` that mints a real one, client
+   credentials against `/oidc/v1/token`, has nowhere to arrive from: no job
+   yml declares `DBX_OAUTH_CLIENT_ID`/`SECRET`, so it logs "not configured
+   here" and falls through. That, plus `DBX_LAKEBASE_USER` being unset (the
+   Postgres user must be the token's own principal, and with none set the
+   driver falls back to the serverless OS account), is what stands between
+   this and a watched end-to-end run. Neither live path has been seen working
+   from a deployed job. And nothing writes `run_status_history` with `recorded_by='app'`, so a
    run's history starts at the job's first report and never records `QUEUED`.
    Do not read "built and tested" as "deployed".
    What *is* confirmed against a real workspace: WebSocket and SSE both
