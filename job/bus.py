@@ -591,22 +591,34 @@ def _diagnosis(exc: Exception) -> str:
     """Translate the one failure that does not say what it means.
 
     An unauthenticated handshake does not come back 401. The Databricks Apps
-    proxy answers it with a 302 to the OAuth login page, the client follows
-    the redirect, and the error is about the URL it landed on:
+    proxy answers it with a redirect, `websockets` resolves the `Location`
+    against the original URI and tries to dial it, and the error is about the
+    URL it landed on rather than about being refused:
 
         ws session ended (https://.../oidc/oauth2/v2.0/authorize?...
         isn't a valid URI: scheme isn't ws or wss)
 
-    Nothing in that names the cause. It is not a bad URL — it is the proxy
-    asking a machine to log in through a browser.
+    **The Location is not always the login page**, which is what this used to
+    assume. A workspace answered with a redirect to the SAME PATH under `https`:
+
+        ws session ended (https://<app>.databricksapps.com/ws/job/run-17bd6cf8
+        isn't a valid URI: scheme isn't ws or wss)
+
+    No `/oidc/`, no `authorize`, so the old match returned nothing and the log
+    carried only that — which reads as a bad URL and is not one. The reliable
+    signal is not where the redirect points; it is that the socket was
+    redirected AT ALL. A `wss://` dial that ends up parsing a non-ws scheme was
+    answered with an HTTP redirect, and on this proxy that means one thing.
     """
     text = str(exc)
-    if "/oidc/" not in text and "authorize" not in text:
+    if "scheme isn't ws or wss" not in text:
         return ""
     return (
-        " — that redirect is the Databricks Apps proxy rejecting the handshake: "
-        "no Databricks OAuth token was accepted. See job/auth.py; the principal "
-        "this job runs as needs CAN_USE on the app"
+        " — a redirect, which is how the Databricks Apps proxy rejects a "
+        "handshake it will not authenticate; it never answers 401. No "
+        "Databricks OAuth token was accepted. See job/auth.py: the principal "
+        "this job runs as needs CAN_USE on the app, and the log line above "
+        "says which source supplied the token it tried"
     )
 
 

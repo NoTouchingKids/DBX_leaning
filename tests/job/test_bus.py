@@ -429,8 +429,30 @@ class TestTheRedirectThatDoesNotSayWhatItMeans:
         )
         said = _diagnosis(exc)
 
-        assert "rejecting the handshake" in said
+        assert "rejects a handshake" in said
+        assert "CAN_USE" in said
+
+    def test_a_redirect_to_the_same_path_is_explained_too(self):
+        """The shape a real workspace produced, and the one the first version
+        of this missed.
+
+        The proxy redirected to the SAME path under `https` — no `/oidc/`, no
+        `authorize` — so matching on where the redirect points returned
+        nothing and the job log carried only an unreadable "isn't a valid URI".
+        What identifies it is the scheme, not the destination.
+        """
+        exc = ValueError(
+            "https://dbx-leaning-7474655945367403.aws.databricksapps.com"
+            "/ws/job/run-17bd6cf8efcf isn't a valid URI: scheme isn't ws or wss"
+        )
+        said = _diagnosis(exc)
+
+        assert "rejects a handshake" in said
         assert "CAN_USE" in said
 
     def test_an_ordinary_failure_is_not_editorialised(self):
         assert _diagnosis(ConnectionRefusedError("connection refused")) == ""
+        assert _diagnosis(TimeoutError("timed out")) == ""
+        # A URL problem that is genuinely ours — a typo'd DBX_APP_URL — parses
+        # as a different complaint and must not be blamed on permissions.
+        assert _diagnosis(ValueError("wss://host/path isn't a valid URI: no host")) == ""
