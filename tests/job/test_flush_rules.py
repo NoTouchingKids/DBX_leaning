@@ -16,10 +16,10 @@ import time
 
 from job.buffer import DurableBuffer
 from job.delta import JsonlWriter
-from job.record import RunRecord
 from job.shared.envelope import make_message
 from job.shared.tables import TableSet
 from job.sink import DurableFlusher, DurableSink
+from job.stream import RunStream
 
 
 class FlakyWriter:
@@ -157,24 +157,30 @@ async def test_the_durable_path_keeps_flushing_while_the_event_loop_is_blocked(t
         assert wait_until(lambda: sink.rows_written == 1), "the durable path stalled with the loop"
 
 
-def test_the_flush_thread_tells_the_record_how_far_delta_has_caught_up(tmp_path):
+def test_the_flush_thread_tells_the_stream_how_far_delta_has_caught_up(tmp_path):
     """Flushing is only half the tick. The other half is the number that goes
     out on `hello` and on every backfill reply — without it a client cannot
-    tell whether to ask the job or ask SQL. `RunRecord` locks every field it
+    tell whether to ask the job or ask SQL. `RunStream` locks every field it
     owns, which is what makes writing it from this thread safe.
+
+    Feeds the sink through `append_message` directly rather than a stream
+    cursor (no `cursor=` given to `DurableFlusher`), the same way every other
+    test in this file does — this is about `after_flush` reaching the stream,
+    not about the pull step, which `test_transport_behaviour.py` covers via a
+    real run.
     """
-    record = RunRecord("r")
+    stream = RunStream("r")
     sink = DurableSink(JsonlWriter(tmp_path), TableSet(), max_bytes=10**9, max_age_s=0.01)
     for seq in range(3):
         sink.append_message(make_message("log", run_id="r", seq=seq, message="x"))
 
     def note() -> None:
-        record.note_flushed(sink.flushed_through_seq(issued=3))
+        stream.note_flushed(sink.flushed_through_seq(issued=3))
 
-    assert record.flushed_through_seq == -1
+    assert stream.flushed_through_seq == -1
     with DurableFlusher(sink, tick_s=0.01, after_flush=note):
-        assert wait_until(lambda: record.flushed_through_seq == 2), (
-            "the tick flushed but never told the record"
+        assert wait_until(lambda: stream.flushed_through_seq == 2), (
+            "the tick flushed but never told the stream"
         )
 
 

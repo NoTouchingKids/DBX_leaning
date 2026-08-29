@@ -219,8 +219,19 @@ def cfg(tmp_path):
             schema="dbx_leaning",
             writer="jsonl",
             local_root=str(tmp_path / "delta"),
-            flush_tick_s=0.05,
-            flush_max_age_s=0.2,
+            # Fast enough that a test relying on the default never has to
+            # sleep to see a flush happen -- since routing to the durable
+            # buffer moved from push (at `emit()`) to pull (the flusher's own
+            # cursor, `job/sink.py::DurableSink.pull`), a message's age clock
+            # no longer starts until a tick has actually picked it up, so the
+            # tick interval and the age bound now both sit on the critical
+            # path to "durably confirmed" in a way the old push-based design
+            # did not. Anything that needs to assert a flush has NOT yet
+            # happened overrides these explicitly with slower values instead
+            # (see e.g. test_flush_rules.py, and the size/age-parametrised
+            # and NoisyLogger cases in test_transport_behaviour.py).
+            flush_tick_s=0.001,
+            flush_max_age_s=0.001,
         )
         base.update(overrides)
         return JobConfig(**base)

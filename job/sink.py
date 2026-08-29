@@ -37,6 +37,7 @@ from .buffer import DurableBuffer
 from .delta import BatchWriter
 from .shared.envelope import Message
 from .shared.tables import TableSet, table_for, to_row
+from .stream import StreamCursor
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +88,40 @@ class DurableSink:
         qualified = self.tables.qualify(table)
         for row in rows:
             self.buffer.append(qualified, row)
+
+    #: How many messages one `pull()` call takes from the cursor before
+    #: checking whether more arrived. Generous on purpose: this only bounds
+    #: one Python-level loop, not a wire frame (contrast `bus.py`'s
+    #: `DEFAULT_BACKFILL_LIMIT`), so there is no reason to make more than one
+    #: round trip through the loop for the common case.
+    PULL_BATCH = 10_000
+
+    def pull(self, cursor: StreamCursor) -> int:
+        """Drain everything currently available from `cursor` into the
+        per-table buffers -- envelope messages' route to the durable path,
+        now decided here rather than at `emit()` time (see `shared.tables`).
+
+        Loops rather than taking once: `cursor.take()` is bounded per call,
+        and a run that has produced more than one `PULL_BATCH` since the
+        flusher's last tick must not leave a remainder un-pulled until the
+        next one -- `flushed_through_seq` reads `buffer.min_pending_seq()`,
+        which only knows about rows that made it into the buffer, so a
+        message still sitting only in the stream would be invisible to it
+        and the mark could be reported *ahead* of a message that has not
+        even been queued for writing yet.
+
+        Result rows never reach here: `emit("result", rows=[...])` routes
+        those straight to `append_rows`, seq-less and outside the stream by
+        design (see `job/stream.py`'s module docstring).
+        """
+        pulled = 0
+        while True:
+            taken = cursor.take(self.PULL_BATCH)
+            if not taken:
+                return pulled
+            for msg in taken:
+                self.append_message(msg)
+            pulled += len(taken)
 
     # --- flush (any thread; blocking, and left that way) ------------------
 
@@ -177,10 +212,20 @@ class DurableFlusher:
       durable, rather than racing a tick nobody is waiting for.
 
     ``after_flush`` runs on this thread, right after the flush, and is where
-    the run record learns how far Delta has caught up. It is a callback rather
-    than a ``RunRecord`` reference so the durable path keeps knowing nothing
-    about the replay ring — and ``RunRecord`` guards every field with its own
-    lock, so being called from here is safe.
+    the run's stream learns how far Delta has caught up
+    (``RunStream.note_flushed``). It is a callback rather than a ``RunStream``
+    reference so the durable path keeps knowing nothing about replay or
+    eviction — and ``RunStream`` guards every field with its own lock, so
+    being called from here is safe.
+
+    ``cursor``, when given, is pulled (``DurableSink.pull``) at the top of
+    every tick, before ``flush_due`` looks at what has crossed a bound —
+    envelope messages now reach the buffer this way rather than being pushed
+    in at ``emit()`` time. ``None`` is a legitimate choice, not a placeholder
+    to fill in later: a sink fed only through ``append_rows``/``append_message``
+    directly (every test in ``test_flush_rules.py``, and any future caller
+    with no ``RunStream`` at all) has nothing to pull and must not need one to
+    exist.
     """
 
     def __init__(
@@ -188,11 +233,13 @@ class DurableFlusher:
         sink: DurableSink,
         *,
         tick_s: float,
+        cursor: StreamCursor | None = None,
         after_flush: Callable[[], None] | None = None,
         name: str = "durable-flush",
     ) -> None:
         self.sink = sink
         self.tick_s = max(float(tick_s), MIN_TICK_S)
+        self.cursor = cursor
         self.after_flush = after_flush
         self.name = name
         #: Ticks completed, error or not. The one observable that says the
@@ -243,6 +290,20 @@ class DurableFlusher:
     def _tick(self) -> None:
         self.ticks += 1
         try:
+            # This order is the whole safety property, and nothing type-checks
+            # it: `pull` only TAKES from the stream (a message can be handed
+            # here and then lost if the process dies before the write below),
+            # so `after_flush` -- which is what tells `RunStream.note_flushed`
+            # a seq is safe to evict -- must run strictly after `flush_due`
+            # has actually attempted the write, never merely after `pull`. It
+            # is safe here because both are synchronous, in this order, on
+            # this thread: `flush_due` has either written a row out of the
+            # buffer or put it back (`DurableBuffer.restore`, on failure)
+            # before this line runs, so `after_flush` -> `flushed_through_seq`
+            # -> `buffer.min_pending_seq()` only ever sees the post-attempt
+            # state, never a row that was merely pulled.
+            if self.cursor is not None:
+                self.sink.pull(self.cursor)
             self.sink.flush_due()
             if self.after_flush is not None:
                 self.after_flush()

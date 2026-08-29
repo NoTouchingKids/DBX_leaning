@@ -236,7 +236,7 @@ async def test_the_durable_record_is_complete_at_any_size(cfg, writer, steps):
 
 async def test_the_durable_high_water_mark_advances_while_the_run_is_still_going(cfg, writer):
     """The periodic flush is a thread now, and this is what says it is wired
-    to the record rather than only to the writer.
+    to the stream rather than only to the writer.
 
     `_finalise` flushes and calls `note_flushed` at the end of every run, so a
     mark checked afterwards proves nothing about the tick. This one is read
@@ -251,8 +251,8 @@ async def test_the_durable_high_water_mark_advances_while_the_run_is_still_going
     mid_run: list[int] = []
 
     async def stop_once_delta_has_caught_up():
-        await until(lambda: harness.record.flushed_through_seq >= 0)
-        mid_run.append(harness.record.flushed_through_seq)
+        await until(lambda: harness.stream.flushed_through_seq >= 0)
+        mid_run.append(harness.stream.flushed_through_seq)
         harness.token.cancel("stop")
 
     asyncio.create_task(stop_once_delta_has_caught_up())
