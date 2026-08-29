@@ -1,4 +1,6 @@
-"""Startup reconciliation. Once, at startup. No background loop.
+"""Startup reconciliation: the full three-source sweep. Once, at startup, and
+this module runs no background loop of its own — see the note near the
+bottom of this docstring for the narrower one that now lives beside it.
 
 Apps run ~8h/day; jobs do not share that schedule. A run that started, or
 finished, while this app was down is the normal case — so on the way up, any
@@ -20,8 +22,23 @@ There should be far less for this to do than there once was: the job reports
 its own status as it goes, so a run the app never observed usually arrives
 here already terminal and never reaches the list at all.
 
-There is deliberately no periodic version of this. A poll on a timer is what
-keeps the SQL warehouse awake, and uptime is what costs money.
+There is deliberately no periodic version of *this* — the three-source sweep
+above, in particular its second step. A poll on a timer that could reach
+``run_events`` would keep the SQL warehouse awake on a schedule, and uptime is
+what costs money on this platform, not the one-off cost of doing it at
+startup.
+
+What *does* now run periodically is narrower, and lives beside this rather
+than in it: ``app/server/orphan_sweep.py`` catches the case startup
+reconciliation only ever catches at the *next* restart — a job that died hard
+enough (OOM, SIGKILL, a lost cluster) to report nothing anywhere, not even to
+Lakebase — which for an app that stays up ~8h/day can otherwise sit for hours,
+holding one of the account's five task slots the whole time. It calls
+:func:`resolve_ending` below with ``repo=None``, which is what keeps it inside
+the same warehouse-free budget this docstring describes: Lakebase's history is
+still asked, for nothing, but the ``run_events`` branch is skipped outright
+because it has no ``repo`` to read it from, so the warehouse stays asleep on
+every tick, not just at startup.
 """
 
 from __future__ import annotations
@@ -36,7 +53,7 @@ from .store import RunStore
 
 log = logging.getLogger(__name__)
 
-__all__ = ["reconcile_once", "ReconcileReport"]
+__all__ = ["reconcile_once", "resolve_ending", "ReconcileReport"]
 
 #: How far back into one run's transition log to look. A run has a handful of
 #: transitions, not thousands — a bound against a pathological row, not a page
@@ -88,7 +105,7 @@ async def reconcile_once(
         run_id = row["run_id"]
         report.checked += 1
         try:
-            resolved = await _resolve(store, repo, jobs, run_id, row.get("job_run_id"))
+            resolved = await resolve_ending(store, repo, jobs, run_id, row.get("job_run_id"))
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"{run_id}: {exc}")
             continue
@@ -175,7 +192,7 @@ async def _from_history(store: RunStore, run_id: str) -> tuple[RunStatus, str] |
     return status, "reconciled from run_status_history"
 
 
-async def _resolve(
+async def resolve_ending(
     store: RunStore,
     repo: RunRepository | None,
     jobs: JobsApi | None,
@@ -194,6 +211,14 @@ async def _resolve(
     With neither a history nor a ``repo`` — no Postgres and no SQL warehouse —
     the Jobs API is the only source, which is weaker but is the difference
     between reconciling and not.
+
+    Two callers, not one, which is why this takes a plain name rather than a
+    module-private one. :func:`reconcile_once` above hands it a real ``repo``
+    as part of the full, startup-only sweep. ``app/server/orphan_sweep.py``
+    hands it ``repo=None`` on every tick of its periodic one — same search,
+    minus the one step that would wake the SQL warehouse on a timer. Keeping
+    one function two callers agree on beats a second copy that could drift
+    from what "resolved" means.
     """
     from_history = await _from_history(store, run_id)
     if from_history is not None:

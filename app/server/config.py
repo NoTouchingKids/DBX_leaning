@@ -89,6 +89,33 @@ class AppConfig:
 
     reconcile_on_startup: bool = True
 
+    #: How often the orphan sweep looks for a run whose job died without
+    #: telling anyone (OOM, SIGKILL, a lost cluster — no teardown runs, so no
+    #: terminal status lands anywhere, including Lakebase). Unlike startup
+    #: reconciliation, this repeats for as long as the app is up, because a
+    #: crashed run otherwise holds one of Free Edition's 5 account-wide task
+    #: slots until the *next* restart — hours away, for an app that runs
+    #: ~8h/day. A couple of minutes is frequent enough that a stuck slot does
+    #: not matter much, and infrequent enough that the Postgres read and the
+    #: handful of Jobs API calls it costs are noise.
+    orphan_sweep_interval_s: float = 120.0
+
+    #: How old a run must be (since `claim_slot` wrote its row) before a
+    #: missing socket counts as suspicious rather than ordinary. The app
+    #: registers the run *before* `run-now` returns, and a serverless job task
+    #: then takes tens of seconds to start and dial back in — so a run that is
+    #: seconds old with nothing attached yet is the normal shape of "just
+    #: launched", not a corpse. Comfortably longer than that cold start.
+    orphan_sweep_min_age_s: float = 180.0
+
+    #: How long a run must have gone with no status update before its missing
+    #: socket is trusted rather than read as an ordinary reconnect in
+    #: progress. The job redials on a timer of its own — `DBX_WS_RECONNECT_S`
+    #: in `job/config.py`, 30s by default — so this has to comfortably clear
+    #: that (with room for the reconnect itself, plus a `hello`, to complete)
+    #: or a single missed redial would read as a death. 5x that default.
+    orphan_sweep_socket_grace_s: float = 150.0
+
     #: Where the built React bundle lives. Databricks Apps has no Node
     #: runtime, so this app serves the SPA itself (see app/server/spa.py). Relative
     #: paths are resolved against the repo root, not the process cwd. Absent
@@ -177,6 +204,9 @@ class AppConfig:
             max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
             job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
+            orphan_sweep_interval_s=float(e.get("DBX_ORPHAN_SWEEP_INTERVAL_S", "120")),
+            orphan_sweep_min_age_s=float(e.get("DBX_ORPHAN_SWEEP_MIN_AGE_S", "180")),
+            orphan_sweep_socket_grace_s=float(e.get("DBX_ORPHAN_SWEEP_SOCKET_GRACE_S", "150")),
             frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "dist",
             app_volume=(e.get("DBX_APP_VOLUME") or "").strip() or None,
             lakebase_user=(e.get("DBX_LAKEBASE_USER") or "").strip() or None,

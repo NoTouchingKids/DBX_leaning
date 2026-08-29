@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config import AppConfig
-from .jobs_api import JobsApi
 from .reconcile import reconcile_once
 from .routes import ingest, meta, runs, stream
 from .services import ServiceHub
@@ -39,7 +38,13 @@ async def lifespan(app: FastAPI):
     if hub.config.reconcile_on_startup and hub.store is not None:
         # Once, on the way up. A job that started or finished while the app
         # was down is the normal case here — apps run ~8h/day, jobs do not.
-        # There is deliberately no periodic version of this.
+        # There is deliberately no periodic version of THIS — the full,
+        # three-source sweep `reconcile_once` runs. `hub.startup()`, just
+        # above, already started the narrower one that does repeat:
+        # `orphan_sweep.py`'s periodic check for a run whose job crashed hard
+        # enough to report nothing anywhere. The two are complementary, not
+        # duplicates — this pass runs once and reads three sources; that one
+        # runs forever and, by design, never reads the warehouse-backed one.
         #
         # Gated on `store`, NOT on `repo`. It was gated on `repo` when
         # `run_status` lived in the warehouse; after the move to Lakebase that
@@ -49,14 +54,20 @@ async def lifespan(app: FastAPI):
         # so five bad configs took the platform down with no way back short
         # of editing the table by hand. `repo` is now optional and only
         # sharpens the answer.
-        jobs = JobsApi(hub.config.workspace_host, hub.config.token)
+        #
+        # The hub's client, not a second one built here. The copy this line
+        # used to build passed no `token_provider`, so on a deployment
+        # authenticating by OAuth client credentials — no static
+        # DATABRICKS_TOKEN — every request it made was unauthenticated. And
+        # `JobsApi.get_run` swallows its own exceptions and returns None, so
+        # that did not fail: reconciliation just answered "cannot determine"
+        # for every run it needed the Jobs API for, silently, on exactly the
+        # deployments the ceiling matters most on.
         try:
-            report = await reconcile_once(hub.repo, jobs, hub.store)
+            report = await reconcile_once(hub.repo, hub.jobs_api, hub.store)
             log.info("startup reconciliation: %r", report)
         except Exception:  # noqa: BLE001 - never block startup on this
             log.exception("startup reconciliation failed")
-        finally:
-            await jobs.close()
 
     try:
         yield

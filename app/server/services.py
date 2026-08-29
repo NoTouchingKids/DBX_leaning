@@ -25,6 +25,7 @@ from .config import AppConfig
 from .discovery import map_jobs_to_models
 from .jobs_api import JobsApi
 from .oauth import OAuthTokenProvider
+from .orphan_sweep import OrphanSweeper
 from .repository import RunRepository
 from .sql import SqlClient
 from .store import PostgresRunStore, RunStore, WarehouseRunStore
@@ -316,6 +317,11 @@ class ServiceHub:
         self.messages_ingested = 0
         self.status_writes = 0
         self._status_tasks: set[asyncio.Task] = set()
+        #: Built at the end of `startup`, once `store` and `jobs_api` are both
+        #: resolved, and started immediately. None only in the window before
+        #: `startup` has run — `shutdown` guards for that, since a hub whose
+        #: `startup` failed partway through must still tear down cleanly.
+        self._orphan_sweeper: OrphanSweeper | None = None
 
     async def startup(self) -> None:
         cfg = self.config
@@ -355,6 +361,46 @@ class ServiceHub:
 
         await self._resolve_job_ids(cfg)
         self._check_volume(cfg)
+        self._start_orphan_sweep(cfg)
+
+    def _start_orphan_sweep(self, cfg: AppConfig) -> None:
+        """Start the periodic orphan sweep — see `orphan_sweep.py`.
+
+        Started unconditionally, on every store: the decision about whether a
+        given tick can actually do anything lives in `sweep_once` itself, not
+        here, because it has to be re-checked cheaply on every tick rather
+        than assumed to be whatever it was at startup. What belongs here is
+        only making that decision loud once, the same way `_start_store`
+        already makes the store choice itself loud — a deploy running the
+        warehouse store should not have to read `orphan_sweep.py` to learn
+        that it gets no periodic protection between one restart and the next.
+        """
+        self._orphan_sweeper = OrphanSweeper(
+            store=self.store,
+            job_sockets=self.job_sockets,
+            jobs_api=self.jobs_api,
+            interval_s=cfg.orphan_sweep_interval_s,
+            min_age_s=cfg.orphan_sweep_min_age_s,
+            socket_grace_s=cfg.orphan_sweep_socket_grace_s,
+        )
+        self._orphan_sweeper.start()
+        if self.store is None or self.store.name != "postgres":
+            log.info(
+                "orphan sweep: running every %.0fs, but the run store is %s, so every "
+                "tick will skip rather than call non_terminal() on the SQL warehouse "
+                "(see orphan_sweep.py) — a hard-crashed run's slot is freed only by "
+                "the next startup reconciliation on this store",
+                cfg.orphan_sweep_interval_s,
+                getattr(self.store, "name", "unconfigured"),
+            )
+        else:
+            log.info(
+                "orphan sweep: active every %.0fs against Lakebase "
+                "(min_age=%.0fs, socket_grace=%.0fs)",
+                cfg.orphan_sweep_interval_s,
+                cfg.orphan_sweep_min_age_s,
+                cfg.orphan_sweep_socket_grace_s,
+            )
 
     async def _resolve_job_ids(self, cfg: AppConfig) -> None:
         """Make sure the app knows which job runs which model.
@@ -556,6 +602,14 @@ class ServiceHub:
         log.warning(self.degraded["store"])
 
     async def shutdown(self) -> None:
+        # First, and awaited before anything else closes: a tick in progress
+        # may be mid-`store.set_status` or mid-Jobs-API-call, and closing
+        # `sql`/`jobs_api`/`store` out from under it would turn a clean
+        # shutdown into a logged exception on the way down. `OrphanSweeper.stop`
+        # cancels promptly rather than waiting out `interval_s` — see its own
+        # docstring — so this does not slow shutdown down.
+        if self._orphan_sweeper is not None:
+            await self._orphan_sweeper.stop()
         for task in tuple(self._status_tasks):
             task.cancel()
         if self._status_tasks:
