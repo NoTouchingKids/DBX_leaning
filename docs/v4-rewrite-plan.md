@@ -118,7 +118,11 @@ Note the second row. It is about to stop being a problem — see below.
 - **`app/server/sql.py` + `repository.py`** (672 lines). With run state in
   Postgres, live backfill served by the job (below), and history arriving via
   the ingestion job, nothing on the app's live path needs the warehouse.
-- **`job/delta.py`** (340 lines) and `DeltaRsWriter` with it.
+- **Most of `job/delta.py`** (340 lines) — `DeltaRsWriter`, `JsonlWriter`,
+  `select_writer` and the buffering machinery. What survives is small and
+  narrow: write a batch of result rows to a UC table against **the table's own
+  schema**, reusing the Spark session the models already need. See the two
+  write paths below.
 - **`job/buffer.py` + `job/sink.py`** (225 lines) — the in-memory batching
   layer. v4 writes through to a file instead.
 - **The triple copy of `shared/`.** `shared/`, `app/shared/`, `job/shared/`,
@@ -140,6 +144,13 @@ is trivial and already understood; **the point is the RPC semantics, not the
 specific framing.** gRPC is not a candidate — it would need HTTP/2 with
 trailers through the Apps ingress, which is not what the spikes cleared, and
 it buys nothing the design needs.
+
+**What travels on it, unchanged from v3 and worth restating because it is easy
+to misread:** the wire carries `log`, `progress`, `status`, and a `result`
+*summary* — a bounded preview (≤1000 points, LTTB-downsampled, enough to draw
+the chart), a `row_count`, and a `fetch_hint` pointer. **The wire contract
+never carries a result set.** `emitter.py::_absorb_result_rows` strips `rows`
+off the message before it reaches any channel.
 
 Three things this buys that v3 cannot do:
 
@@ -212,10 +223,49 @@ Consequences worth stating explicitly:
   wrote** (below).
 - The ingestion job is the only other principal with access, and only `READ`.
 
-> **Naming.** `log` is narrower than what the volume holds — the envelope
-> carries `progress`, `status` and `result` as well as `log`. `run_log` or
-> `telemetry` would age better. Worth deciding now: renaming a volume later
-> means touching grants, paths, the bundle and every written path prefix.
+> **Naming.** `log` is narrower than what the volume holds: every envelope
+> type lands here, so it carries `progress`, `status` and `result` summaries
+> as well as `log` lines. `run_log` or `telemetry` would age better. Worth
+> deciding now — renaming a volume later means touching grants, paths, the
+> bundle and every written path prefix.
+>
+> It stays small either way. Result *rows* do not come here (below), so the
+> volume holds a stream of small records and nothing bulk.
+
+#### Two write paths, and only one of them is Spark
+
+This is the distinction the plan was blurring, and it is worth stating flatly
+because the emitter routes both through one `sink` today
+(`emitter.py::_absorb_result_rows` → `sink.append_rows`).
+
+| What | Where | How | Governed by |
+|---|---|---|---|
+| **Telemetry** — every envelope: `log`, `progress`, `status`, and the `result` *summary* | The `log` volume, as files | Plain file write, no Spark | One grant, job-only |
+| **Result rows** — the model's actual output | That model's own UC results table | Spark, direct | Per-model UC grants, applied at write time |
+
+The split is principled rather than a compromise. Telemetry is high-frequency,
+small, and streaming — files suit it, and a file write is the easiest thing in
+the world to verify. Result rows are a bounded batch written once (or once per
+chunk), queried later by people who are not watching a run, and governed per
+model because different models serve different audiences. A table suits that,
+and the Spark session is **already there** — `job/models/_data` needs it to
+read Unity Catalog inputs, so results cost no new dependency and no new
+session.
+
+So "Spark leaves the job" was too strong; the accurate claim is **Spark leaves
+the telemetry path**, which is where every one of its problems came from — the
+per-flush session use, the thread-affinity bug, the acquisition archaeology on
+a hot path. Writing a result batch once at the end is not that.
+
+The durability rule is unchanged and lands where it always did: **a run must
+not report `SUCCEEDED` if its result write failed**, and `row_count` is what
+makes "wrote nothing" distinguishable from "did not get that far".
+
+> **Deferred, deliberately.** A heartbeat emits no result rows, so Slices 0–3
+> never exercise this path. It is designed, not built, until the first real
+> model lands. Do not build it speculatively — but do not let the volume
+> quietly become the results store either, which is what happens if the
+> emitter's single `sink` is ported unchanged.
 
 Consequences, all of them good:
 
