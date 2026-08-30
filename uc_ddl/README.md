@@ -6,6 +6,7 @@ Apply in order. Idempotent — every statement is `IF NOT EXISTS`.
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/001_core_tables.sql
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/002_model_results.sql
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/003_app_volume.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/004_telemetry_volume.sql
 ```
 
 | File | What | Skipping it costs |
@@ -13,14 +14,26 @@ databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/003_app_vo
 | `001_core_tables.sql` | `run_status`, `run_events`, `run_logs`, `run_progress`, `run_results_meta` | Every durable write fails at the end of a run |
 | `002_model_results.sql` | One results table per model family | That model's results are lost; its telemetry still lands |
 | `003_app_volume.sql` | `app_store`, the app's durable filesystem | `/healthz` reports `volume` degraded; nothing on the run path is affected |
+| `004_telemetry_volume.sql` | `telemetry`, the job's own volume — **v4 only** | v4's durable path has nowhere to write. Nothing in v3 reads or writes it |
 
-Only 001 is mandatory. 002 costs you a model's results; 003 is genuinely
+001 is mandatory for v3. 002 costs you a model's results; 003 is genuinely
 optional and degrades cleanly — see `resources/app.yml` for the grants that go
 with it.
 
-**Neither file has ever been executed.** `databricks bundle deploy` has never
-run against a workspace, so a syntax error in here would not have surfaced
-yet. Read changes carefully rather than trusting that what is committed works.
+**004 belongs to v4** (`docs/v4-rewrite-plan.md`) and is inert for v3 — nothing
+deployed today touches it. It is here rather than on a branch of its own
+because a volume is cheap, idempotent, and needed before Slice 0's probe can
+run. Read its header before applying: **it carries placeholder principals that
+must be filled in**, and the fact that the app gets no grant on it is the
+design, not an omission.
+
+**Do not add a deployment-status claim to this file.** An earlier version said
+these had never been executed; the Aug 25–27 history shows otherwise, and the
+line survived long enough to mislead. Status belongs in git and in the
+workspace — see the rule at the top of `docs/v4-rewrite-plan.md`. What is fair
+to say is narrower and stays true: nothing here is exercised by the test
+suite, so a syntax error surfaces on a workspace and nowhere else. Read
+changes carefully rather than trusting that what is committed works.
 
 Four things worth knowing before changing anything here:
 

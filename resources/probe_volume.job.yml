@@ -1,0 +1,73 @@
+# Slice 0's probe, as a job — because the question only has an answer on the
+# workspace.
+#
+# `scripts/probe_volume_append.py` decides whether v4's durable path is
+# possible at all: can a job hold a file handle open on a Unity Catalog volume
+# across a long run and flush to it, or does it need rolling part files? See
+# docs/v4-rewrite-plan.md, Slice 0.
+#
+# Running it from a laptop answers nothing — volume FUSE is the thing in
+# question, and a laptop has none. Hence a job.
+#
+#   databricks bundle deploy -t dev
+#   databricks bundle run probe_volume -t dev
+#
+# THIS IS A THROWAWAY. Delete it, and the script, once the answer is written
+# into docs/v4-rewrite-plan.md. A probe that outlives its question becomes a
+# thing people maintain without remembering why — which is how `/spike-ws` and
+# `/spike-sse` earned their "throwaway" labels in this repo.
+#
+# Its dependency list is deliberately the HARNESS floor and nothing else: the
+# probe imports only the standard library, and giving it a model's environment
+# would be probing a runtime that no longer resembles the one the harness gets.
+
+resources:
+  jobs:
+    probe_volume:
+      name: "[${bundle.target}] dbx-leaning · probe: volume append"
+      description: >-
+        Slice 0. Decides whether telemetry can be written to a UC volume with
+        a handle held open, or needs rolling part files. Throwaway.
+      max_concurrent_runs: 1
+      # Generous: the default probe writes for 60s, and the point is partly to
+      # see whether a LONG-held handle behaves differently from a short one.
+      # Raise --seconds well past this before assuming a multi-hour run is fine.
+      timeout_seconds: 1800
+      queue:
+        enabled: true
+      tags:
+        project: dbx-leaning
+        probe: volume-append
+
+      parameters:
+        # The volume from uc_ddl/004_telemetry_volume.sql. If this run fails
+        # with "does not exist or is not visible", the DDL has not been applied
+        # or the job's principal has no grant — the probe says which.
+        - name: PROBE_ROOT
+          default: /Volumes/${var.catalog}/${var.schema}/telemetry
+        - name: PROBE_SECONDS
+          default: "60"
+        - name: PROBE_HZ
+          default: "5"
+
+      environments:
+        - environment_key: probe
+          spec:
+            client: "3"
+            dependencies:
+              - -r ${workspace.file_path}/job/requirements.txt
+
+      tasks:
+        - task_key: probe
+          environment_key: probe
+          spark_python_task:
+            python_file: ${workspace.file_path}/scripts/probe_volume_append.py
+            source: WORKSPACE
+            parameters:
+              - --root={{job.parameters.PROBE_ROOT}}
+              - --seconds={{job.parameters.PROBE_SECONDS}}
+              - --hz={{job.parameters.PROBE_HZ}}
+              # Keep what was written, so the ingestion job (Slice 4) has real
+              # files to be developed against, and so a human can go and look
+              # at the layout rather than trusting this script's summary.
+              - --keep

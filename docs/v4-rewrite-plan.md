@@ -485,10 +485,36 @@ The ordering principle, and the one most different from v3: **prove comms with
 no model in the picture.** This plan commits to Slices 0–3 only. Everything
 after is a later decision made with a working platform in hand.
 
-**Slice 0 — create the `telemetry` volume, then one probe.** Apply the DDL and the
-grants in the matrix above, then probe incremental volume append from a
-serverless job with the job's own principal, with rolling part files as the
-fallback. Half a day. Nothing else is unverified.
+**Slice 0 — create the `telemetry` volume, then one probe. Written; not yet
+run.** The artifacts exist:
+
+| | |
+|---|---|
+| `uc_ddl/004_telemetry_volume.sql` | The volume and its grants. **Fill in the placeholder principals before applying** |
+| `scripts/probe_volume_append.py` | The probe. Runs both strategies, judges each on four criteria, reports latency |
+| `resources/probe_volume.job.yml` | Runs it as a job, because the question has no answer off a workspace |
+
+```bash
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/004_telemetry_volume.sql
+databricks bundle deploy -t dev
+databricks bundle run probe_volume -t dev
+```
+
+The probe passes a strategy only if all four hold: writes do not raise; **a
+second reader opening the path fresh mid-run sees data already written**;
+bytes read back are identical to what went in; and nothing is lost or
+reordered across the run. "It did not raise" is explicitly not enough — this
+repo has already shipped a write that succeeded into the wrong place.
+
+It also reports write latency, which decides flush cadence. **If a small write
+costs ~200 ms on FUSE, the write-through design is dead** and some form of the
+buffer this plan deletes has to come back. Better learned here than in Slice 1.
+
+**Paste the output into this file when it runs.** Slice 0 is not finished when
+the probe passes; it is finished when the answer is written where the next
+session reads it — which is the discipline `docs/spike-results.md` exists to
+enforce, and the one v3 half-kept (both probes passed, none of the timings
+recorded).
 
 **Slice 1 — heartbeat, end to end.** A "model" that emits a tick a second and
 nothing else, ~50 lines. Job (threaded) → RPC over WS → app → SSE → browser,

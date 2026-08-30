@@ -39,11 +39,51 @@ def bundle() -> dict:
 
 @pytest.fixture(scope="module")
 def jobs() -> dict[str, dict]:
+    """The MODEL jobs — every job whose resource key starts `model_`.
+
+    This used to be "every job in resources/", because for eleven models that
+    was the same set. It stopped being so with `probe_volume.job.yml`: a
+    throwaway probe (docs/v4-rewrite-plan.md, Slice 0) that is a job because
+    the question it answers only has an answer on a workspace, and is not a
+    model and has no model to be named after.
+
+    Scoping the fixture rather than loosening the assertions is deliberate.
+    Every rule below — one file per model, an environment named after its
+    model, the declared parameter set — is a real rule *about model jobs*, and
+    weakening them so a non-model job can pass would cost the checks their
+    point. A future non-model job (the ingestion job of Slice 4 is the obvious
+    one) lands here the same way: outside this fixture, with its own tests if
+    it needs them.
+    """
     found = {}
-    for path in RESOURCES.glob("*.job.yml"):
+    for path in RESOURCES.glob("model_*.job.yml"):
         for name, job in load(path)["resources"]["jobs"].items():
             found[name] = job
     return found
+
+
+@pytest.fixture(scope="module")
+def all_jobs() -> dict[str, tuple[pathlib.Path, dict]]:
+    """Every job the bundle declares, model or not, with the file it came
+    from — so the few rules that really are universal can still say so."""
+    found = {}
+    for path in RESOURCES.glob("*.job.yml"):
+        for name, job in load(path)["resources"]["jobs"].items():
+            found[name] = (path, job)
+    return found
+
+
+def test_every_job_file_declares_the_job_its_name_promises():
+    """A file named `x.job.yml` declares a job keyed `x`.
+
+    Cheap, and it is the check that keeps the `model_*` glob above honest: a
+    model job that got misfiled under another name would silently drop out of
+    every rule in this module rather than failing one.
+    """
+    for path in RESOURCES.glob("*.job.yml"):
+        expected = path.name.removesuffix(".job.yml")
+        declared = list(load(path)["resources"]["jobs"])
+        assert declared == [expected], f"{path.name} declares {declared}, expected ['{expected}']"
 
 
 def test_there_are_models_to_deploy():
