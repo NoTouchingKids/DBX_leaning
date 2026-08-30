@@ -66,10 +66,11 @@ model is deployed and streaming.
 Ported, not redesigned. Each survived eleven models and a real deployment
 without changing shape.
 
-- **`shared/envelope.py`** (290 lines). `seq`, `row_count`, `chunk_index` and
-  `final` each exist because something broke without them; `row_count` is the
-  only thing distinguishing "succeeded, wrote nothing" from "succeeded, wrote
-  8,760 rows". Do not re-derive this. Port it and put a new transport under it.
+- **`shared/envelope.py`** (290 lines), with **one deliberate change** (below).
+  `seq`, `row_count`, `chunk_index` and `final` each exist because something
+  broke without them; `row_count` is the only thing distinguishing "succeeded,
+  wrote nothing" from "succeeded, wrote 8,760 rows". Do not re-derive this.
+  Port it and put a new transport under it.
 - **SSE app→browser, unchanged.** It survives the ingress, `EventSource` gives
   reconnect and `Last-Event-ID` resume for free, and nothing about it is
   implicated in what went wrong. It is not in scope for this rewrite.
@@ -187,6 +188,37 @@ Three things this buys that v3 cannot do:
    argument for the whole design.
 3. **The job can ask the app things**, not only tell it.
 
+### The one envelope change: status is a string, and terminality is stated
+
+`RunStatus` stops being a closed six-value enum and becomes **a plain string**.
+That is what makes model-defined statuses possible at all — the open question
+from the run-state section resolves here, by not needing a second field. It is
+also what makes the contract portable: a closed enum has to be re-declared in
+every language that touches it and goes stale the first time it gains a member,
+which is a cost paid by the frontend, the ingestion job, and anything written
+in a language the app is not.
+
+**A documented set of platform values still exists** — `QUEUED`, `RUNNING`,
+`SUCCEEDED`, `FAILED`, `CANCELLED`, `INFEASIBLE` — as string constants rather
+than an enforced type. They are a convention every model should reach for
+first, not a wall.
+
+> **The consequence, and the fix.** `TERMINAL_STATUSES` is how the harness
+> knows to stop, the app knows to close a stream, and the client knows to stop
+> waiting — and a `frozenset` of enum members cannot answer "is `CALIBRATING`
+> terminal?" once any string is legal. Inferring terminality from a
+> known-values list just rebuilds the closed enum somewhere less visible.
+>
+> So **`status` messages carry an explicit `terminal: bool`.** The producer
+> says whether this is the last word on the run; nothing downstream infers it.
+> That is strictly better than what it replaces — the property becomes
+> *stated* rather than *derived from membership* — and it is the thing that
+> makes an open status field safe rather than merely convenient.
+
+Blast radius, measured: 38 non-test files reference `RunStatus` or
+`TERMINAL_STATUSES` today. Most are mechanical, and the count is inflated by
+the triple-copied `shared/` this plan already deletes.
+
 ### Encoding: JSON, everywhere
 
 v3 used msgpack job→app and in the write buffer, JSON on the SSE stream. v4 is
@@ -232,7 +264,7 @@ through to a file on a Unity Catalog volume — **a new one, separate from the
 app's**:
 
 ```
-/Volumes/main/dbx_leaning/log/runs/<run_id>/…
+/Volumes/main/dbx_leaning/telemetry/runs/<run_id>/…
 ```
 
 A **separate scheduled or streaming ingestion job** reads those files and
@@ -244,9 +276,9 @@ not on the live path.
 | Volume | Purpose | App | Job | Ingestion |
 |---|---|---|---|---|
 | `main.dbx_leaning.app_store` | The app's own files — exports, uploads, cached artefacts | **READ + WRITE** | — | — |
-| `main.dbx_leaning.log` | Run telemetry, written as it is produced | **none** | **READ + WRITE** | **READ** |
+| `main.dbx_leaning.telemetry` | Run telemetry, written as it is produced | **none** | **READ + WRITE** | **READ** |
 
-**The app has no grant on the log volume, and that is the point.** "The app
+**The app has no grant on the telemetry volume, and that is the point.** "The app
 never reads run telemetry from files" stops being a design principle someone
 has to remember and becomes something Unity Catalog refuses. A future session
 cannot take the shortcut, because the shortcut returns a permission error.
@@ -254,7 +286,7 @@ This is the strongest form of the separation and it costs one `CREATE VOLUME`.
 
 Consequences worth stating explicitly:
 
-- The app should not even be **configured** with the log volume's path. No
+- The app should not even be **configured** with the telemetry volume's path. No
   path, no grant, no temptation. `DBX_APP_VOLUME` keeps pointing at
   `app_store` and gains no sibling on the app side.
 - The job needs `READ` as well as `WRITE`, because **replay reads back what it
@@ -349,7 +381,7 @@ The check gets easier, not harder — it becomes "did the writes land", not
 > whether the simpler single-file version is available; the fallback is safe
 > either way.
 >
-> The probe runs against the new `log` volume with the job's own principal,
+> The probe runs against the new `telemetry` volume with the job's own principal,
 > so it exercises the grant matrix at the same time.
 
 ### Backfill: the job replays from its own log
@@ -360,7 +392,7 @@ file and sends those records over the WebSocket.
 
 This is the design's keystone, and it is why RPC-over-WS is worth doing:
 
-- The app **cannot read the log volume** — it holds no grant on it — so this
+- The app **cannot read the telemetry volume** — it holds no grant on it — so this
   is not one option among several. It is the only live backfill path there is.
 - No Files API dependency, no second credential path, no parsing the durable
   format in two places.
@@ -370,7 +402,7 @@ This is the design's keystone, and it is why RPC-over-WS is worth doing:
   platform was built to avoid.
 
 > **The consequence to accept deliberately.** For a **finished** run the job is
-> gone, and the app still cannot read the log volume — so history has exactly
+> gone, and the app still cannot read the telemetry volume — so history has exactly
 > one path: **SQL, after the ingestion job has run.** There is no fallback. If
 > ingestion is broken or lagging, a completed run's telemetry is durable and
 > correct on the volume and *invisible to the app*.
@@ -453,7 +485,7 @@ The ordering principle, and the one most different from v3: **prove comms with
 no model in the picture.** This plan commits to Slices 0–3 only. Everything
 after is a later decision made with a working platform in hand.
 
-**Slice 0 — create the `log` volume, then one probe.** Apply the DDL and the
+**Slice 0 — create the `telemetry` volume, then one probe.** Apply the DDL and the
 grants in the matrix above, then probe incremental volume append from a
 serverless job with the job's own principal, with rolling part files as the
 fallback. Half a day. Nothing else is unverified.
@@ -483,7 +515,7 @@ kill the app entirely and confirm the run completes and its files are intact.
 That is the autonomy invariant tested rather than asserted.
 
 **Slice 4 — the ingestion job (volume → SQL).** Promoted out of "later" by the
-grant matrix: with the app locked out of the log volume, this is the *only*
+grant matrix: with the app locked out of the telemetry volume, this is the *only*
 way a finished run becomes visible. It is not on the live path and it is not
 urgent for Slices 1–3, but the platform is not usable without it, so it should
 not drift.
@@ -506,18 +538,56 @@ harness's contract becomes "run this object, move its messages, write its
 telemetry, keep its state row current" — tied to no lakehouse component at
 all, and to Postgres only through an ordinary driver.
 
-That leaves the app as the only open question: keep async Python (FastAPI, or
-something else in that space), or take it somewhere compiled. Two things make
-that decision cleaner than it was:
+That leaves the app as the only open question. Its job is narrow — an RPC
+endpoint for jobs, SSE fan-out to browsers, Postgres for run state, a few REST
+calls to the Jobs API, and serving a static SPA. Nothing in that forces
+Python.
 
-- The app's job is narrow — an RPC endpoint for jobs, SSE fan-out to browsers,
-  Postgres for run state, a few REST calls to the Jobs API. That is a good fit
-  for almost anything.
-- It no longer needs Spark, Delta, or the SQL warehouse on the live path, so
-  nothing about the platform forces Python on it.
+### Two constraints that narrow the field before taste does
 
-Decide it after Slice 1 is deployed and the RPC surface is real, so the choice
-is made against a known interface rather than an imagined one.
+Both were found by reading the deployed configuration, and the second is the
+one that surprises people.
+
+**1. Databricks Apps has no build step, and a Python-shaped runtime.**
+`app/app.yaml` carries a generic `command:` array — today
+`uvicorn server.main:app --host 0.0.0.0 --port $DATABRICKS_APP_PORT` — and the
+platform installs `requirements.txt`. The failure message when it is missing
+is *"No command to run and no Python file found"*, which says plainly what the
+paved path is. **A compiled binary would have to be committed pre-built** for
+the Apps container's architecture, because nothing in the workspace will
+compile it.
+
+That is not automatically a blocker, and there is a precedent right here:
+`app/dist/` — the built SPA — is committed for exactly this reason, because
+"a deploy driven from inside Databricks has no Node runtime and sees only
+tracked files". A Go binary would follow the same pattern. But whether Apps
+will *run* one is **unverified**, and this project has been burned three times
+by unverified platform assumptions. It is a probe, not an assumption.
+
+**2. The `databricks-sdk` decision only holds for some languages.** This plan
+adopts the SDK for token acquisition and refresh, on the evidence that
+hand-rolling it cost 343 lines and two deploy bugs. Official SDKs exist for
+**Python, Go and Java**. Choosing **Rust** — or anything without one — silently
+reverses that decision and puts the OAuth code back.
+
+### The field, given those
+
+| Option | SDK | Apps fit | What it actually teaches |
+|---|---|---|---|
+| **Python, different framework** — Litestar, bare Starlette, Granian | Yes | Paved path | Architecture only. The RPC dispatch, threading model and durability design are the whole lesson; the syntax is not |
+| **Go** | Yes | Needs the binary probe | Genuine concurrency for a fan-out relay, one static binary, and a real test of the Apps runtime. The strongest "different tech" candidate that does not undo another decision |
+| **Rust** — axum | **No** | Needs the binary probe | The most learning per line, and the most yak-shaving: no SDK, so auth is hand-rolled again, plus the binary question |
+| **Node / TypeScript** | No official one | Likely supported | Shares a language with the client, which is a real ergonomic win. But no SDK, so the same auth reversal as Rust |
+
+**Recommendation, not a decision:** if the goal is to try different tech
+without re-litigating settled choices, **Go is the one that costs least and
+teaches most** — it keeps the SDK, suits a WS/SSE relay, and its one risk is
+answerable by a probe you can run in an hour. Python-with-a-different-framework
+is the honest answer if the appetite is for architecture rather than language.
+
+**Decide after Slice 1 is deployed**, so the choice is made against a real RPC
+surface rather than an imagined one — and run the binary probe *before*
+committing to Go or Rust, alongside Slice 0's volume probe if convenient.
 
 ## What "done" means for v4
 
