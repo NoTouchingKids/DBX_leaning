@@ -187,6 +187,18 @@ Three things this buys that v3 cannot do:
    argument for the whole design.
 3. **The job can ask the app things**, not only tell it.
 
+### Encoding: JSON, everywhere
+
+v3 used msgpack job→app and in the write buffer, JSON on the SSE stream. v4 is
+**JSON throughout** — one codec instead of two.
+
+It follows from two decisions rather than being a preference of its own. The
+wire is JSON-RPC, and the durable records are files that **replay reads back**;
+an operator opening a log file to see what a run did, and a `replay` that
+parses the same bytes the wire carries, are both worth more here than smaller
+frames. Telemetry records are small and the transport compresses. `shared/
+codec.py` mostly disappears, and msgpack leaves both requirement sets.
+
 ### The job side is threaded, not asyncio
 
 This is a significant simplification and it removes an entire class of bug.
@@ -370,11 +382,57 @@ This is the design's keystone, and it is why RPC-over-WS is worth doing:
 > run"**. Slices 0–3 are unaffected: heartbeat, cancel and replay all concern a
 > live run, where the job serves its own history.
 
-### Run state: Lakebase Postgres
+### Run state: the job writes it, and there are two kinds
 
-Unchanged, and already built. `run_status` is the one OLTP-shaped thing here —
-a primary key on `run_id`, and a transaction around count-and-claim that makes
-the 5-task ceiling real rather than advisory. Delta cannot do either.
+This is the part that changes most once a job is a service. A scheduled run
+never touches the app, so **the app cannot be the writer of run state** — it
+would be absent for exactly the runs that most need recording.
+
+**The job maintains run state in Lakebase, and keeps it current.** Two
+distinct things live there, and conflating them is how this gets muddled:
+
+| | What it is | Who defines the values |
+|---|---|---|
+| **Job status** | The platform lifecycle — running, succeeded, failed, cancelled | The platform. Fixed, small, shared by every model |
+| **Model status** | Where this particular model thinks it is — its own categorical stages | **The model.** Varies per model by design |
+
+Reading it back splits three ways, and each has exactly one answer:
+
+- **"Is it running?" → the Jobs API.** Not a table, not a count. The platform
+  already knows, authoritatively, and it cannot drift.
+- **"What is it doing right now?" → the app's in-memory cache**, fed by the
+  live stream. Latest value only, no history, gone on restart — and that is
+  fine, because it is a cache of something durable.
+- **"What has it been doing?" → Postgres.** Categorical progress, history,
+  anything a chart needs across time.
+
+> **This retires v3's count-and-claim transaction, and that is a
+> simplification worth naming.** v3 wrapped a count and an insert in one
+> transaction so the 5-task ceiling would be "real rather than advisory".
+> Under this model that machinery is both unnecessary and slightly dishonest:
+> **Databricks enforces the ceiling itself**, and a scheduled run that never
+> passes through the app was never counted anyway. So the app asks the Jobs
+> API what is actually running, and the Postgres row goes back to being a
+> **record rather than a lock**. Less code, and it stops being wrong the
+> moment a run starts without the app.
+
+**The cost, stated:** the harness gains a Postgres client and a Lakebase
+credential. That is a real dependency and it is worth being precise about what
+kind — `psycopg` is an ordinary database driver, not pyspark, Delta or Unity
+Catalog. A service owning its own state row in a shared database is the normal
+microservice shape; a harness reaching into a lakehouse is not. So the earlier
+claim needs restating: **the harness has no *lakehouse* dependency**, which is
+what makes it portable, and it does have a database one, which is what makes
+it a service.
+
+> **Open, and the one thing here that is not decided:** where model status
+> lives on the wire. `shared/envelope.py` has `status: RunStatus` — a fixed
+> six-value enum — plus a free-text `detail`. A model-defined categorical
+> status is neither. Cheapest option that keeps Postgres to one row per run:
+> a `model_status` column carrying the latest value, with the *history* riding
+> the ordinary telemetry stream as `progress` messages, where per-model
+> free-form data already lives in `payload`. That needs deciding before the
+> first real model, not before the heartbeat.
 
 ### Auth: the SDK, for credentials only
 
@@ -402,9 +460,19 @@ fallback. Half a day. Nothing else is unverified.
 
 **Slice 1 — heartbeat, end to end.** A "model" that emits a tick a second and
 nothing else, ~50 lines. Job (threaded) → RPC over WS → app → SSE → browser,
-with records landing in the volume as they are produced. **Deployed, not
-local.** When a tick appears in a browser from a deployed job and the files are
-in the volume, the platform exists.
+with records landing in the volume as they are produced and the job keeping its
+own state row current in Postgres. **Deployed, not local.** When a tick appears
+in a browser from a deployed job and the files are in the volume, the platform
+exists.
+
+**The client for this is new and deliberately tiny** — a page that renders
+ticks and nothing else. v3's SPA is not stripped down for it and is not ported;
+it stays on `dev`, intact and runnable. The point of heartbeat-first is that
+when something breaks it is the transport, not a UI. `transport/hub.ts` is
+worth re-reading before writing the new one — its consecutive-failure counter
+(reset on every successful open, cap 10) and its gap detection are hard-won and
+the reasoning applies unchanged — but re-read, not lifted, because it is built
+around v3's four channels.
 
 **Slice 2 — cancel, acknowledged.** Browser → app → job → ack → terminal
 status. The first thing the RPC interface buys.
@@ -434,8 +502,9 @@ owning its own data, the harness is a comms and telemetry layer with no
 Databricks data dependency at all.
 
 That is also what would make a future split into separate services cheap. The
-harness's entire contract becomes "run this object, move its messages, write
-its telemetry" — nothing in it is tied to Spark, Delta, or Unity Catalog.
+harness's contract becomes "run this object, move its messages, write its
+telemetry, keep its state row current" — tied to no lakehouse component at
+all, and to Postgres only through an ordinary driver.
 
 That leaves the app as the only open question: keep async Python (FastAPI, or
 something else in that space), or take it somewhere compiled. Two things make
