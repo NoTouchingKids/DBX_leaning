@@ -184,6 +184,8 @@ class DevStack:
         ws_reconnect_s: float = 5.0,
         reload: bool = False,
         quiet_jobs: bool = False,
+        postgres_dsn: str | None = None,
+        host: str = "127.0.0.1",
     ) -> None:
         self.state_dir = state_dir
         self.app_port = app_port
@@ -195,6 +197,16 @@ class DevStack:
         self.ws_reconnect_s = ws_reconnect_s
         self.reload = reload
         self.quiet_jobs = quiet_jobs
+        #: An external Postgres to use instead of starting an embedded one.
+        #: See `start_postgres`.
+        self.postgres_dsn = postgres_dsn
+        #: What the app and the launcher BIND to. Everything this script talks
+        #: to them on stays `127.0.0.1` — health checks, the launcher's
+        #: `--app-url`, the `DBX_APP_URL` a job attaches with — because those
+        #: are all inside the same machine (or the same container), and
+        #: 0.0.0.0 includes loopback anyway. Only the bind has to widen, and
+        #: only so a port published out of a container is reachable.
+        self.host = host
         self.dsn: str | None = None
         self._postgres = None
         self._children: list[tuple[str, subprocess.Popen]] = []
@@ -211,14 +223,39 @@ class DevStack:
 
     # --- Postgres ---------------------------------------------------------
 
+    @property
+    def postgres_is_ours(self) -> bool:
+        """False when `--postgres-dsn` named a server we did not start — which
+        is also the answer to "may this stack shut it down"."""
+        return self.postgres_dsn is None
+
     def start_postgres(self) -> str:
-        """Embedded Postgres, standing in for Lakebase.
+        """Postgres, standing in for Lakebase.
 
         Not a substitution in the way the Jobs API is: Lakebase *is* Postgres,
         so ``PostgresRunStore`` runs here byte for byte — advisory lock,
         primary key and all. Only the credential story differs (a real one
         authenticates with a short-lived OAuth token).
+
+        Embedded by default (``pgserver``), because one command should stand
+        the whole stack up. ``--postgres-dsn`` points at a server you already
+        have instead, and there are two real reasons to:
+
+        * **``pgserver`` publishes no aarch64 Linux wheels** (see the marker on
+          it in ``pyproject.toml``). On an ARM box — including a Databricks
+          machine — it is simply not installable, and the embedded path cannot
+          run at all.
+        * A container. ``docker/compose.yml`` runs a real ``postgres:16``
+          beside the stack and passes its DSN here, which is the same major
+          version a real Lakebase instance reported.
+
+        A DSN we were handed is never cleaned up on the way out: it was not
+        ours to create and it is not ours to destroy.
         """
+        if self.postgres_dsn:
+            self.dsn = self.postgres_dsn
+            return self.dsn
+
         import pgserver
 
         directory = self.state_dir / "pg"
@@ -271,6 +308,8 @@ class DevStack:
             self.app_url,
             "--app-token",
             DEV_JOB_TOKEN,
+            "--host",
+            self.host,
             *(["--quiet-jobs"] if self.quiet_jobs else []),
         ]
 
@@ -291,7 +330,7 @@ class DevStack:
             "uvicorn",
             "server.main:app",
             "--host",
-            "127.0.0.1",
+            self.host,
             "--port",
             str(self.app_port),
             *(["--reload"] if self.reload else []),
@@ -471,6 +510,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="how often a job retries the WebSocket. Production default is 30s; 5s is "
         "friendlier when you keep restarting the app",
     )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="what the app and launcher BIND to. Use 0.0.0.0 in a container, "
+        "where the default reaches nothing outside it; docker/compose.yml does",
+    )
+    parser.add_argument(
+        "--postgres-dsn",
+        default=None,
+        help="use this Postgres instead of starting an embedded one, e.g. "
+        "postgresql://postgres:postgres@127.0.0.1:5432/dbx_leaning. Required on "
+        "aarch64 Linux, where pgserver has no wheels; used by docker/compose.yml",
+    )
     parser.add_argument("--reload", action="store_true", help="uvicorn --reload for app/")
     parser.add_argument("--quiet-jobs", action="store_true", help="do not echo job output here")
     return parser
@@ -479,13 +531,15 @@ def build_parser() -> argparse.ArgumentParser:
 def _banner(stack: DevStack) -> str:
     models = ", ".join(sorted(stack.job_ids)) or "(none)"
     fast = ", ".join(m for m in FAST_MODELS if m in stack.job_ids)
+    registry = "embedded Postgres  " if stack.postgres_is_ours else "your Postgres     "
+    postgres_note = ", and Postgres" if stack.postgres_is_ours else " (your Postgres is left alone)"
     return f"""
 ================================================================================
   dev stack up — no Databricks workspace involved
 ================================================================================
   app            {stack.app_url}          (real app/, real SSE, real WS ingress)
   job launcher   {stack.launcher_url}     (SUBSTITUTE for the Jobs API)
-  registry       embedded Postgres        (real PostgresRunStore, real ceiling)
+  registry       {registry}  (real PostgresRunStore, real ceiling)
   telemetry      {stack.state_dir / "delta"}
                  local JSONL — NOT Unity Catalog
   job logs       {stack.state_dir / "job-logs"}
@@ -504,7 +558,7 @@ def _banner(stack: DevStack) -> str:
     Reconciliation still runs, without run_events. /healthz says so; live
     streaming, trigger, cancel and listing are unaffected.
 
-  Ctrl-C stops the app, the launcher, every job it started, and Postgres.
+  Ctrl-C stops the app, the launcher, and every job it started{postgres_note}.
 ================================================================================
 """
 
@@ -546,10 +600,15 @@ def main(argv: list[str] | None = None) -> int:
         ws_reconnect_s=args.ws_reconnect_s,
         reload=args.reload,
         quiet_jobs=args.quiet_jobs,
+        postgres_dsn=args.postgres_dsn,
+        host=args.host,
     )
 
     try:
-        print("starting embedded postgres (the Lakebase stand-in)...", file=sys.stderr)
+        if stack.postgres_is_ours:
+            print("starting embedded postgres (the Lakebase stand-in)...", file=sys.stderr)
+        else:
+            print("using the Postgres you gave me (the Lakebase stand-in)...", file=sys.stderr)
         stack.start_postgres()
         stale = stack.reconcile_stale_runs()
         if stale:

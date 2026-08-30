@@ -246,3 +246,6 @@ __marimo__/
 # A fresh checkout cannot `import job` until this has been made. conftest.py
 # does it before tests; otherwise: uv run python scripts/sync_shared.py
 /job/shared/
+
+# Local state from docker/compose.yml — telemetry JSONL and job logs.
+.docker-dev-state/

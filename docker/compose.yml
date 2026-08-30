@@ -1,0 +1,82 @@
+# One command for the whole local platform:
+#
+#     docker compose -f docker/compose.yml up --build
+#
+# Then http://127.0.0.1:8000/docs to trigger, and
+# http://127.0.0.1:8000/api/runs/<run_id>/stream in a tab to watch.
+#
+# What this gives you over `uv run python scripts/dev_stack.py` — which needs
+# no Docker and is still the faster loop:
+#
+#   * a REAL postgres:16, the same major version a live Lakebase instance
+#     reported. The bare script uses embedded `pgserver`, which publishes no
+#     aarch64 Linux wheels, so on an ARM box this is the only way to run it.
+#   * no uv, no Python 3.11, nothing to install on the host.
+#
+# What it does NOT give you: the per-model dependency split. One container
+# carries every model's libraries, because a container is one environment and
+# the split is one environment per JOB. `deploy/requirements/` holds that, and
+# `tests/deploy/` checks it.
+
+name: dbx-leaning-dev
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dbx_leaning
+    # Published so you can psql into the registry while the stack runs —
+    # `psql postgresql://postgres:postgres@127.0.0.1:55432/dbx_leaning`. An
+    # off-default port so it cannot collide with a Postgres already on 5432.
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      # `-d`, not just `-U`: pg_isready reports ready as soon as the server
+      # accepts connections, which happens before the initdb script has
+      # created POSTGRES_DB. Naming the database is what makes the wait mean
+      # "the app can connect", which is the only thing depends_on is for here.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dbx_leaning"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      # The registry is disposable: every stack start reconciles runs left
+      # behind by the last one, and losing it costs nothing. In RAM it is
+      # faster and leaves no volume to forget about.
+      - /var/lib/postgresql/data
+
+  stack:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - uv
+      - run
+      - python
+      - scripts/dev_stack.py
+      - --postgres-dsn=postgresql://postgres:postgres@postgres:5432/dbx_leaning
+      # The container's own loopback is not yours. The app has to bind
+      # 0.0.0.0 for a published port to reach it.
+      - --host=0.0.0.0
+      # Inside the mount, so JSONL telemetry and job logs are readable from
+      # the host while a run is still going.
+      - --state-dir=/work/.docker-dev-state
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # The repo, live. Edit on the host, restart the stack, no rebuild — the
+      # image holds the dependencies and the source is mounted over them.
+      - ..:/work
+      # ...except these three, which must stay the CONTAINER's. .venv is
+      # built for linux and for the container's Python; a host .venv mounted
+      # over it is the wrong interpreter and the wrong wheels. The other two
+      # are build output nobody wants synced.
+      - /work/.venv
+      - /work/app/client/node_modules
+      - /work/.git
