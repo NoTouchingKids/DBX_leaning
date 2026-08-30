@@ -30,9 +30,9 @@ deployed" as a premise — `CLAUDE.md` ("How to work in this repo"),
 `docs/parallelization-plan.md`, `app/client/README.md`. Their conclusions are
 unanchored until each is re-read against a deployed system.
 
-**Rule for v4: no document may claim a deployment status. It goes stale
+**Rule for v4: no document may claim a deployment status.** It goes stale
 faster than anything else in the repo, and it is the one fact every session
-reads first.** Status belongs in git, in the bundle, and in the workspace.
+reads first. Status belongs in git, in the bundle, and in the workspace.
 
 ## The measurements this plan is built on
 
@@ -42,7 +42,7 @@ Taken 2026-08-30 against `dev`. `uv sync --all-extras && uv run pytest` →
 | Layer | Lines | Verdict |
 |---|---|---|
 | `shared/` — envelope + protocol | 900 | Keep. Lean and correct |
-| `job/` harness (excl. models) | ~2,800 | Rewrite the transport and durability; keep the model contract |
+| `job/` harness (excl. models) | ~2,800 | Rewrite transport + durability; keep the model contract |
 | `app/server/` | 3,561 | Rewrite ~half; delete the warehouse read path |
 | `job/models/` — all eleven | 7,166 | Keep 1, archive 10 |
 | **`app/client/src/components/models/`** | **20,117** | **Delete** |
@@ -63,24 +63,28 @@ model is deployed and streaming.
 
 ## What carries forward
 
-Ported, not redesigned. Each of these survived eleven models and a real
-deployment without changing shape.
+Ported, not redesigned. Each survived eleven models and a real deployment
+without changing shape.
 
 - **`shared/envelope.py`** (290 lines). `seq`, `row_count`, `chunk_index` and
   `final` each exist because something broke without them; `row_count` is the
   only thing distinguishing "succeeded, wrote nothing" from "succeeded, wrote
   8,760 rows". Do not re-derive this. Port it and put a new transport under it.
-- **The duck-typed model contract.** `docs/parallelization-plan.md` records
-  six models added with zero harness changes, and `ortools_jobshop` surfacing
-  a real cancellation gap that was fixed *inside the model's own callbacks*
-  rather than with a new harness hook. That is the contract working.
+- **SSE app→browser, unchanged.** It survives the ingress, `EventSource` gives
+  reconnect and `Last-Event-ID` resume for free, and nothing about it is
+  implicated in what went wrong. It is not in scope for this rewrite.
+- **The duck-typed model contract.** Six models were added with zero harness
+  changes, and `ortools_jobshop` surfaced a real cancellation gap that was
+  fixed *inside the model's own callbacks* rather than with a new harness
+  hook. That is the contract working.
 - **The autonomy invariant.** The job runs; the app watches when it can. Apps
-  die at 24h, jobs do not. Everything else follows from this and it is not
-  up for revision.
-- **`shared/downsample.py`** — LTTB. Small, correct, and stride-sampling
-  hides exactly the spikes that matter.
-- **The deployment lessons below.** These are the most valuable thing in the
-  repo and the easiest to lose in a rewrite.
+  die at 24h, jobs do not. Everything follows from this and it is not up for
+  revision.
+- **The app volume, which already exists.** `main.dbx_leaning.app_store` is
+  created, granted, mounted at `/Volumes/main/dbx_leaning/app_store`, and
+  already a `Path` in `app/server/services.py`. The durable path below is not
+  new plumbing — it is a second, larger use of plumbing that is deployed.
+- **The deployment lessons below.**
 
 ### Deployment lessons that must not regress
 
@@ -91,186 +95,226 @@ the only thing v3 bought that v1 and v2 did not.
 |---|---|
 | Serverless does not set `__file__` | Repo-root discovery |
 | A `spark_python_task` runs inside an ipykernel that **already has a running event loop** — `asyncio.run` refuses | `job/main.py::_run` |
-| The SQL warehouse is usually **asleep**; a query after any quiet period waits for it to start, and a naive timeout cancels your own statement | `app/server/sql.py` |
+| The SQL warehouse is usually **asleep**; a query after a quiet period waits for it to start, and a naive timeout cancels your own statement | `app/server/sql.py` |
 | A job needs **two** credentials on different headers — an OAuth identity for the Apps proxy, a shared secret for the app | `job/auth.py` |
 | The job→model id map may be absent from the environment and must be discoverable from the workspace | `app/server/discovery.py` |
 | Write against the **table's** schema, never one inferred from the batch | `job/delta.py` |
 | A workspace secret scope is not a Unity Catalog object | `deploy/README.md` |
 
+Note the second row. It is about to stop being a problem — see below.
+
 ## What gets deleted
 
 - **The ten non-heartbeat models**, archived on `dev` and out of v4's tree
-  until the platform is proven without them. Eleven models is the reason the
-  platform cannot be experimented on: every transport change has 22
-  downstream consumers, and each new one costs a job file, a requirements
-  export, a DDL block, a registry entry and ~1,800 lines of React.
-- **All per-model frontend views** — 20,117 lines. The generic view returns.
+  until the platform is proven without them. Eleven models is why the platform
+  cannot be experimented on: every transport change has 22 downstream
+  consumers, and each new model costs a job file, a requirements export, a DDL
+  block, a registry entry and ~1,800 lines of React.
+- **All per-model frontend views** — 20,117 lines.
 - **`WarehouseRunStore`** and the `RunStore` Protocol. It exists only so a
   deploy is never blocked on provisioning. Lakebase is provisioned.
-- **`app/server/sql.py` + `repository.py`** (672 lines) — see durability below.
-  If telemetry is read from volume files, the app never needs the warehouse.
-- **`DeltaRsWriter`.** It was kept as a named class to hold an interface open.
-  The interface is being replaced; let it go.
+- **`app/server/sql.py` + `repository.py`** (672 lines). With run state in
+  Postgres, live backfill served by the job (below), and history arriving via
+  the ingestion job, nothing on the app's live path needs the warehouse.
+- **`job/delta.py`** (340 lines) and `DeltaRsWriter` with it.
+- **`job/buffer.py` + `job/sink.py`** (225 lines) — the in-memory batching
+  layer. v4 writes through to a file instead.
 - **The triple copy of `shared/`.** `shared/`, `app/shared/`, `job/shared/`,
   plus a sync script and a drift test to make the duplication safe. v4 either
   packages it as a wheel or accepts one copy — not three.
 
 ## The v4 architecture
 
-### Transport: one channel, RPC-shaped
+### Transport: one RPC-shaped channel over WS
 
 v3 carries one envelope over **four paths with four different failure
 semantics** — WS, HTTP push, Delta, SSE. That, not `protocol.py` (114 lines),
 is the actual over-build.
 
-v4: **JSON-RPC 2.0 over the WebSocket**, one bidirectional channel, methods
-dispatched from one table instead of a `ControlKind` if-chain.
+v4: **an RPC-style interface over the WebSocket** — request/response with
+correlation ids, methods dispatched from one table instead of a `ControlKind`
+if-chain, one error shape. JSON-RPC 2.0 is the obvious wire format because it
+is trivial and already understood; **the point is the RPC semantics, not the
+specific framing.** gRPC is not a candidate — it would need HTTP/2 with
+trailers through the Apps ingress, which is not what the spikes cleared, and
+it buys nothing the design needs.
 
-What this buys that v3 lacks — concretely, not aesthetically:
+Three things this buys that v3 cannot do:
 
-- **Cancel gets an acknowledgement.** Today `_on_control` sets a token and
-  replies nothing, so the app cannot distinguish "cancel delivered" from
-  "cancel lost". A request/response pair fixes that.
-- **The job can ask the app things**, not only tell it. Config, whether it is
-  still wanted, whether anything is listening.
-- **Errors have one shape** rather than a per-call convention.
+1. **Cancel gets an acknowledgement.** Today `_on_control` sets a token and
+   replies nothing, so the app cannot distinguish "cancel delivered" from
+   "cancel lost".
+2. **Backfill becomes a method call** — see below. This is the strongest
+   argument for the whole design.
+3. **The job can ask the app things**, not only tell it.
 
-> ### ⚠️ Not gRPC, unless it is probed first
->
-> gRPC needs **HTTP/2 end-to-end plus trailers** through the Databricks Apps
-> ingress. `docs/spike-results.md` cleared WebSocket `Upgrade` and SSE. It did
-> **not** clear HTTP/2 gRPC, which is a materially different question of the
-> proxy.
->
-> Betting a rewrite on an unverified ingress assumption is the exact mistake
-> that produced v1 (avoided WebSockets on hearsay) and v2 (shipped
-> feature-complete with "verify the WebSocket survives the ingress" as
-> unfinished item #1, never deployed). **JSON-RPC over WS gets the semantics
-> with none of the risk**, riding an `Upgrade` already proven to work.
->
-> If gRPC is wanted for its own sake — a legitimate reason on a learning
-> project — probe it in a throwaway **before** it is load-bearing. It is a
-> half-day and it protects the whole build.
+### The job side is threaded, not asyncio
 
-### Durability: files to a volume, no Spark
+This is a significant simplification and it removes an entire class of bug.
 
-The job stops writing Delta and writes **files to a Unity Catalog volume**:
+`asyncio` currently spans **8 files in `job/` with 122 references**, and the
+single ugliest workaround in the codebase exists purely to serve it:
+`job/main.py::_run` detects that a serverless `spark_python_task` is already
+inside an ipykernel event loop, and hands the run to a `ThreadPoolExecutor`
+because `asyncio.run` refuses to nest. There is a 20-line comment explaining
+it and a rejected `nest_asyncio` alternative.
+
+**A threaded job deletes that problem rather than working around it.** The
+shape:
+
+- One thread owns the WebSocket. `websockets.sync.client.connect` — verified
+  present in the pinned `websockets==17.0.1`.
+- The model runs on the main thread, blocking, which is what a solver
+  actually is. No `asyncio.to_thread` to keep the loop breathing.
+- They meet over a `queue.Queue`. Cancellation stays a `threading.Event`,
+  which it already is.
+
+Gone with it: the loop exception handler that suppresses transport errors, the
+task/pump/flusher choreography in `runner.py`, and the ipykernel dance. The
+job becomes a program that does one thing on one thread and talks over a
+socket on another.
+
+### Durability: write through to a volume file
+
+The job **stops buffering telemetry in memory** and instead writes each record
+through to a file on a Unity Catalog volume:
 
 ```
-/Volumes/<catalog>/<schema>/<vol>/runs/<run_id>/part-NNNNN.jsonl
+/Volumes/<catalog>/<schema>/<vol>/runs/<run_id>/…
 ```
 
-Ingestion from volume → Delta tables is **deferred**, and is a scheduled job
-or Auto Loader later. It is not on the live path and does not block anything.
+A **separate scheduled or streaming ingestion job** reads those files and
+loads them into SQL. That is a different job on a different schedule; it is
+not on the live path and does not block anything in this plan.
 
-One correction to the framing this came from: **the job already never touches
-the SQL warehouse** — zero references in `job/`. v3's write path is Spark →
-Delta. So the real prize here is not avoiding the warehouse; it is:
+Consequences, all of them good:
 
-- **Spark leaves the job entirely.** `job/delta.py` is 340 lines, most of it
-  session archaeology: three acquisition strategies, a Spark Connect branch,
-  and a thread-affinity bug fixed on Aug 27. A file append needs none of it.
+- **Spark leaves the telemetry write path.** `job/delta.py` is 340 lines,
+  most of it session archaeology — three acquisition strategies, a Spark
+  Connect branch, and a thread-affinity bug fixed on Aug 27. A file write
+  needs none of it.
+- **The in-memory buffer goes.** `buffer.py` + `sink.py` (225 lines) collapse
+  into "write a line, flush periodically". Durability stops depending on a
+  flush policy holding data hostage.
 - **Concurrency stops being a question.** Each run owns its own directory, so
-  there is nothing to conflict — strictly simpler than Delta's optimistic
-  concurrency and its S3 locking caveat.
-- **The app may drop the warehouse altogether.** With `run_status` in
-  Postgres and telemetry in volume files, nothing on the live path needs it:
-  672 lines and the warehouse-start race go with it.
-- **A model environment gets much smaller.** No pyspark in the job floor.
+  there is nothing to conflict — simpler than Delta's optimistic concurrency
+  and its S3 locking caveat.
+- **The 5-task ceiling is the only remaining shared resource.**
 
-Retained rules, unchanged: flush on **size OR age OR end-of-run** (the age
-bound is what caps loss on a crash), and **a run must never report
-`SUCCEEDED` over a failed durable write**.
+Retained: **a run must never report `SUCCEEDED` over a failed durable write.**
+The check gets easier, not harder — it becomes "did the writes land", not
+"did the flush of a buffer land".
 
-> **Probe before committing:** that the app can *read back* volume files via
-> the Files API (`/api/2.0/fs/files{path}`, `/api/2.0/fs/directories{path}`)
-> with the service principal it already has. Backfill depends on it. This repo
-> has paid twice for assuming a read path works — `hour_ts` typed by
-> inference, and delta-rs silently writing a three-part UC name to a local
-> directory. Verify, then build.
+> **⚠️ The one probe this plan actually needs.** Can a serverless job **append
+> incrementally** to a file under `/Volumes/...`, holding a handle open across
+> a long run? Volume FUSE supports sequential writes to new files, but "keep a
+> handle open for an hour and flush repeatedly" is a stronger claim and is not
+> documented as supported.
+>
+> **Fallback, which may simply be the design:** roll part files —
+> `part-00001.jsonl`, `part-00002.jsonl`, each written whole and closed. That
+> is append-only at the directory level, needs no FUSE append semantics, and is
+> exactly the layout Auto Loader wants to ingest anyway. Probing decides
+> whether the simpler single-file version is available; the fallback is safe
+> either way.
+>
+> Note also: the volume is currently granted to the **app**. The job needs its
+> own `WRITE` grant.
 
-Known trade-off, accepted: many small files. Fine at this scale; the
-volume→Delta ingestion step is where it gets fixed if it ever matters.
+### Backfill: the job replays from its own log
+
+When a client reconnects mid-run and finds a gap, **the app asks the job to
+resend it** — `replay(from_seq, to_seq)` — and the job re-reads its own log
+file and sends those records over the WebSocket.
+
+This is the design's keystone, and it is why RPC-over-WS is worth doing:
+
+- The app **never reads volume files**, so no Files API dependency, no second
+  credential path, no parsing the durable format in two places.
+- The job is the authority on its own run while it is alive, and it already
+  has the data on disk.
+- Backfill stops being a warehouse query, which is the cost mistake this
+  platform was built to avoid.
+
+For a **finished** run, history comes from SQL after the ingestion job has run.
+That is a later slice and deliberately not on the critical path.
 
 ### Run state: Lakebase Postgres
 
-Unchanged in design, and already built. `run_status` is the one OLTP-shaped
-thing here — a primary key on `run_id`, and a transaction around
-count-and-claim that makes the 5-task ceiling real rather than advisory.
-Delta cannot do either.
+Unchanged, and already built. `run_status` is the one OLTP-shaped thing here —
+a primary key on `run_id`, and a transaction around count-and-claim that makes
+the 5-task ceiling real rather than advisory. Delta cannot do either.
 
 ### Auth: the SDK, for credentials only
 
 `CLAUDE.md` currently states the `databricks-sdk` is "deliberately absent from
-every dependency set." **That rule was half right, and the wrong half cost
-343 lines** (`job/auth.py` 193, `app/server/oauth.py` 150) plus two of the
-Aug 27 fixes.
-
-v4 splits it where the value actually is:
+every dependency set." **That rule was half right, and the wrong half cost 343
+lines** (`job/auth.py` 193, `app/server/oauth.py` 150) plus two of the Aug 27
+fixes.
 
 - **SDK for token acquisition and refresh.** Nobody should hand-roll OAuth
-  token exchange, and this project's own history is the evidence.
-- **Plain `httpx` for the Jobs and Files APIs.** The original reasoning holds:
-  they are a few REST calls, and the SDK's weight would otherwise be paid by
-  every model environment.
+  token exchange, and this project's history is the evidence.
+- **Plain `httpx` for the Jobs API.** The original reasoning holds: it is a few
+  REST calls, and the SDK's weight would otherwise be paid by every model
+  environment.
 
-## Build order — vertical slices, heartbeat first
+## Scope: heartbeat, and stop there
 
-The ordering principle, and the one most different from v3: **prove comms
-with no model in the picture.**
+The ordering principle, and the one most different from v3: **prove comms with
+no model in the picture.** This plan commits to Slices 0–3 only. Everything
+after is a later decision made with a working platform in hand.
 
-**Slice 0 — probes.** Files API read-back. gRPC over the ingress *only if*
-gRPC is still wanted. Half a day, and everything downstream rests on it.
+**Slice 0 — one probe.** Incremental volume append from a serverless job, with
+rolling part files as the fallback. Half a day. Nothing else is unverified.
 
 **Slice 1 — heartbeat, end to end.** A "model" that emits a tick a second and
-nothing else, ~50 lines. Job → JSON-RPC over WS → app → SSE → browser, plus
-files landing in the volume. Deployed, not local. **This is the milestone
-that matters**; when a tick appears in a browser from a deployed job and the
-files are in the volume, the platform exists.
+nothing else, ~50 lines. Job (threaded) → RPC over WS → app → SSE → browser,
+with records landing in the volume as they are produced. **Deployed, not
+local.** When a tick appears in a browser from a deployed job and the files are
+in the volume, the platform exists.
 
-**Slice 2 — cancel, with an acknowledgement.** Browser → app → job → ack →
-terminal status. The first thing JSON-RPC buys, and the first thing v3 cannot
-do.
+**Slice 2 — cancel, acknowledged.** Browser → app → job → ack → terminal
+status. The first thing the RPC interface buys.
 
-**Slice 3 — durability under failure.** Kill the app mid-run; the run must
-complete and be fully readable afterwards. Backfill from volume files. This
-is the autonomy invariant, tested rather than asserted.
+**Slice 3 — replay.** Cut the connection mid-run, reconnect, call
+`replay(from_seq, to_seq)`, get the gap filled from the job's own log. Then
+kill the app entirely and confirm the run completes and its files are intact.
+That is the autonomy invariant tested rather than asserted.
 
-**Slice 4 — one real model.** `gurobi_scheduling` or `mcmc`. One. Generic
-view only.
-
-**Slice 5 — the generic view, properly.** Make it good enough that model
-number two needs no frontend work at all. That is the test the thesis failed
-in v3, and it is worth passing deliberately.
-
-Only then: a second model, and the question of whether any model has *earned*
-a bespoke view.
+**Later, once the above is deployed and boring:** one real model on the generic
+view; the ingestion job (volume → SQL); history for finished runs; and only
+then the question of whether any model has *earned* a bespoke view.
 
 ## The language decision, deferred on purpose
 
-Settle the architecture above first, then pick. The criteria, so it is a
-decision and not a preference:
+**Scope: the app/backend only. The job stays Python.** The models are Python
+and always will be — Gurobi, OR-Tools, torch — and `job/models/_data` reads
+Unity Catalog tables through the job's Spark session, so **pyspark stays in the
+job for model data reads.** What changes is that it is no longer on the
+telemetry write path, which is where all the pain was.
 
-- **Models are Python and always will be** — Gurobi, OR-Tools, torch. That is
-  fixed regardless.
-- The volume-file durable path **removes Spark from the job**, which is what
-  makes a non-Python app or harness genuinely viable. Under v3's Spark
-  dependency it was not.
-- So the live options are: keep Python and change its shape (framework,
-  concurrency); or split — a compiled app and relay, Python models behind a
-  process boundary.
-- **What a learning project should optimise for is which one teaches more per
-  unit of yak-shaving**, and that is easier to judge once the transport shape
-  is fixed.
+That leaves the app as the only open question: keep async Python (FastAPI, or
+something else in that space), or take it somewhere compiled. Two things make
+that decision cleaner than it was:
+
+- The app's job is narrow — an RPC endpoint for jobs, SSE fan-out to browsers,
+  Postgres for run state, a few REST calls to the Jobs API. That is a good fit
+  for almost anything.
+- It no longer needs Spark, Delta, or the SQL warehouse on the live path, so
+  nothing about the platform forces Python on it.
+
+Decide it after Slice 1 is deployed and the RPC surface is real, so the choice
+is made against a known interface rather than an imagined one.
 
 ## What "done" means for v4
 
-The bar v3 met, plus the two it did not:
+The bar v3 met, plus the three it did not:
 
 1. A deployed run streams to a browser. *(v3: met)*
 2. A run with no app listening is fully durable and readable afterwards.
    *(v3: designed for, never adversarially tested)*
-3. **Adding a model costs no frontend code.** *(v3: failed, at ~1,800 lines
-   each)*
-4. **The docs are true on the day they are read.** *(v3: failed, and it is
-   why this document opens the way it does)*
+3. **Cancel is acknowledged, and a gap can be replayed on demand.**
+   *(v3: neither)*
+4. **Adding a model costs no frontend code.** *(v3: failed, ~1,800 lines each)*
+5. **The docs are true on the day they are read.** *(v3: failed, and it is why
+   this document opens the way it does)*
