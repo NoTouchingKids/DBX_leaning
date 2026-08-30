@@ -118,11 +118,10 @@ Note the second row. It is about to stop being a problem — see below.
 - **`app/server/sql.py` + `repository.py`** (672 lines). With run state in
   Postgres, live backfill served by the job (below), and history arriving via
   the ingestion job, nothing on the app's live path needs the warehouse.
-- **Most of `job/delta.py`** (340 lines) — `DeltaRsWriter`, `JsonlWriter`,
-  `select_writer` and the buffering machinery. What survives is small and
-  narrow: write a batch of result rows to a UC table against **the table's own
-  schema**, reusing the Spark session the models already need. See the two
-  write paths below.
+- **`job/delta.py` entirely** (340 lines). Not reduced — redundant. The
+  harness writes no tables at all once the model owns its own results; see
+  "Who writes what" below. `emitter.py::_absorb_result_rows` and the
+  `results_table` / `preview_axes` plumbing go with it.
 - **`job/buffer.py` + `job/sink.py`** (225 lines) — the in-memory batching
   layer. v4 writes through to a file instead.
 - **The triple copy of `shared/`.** `shared/`, `app/shared/`, `job/shared/`,
@@ -130,6 +129,33 @@ Note the second row. It is about to stop being a problem — see below.
   packages it as a wheel or accepts one copy — not three.
 
 ## The v4 architecture
+
+### The direction every boundary below is drawn from
+
+**Event-driven, near-real-time, microservice-shaped now; genuinely separate
+services later.** This is the principle that explains the rest of this
+document, and it should be the tie-breaker whenever a decision here looks
+arbitrary.
+
+Concretely, it means:
+
+- **A job is a service, not a subroutine.** It runs on a schedule or an event.
+  The app may *trigger* one, and that is the only thing the app does to a job
+  that the job cannot do without it. Everything else — reading its inputs,
+  computing, writing its results, recording its telemetry, reaching a terminal
+  status — happens whether or not the app exists.
+- **The app is a trigger and an observer.** Not an orchestrator, not a
+  persistence layer, not the owner of anyone's data.
+- **A model owns its own data lifecycle**, input and output both. The harness
+  is a comms and telemetry layer around it.
+- **The app runs ~8h/day and the job does not.** A scheduled run at 3am is the
+  normal case, not the degraded one, and it is the case every design decision
+  here is checked against.
+
+The v3 invariant ("the job is autonomous, the app is an optional observer")
+was the same idea stated defensively. v4 states it as the target shape: these
+are services that happen to share a repo today, and the boundaries are drawn
+so that they can stop sharing one without a redesign.
 
 ### Transport: one RPC-shaped channel over WS
 
@@ -232,47 +258,60 @@ Consequences worth stating explicitly:
 > It stays small either way. Result *rows* do not come here (below), so the
 > volume holds a stream of small records and nothing bulk.
 
-#### Two write paths, and only one of them is Spark
+#### Who writes what: the model owns its own data
 
-This is the distinction the plan was blurring, and it is worth stating flatly
-because the emitter routes both through one `sink` today
-(`emitter.py::_absorb_result_rows` → `sink.append_rows`).
+The harness does **not** write model output. A model reads its own inputs and
+writes its own results table. The harness owns telemetry and comms, and
+nothing else.
 
-| What | Where | How | Governed by |
+| What | Owner | Where | How |
 |---|---|---|---|
-| **Telemetry** — every envelope: `log`, `progress`, `status`, and the `result` *summary* | The `log` volume, as files | Plain file write, no Spark | One grant, job-only |
-| **Result rows** — the model's actual output | That model's own UC results table | Spark, direct | Per-model UC grants, applied at write time |
+| **Telemetry** — every envelope: `log`, `progress`, `status`, and the `result` *summary* | **Harness** | The `log` volume, as files | Plain file write, no Spark |
+| **Model inputs** | **Model** | Unity Catalog | Its own Spark read |
+| **Result rows** | **Model** | Its own UC results table | Its own Spark write |
 
-The split is principled rather than a compromise. Telemetry is high-frequency,
-small, and streaming — files suit it, and a file write is the easiest thing in
-the world to verify. Result rows are a bounded batch written once (or once per
-chunk), queried later by people who are not watching a run, and governed per
-model because different models serve different audiences. A table suits that,
-and the Spark session is **already there** — `job/models/_data` needs it to
-read Unity Catalog inputs, so results cost no new dependency and no new
-session.
+This is what makes `job/delta.py` **redundant outright** rather than reduced —
+there is no harness-side table write left for it to do, in any form. The
+`results_table` config, `preview_axes` on the model handle, and
+`emitter.py::_absorb_result_rows` go with it.
 
-So "Spark leaves the job" was too strong; the accurate claim is **Spark leaves
-the telemetry path**, which is where every one of its problems came from — the
-per-flush session use, the thread-affinity bug, the acquisition archaeology on
-a hot path. Writing a result batch once at the end is not that.
+**`emit("result", ...)` changes shape accordingly.** A model no longer hands
+rows to the harness to write. It writes them itself, then *reports*:
+`row_count` (it knows what it wrote), `fetch_hint` (it knows where it put
+them), and `preview` (a bounded sample it produces). The harness validates the
+envelope and moves it; it never sees a result set. That is already what the
+wire contract says — this just makes the harness honest about it, rather than
+being a writer wearing a messenger's clothes.
 
-The durability rule is unchanged and lands where it always did: **a run must
-not report `SUCCEEDED` if its result write failed**, and `row_count` is what
-makes "wrote nothing" distinguishable from "did not get that far".
+`shared/downsample.py` (LTTB) stays useful and becomes a **utility a model may
+call**, not a step the harness performs on the model's behalf.
 
-> **Deferred, deliberately.** A heartbeat emits no result rows, so Slices 0–3
-> never exercise this path. It is designed, not built, until the first real
-> model lands. Do not build it speculatively — but do not let the volume
-> quietly become the results store either, which is what happens if the
-> emitter's single `sink` is ported unchanged.
+> **The safety property this costs, stated plainly.** v3's rule was "a run must
+> not report `SUCCEEDED` if its result write failed", and the harness could
+> *enforce* it because the harness did the writing. It no longer can. The rule
+> survives but moves into the **model contract**: a model whose write fails
+> must raise or report failure, and the harness's remaining guarantee is
+> narrower — a terminal `result` must carry a `row_count`, so "wrote nothing"
+> stays distinguishable from "did not get that far".
+>
+> This is a real trade, not a free win. It is the price of the ownership
+> boundary, and it is worth paying because a model that cannot be trusted to
+> know whether its own write succeeded cannot be trusted with the write at all.
+> It belongs in `job/models/README.md` as a contract requirement, not as
+> advice.
+
+> **Deferred, deliberately.** A heartbeat reads nothing and writes nothing, so
+> Slices 0–3 never exercise this. It is designed, not built.
 
 Consequences, all of them good:
 
-- **Spark leaves the telemetry write path.** `job/delta.py` is 340 lines,
-  most of it session archaeology — three acquisition strategies, a Spark
-  Connect branch, and a thread-affinity bug fixed on Aug 27. A file write
-  needs none of it.
+- **Spark leaves the harness entirely.** Not just the telemetry path: with the
+  model owning its own reads and writes, the *harness* has no Spark left in it
+  at all. `job/delta.py` is 340 lines, most of it session archaeology — three
+  acquisition strategies, a Spark Connect branch, and a thread-affinity bug
+  fixed on Aug 27 — and all of it goes. Spark remains a **model** concern,
+  inside the model, where the session it needs is the one it already uses to
+  read its inputs.
 - **The in-memory buffer goes.** `buffer.py` + `sink.py` (225 lines) collapse
   into "write a line, flush periodically". Durability stops depending on a
   flush policy holding data hostage.
@@ -388,10 +427,15 @@ view.
 ## The language decision, deferred on purpose
 
 **Scope: the app/backend only. The job stays Python.** The models are Python
-and always will be — Gurobi, OR-Tools, torch — and `job/models/_data` reads
-Unity Catalog tables through the job's Spark session, so **pyspark stays in the
-job for model data reads.** What changes is that it is no longer on the
-telemetry write path, which is where all the pain was.
+and always will be — Gurobi, OR-Tools, torch — and each reads its inputs and
+writes its results through Spark, so **pyspark stays in the model layer.**
+What changes is that it is no longer anywhere in the *harness*: with the model
+owning its own data, the harness is a comms and telemetry layer with no
+Databricks data dependency at all.
+
+That is also what would make a future split into separate services cheap. The
+harness's entire contract becomes "run this object, move its messages, write
+its telemetry" — nothing in it is tied to Spark, Delta, or Unity Catalog.
 
 That leaves the app as the only open question: keep async Python (FastAPI, or
 something else in that space), or take it somewhere compiled. Two things make
