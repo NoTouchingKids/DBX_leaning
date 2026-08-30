@@ -60,6 +60,10 @@ JOB_PARAMETER_NAMES = frozenset(
         "DBX_SCHEMA",
         "DBX_APP_URL",
         "DBX_APP_TOKEN",
+        # The app's own OAuth identity, forwarded so the job can mint tokens
+        # of its own. See `build_job_parameters`.
+        "DBX_OAUTH_CLIENT_ID",
+        "DBX_OAUTH_CLIENT_SECRET",
     }
 )
 
@@ -80,6 +84,35 @@ def build_job_parameters(
         parameters["DBX_APP_URL"] = app_config.public_url
     if app_config.job_token:
         parameters["DBX_APP_TOKEN"] = app_config.job_token
+    if app_config.has_client_credentials:
+        # The app's OAuth identity, so the job can authenticate as the SAME
+        # principal the app does — which is what both of the job's live paths
+        # need and what neither was getting.
+        #
+        # **Why the credentials and not a token.** `DBX_APP_OAUTH_TOKEN` is
+        # first in `job/auth.py`'s chain and would be one fewer secret to
+        # move. It cannot work here: a Databricks OAuth token lasts about an
+        # hour, a queued run can start well after that, and `heartbeat` alone
+        # runs for up to thirty minutes. A token minted at trigger time is
+        # already a guess about when the job will run. Handing over the
+        # credentials lets the job mint and refresh its own, which is what
+        # `AppCredential` was built to do.
+        #
+        # **Why not the job's own runtime identity.** That was the design, and
+        # it does not work: `dbutils` hands out `context.apiToken()`, a
+        # workspace REST API token. The Apps proxy answered it with a redirect
+        # to a login page and Lakebase refused it as a password — both want a
+        # Databricks OAuth token, which only the OIDC exchange produces.
+        #
+        # **What this costs.** A client secret in the run's parameter list,
+        # visible to anyone who can read the job's runs. That is the same
+        # exposure `DBX_APP_TOKEN` above already has, but a client secret is
+        # worth more than a per-deployment shared token, so it is worth
+        # knowing rather than assuming. A `{{secrets/<scope>/<key>}}`
+        # reference in the job's own parameter default would avoid it, if
+        # serverless resolves those — unverified, see deploy/README.md.
+        parameters["DBX_OAUTH_CLIENT_ID"] = app_config.oauth_client_id or ""
+        parameters["DBX_OAUTH_CLIENT_SECRET"] = app_config.oauth_client_secret or ""
     return parameters
 
 

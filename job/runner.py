@@ -180,7 +180,7 @@ class JobHarness:
         return LakebaseStatus(
             self.cfg.lakebase_dsn,
             schema=self.cfg.lakebase_schema,
-            role=self.cfg.lakebase_user,
+            role=self.cfg.lakebase_role,
             credential=self._credential(),
             connect_timeout_s=self.cfg.lakebase_connect_timeout_s,
         )

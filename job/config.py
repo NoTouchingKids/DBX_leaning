@@ -90,7 +90,21 @@ class JobConfig:
     #: the credential this job manages to obtain have to agree, and keeping
     #: them as two values rather than one embedded in a URL is what makes
     #: that checkable instead of buried in a connection-string parse.
+    #:
+    #: Usually left unset now — see `lakebase_role`, which derives it from the
+    #: credentials the job was handed. Set it explicitly only to connect as a
+    #: principal other than the one whose token is being presented, which
+    #: Lakebase will refuse.
     lakebase_user: str | None = None
+    #: Application id of the service principal this job authenticates as. Read
+    #: only so the Postgres role can default to it; the exchange itself lives
+    #: in `job/auth.py`, which reads the environment directly.
+    #:
+    #: The app forwards this and its secret at trigger time
+    #: (`app/server/routes/runs.py::build_job_parameters`) rather than each job
+    #: definition carrying them, so there is one place the identity is
+    #: configured and eleven that inherit it.
+    oauth_client_id: str | None = None
     lakebase_schema: str = "dbx_leaning"
 
     writer: WriterKind = "auto"
@@ -164,6 +178,10 @@ class JobConfig:
             results_table=(e.get("DBX_RESULTS_TABLE") or "").strip() or None,
             lakebase_dsn=(e.get("DBX_LAKEBASE_DSN") or "").strip() or None,
             lakebase_user=(e.get("DBX_LAKEBASE_USER") or "").strip() or None,
+            oauth_client_id=(
+                e.get("DBX_OAUTH_CLIENT_ID") or e.get("DATABRICKS_CLIENT_ID") or ""
+            ).strip()
+            or None,
             lakebase_schema=e.get("DBX_LAKEBASE_SCHEMA", "dbx_leaning"),
             writer=e.get("DBX_WRITER", "auto"),
             local_root=e.get("DBX_LOCAL_ROOT", ".delta-local"),
@@ -180,9 +198,31 @@ class JobConfig:
         )
 
     @property
+    def lakebase_role(self) -> str | None:
+        """Who to connect to Postgres as: the principal whose token we present.
+
+        Lakebase names the role after that principal, so these two agreeing is
+        not a convention — it is the difference between connecting and an
+        authentication error that reads like a bad secret. The app asserts the
+        same equality at startup (`services.py`, `lakebase_identity`); here it
+        is a default instead, because the job is handed the client id and the
+        app is configured with both.
+
+        Deriving it removes the failure that made this necessary. With neither
+        value set, `job/lakebase.py` falls back to the OS account the way libpq
+        does — which on serverless is a `spark-...` container user that no
+        Lakebase instance has ever heard of:
+
+            password authentication failed for user 'spark-b4db33d9-a048-...'
+
+        An explicit `DBX_LAKEBASE_USER` still wins, so a deploy that genuinely
+        needs a different role can say so.
+        """
+        return self.lakebase_user or self.oauth_client_id
+
+    @property
     def ws_url(self) -> str | None:
         if not self.app_url:
             return None
         base = self.app_url.replace("https://", "wss://").replace("http://", "ws://")
         return f"{base}/ws/job/{self.run_id}"
-

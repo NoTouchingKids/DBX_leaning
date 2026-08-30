@@ -60,6 +60,23 @@ resources:
           default: ${var.app_public_url}
         - name: DBX_APP_TOKEN
           default: ""
+        # The app's OAuth identity, forwarded by the trigger endpoint at
+        # run-now time (app/server/routes/runs.py) rather than defaulted here:
+        # the secret belongs in the app's environment, not in eleven job
+        # definitions. Declared with an empty default because Databricks
+        # rejects a run-now parameter a job has not declared — and a run
+        # triggered outside the app simply gets no credentials and runs
+        # unobserved, which is a supported state.
+        #
+        # This is what makes the job authenticate as the SAME principal as the
+        # app. Its own runtime identity cannot: `dbutils` hands out a
+        # workspace REST API token, which the Apps proxy bounces to a login
+        # page and Lakebase refuses as a password. Both want a Databricks
+        # OAuth token, and only the OIDC exchange in job/auth.py mints one.
+        - name: DBX_OAUTH_CLIENT_ID
+          default: ""
+        - name: DBX_OAUTH_CLIENT_SECRET
+          default: ""
         # Deployment config, not run data: the app never overrides these, so
         # they arrive as defaults. Databricks rejects a run-now parameter a
         # job has NOT declared; declaring one the app does not send is fine.
@@ -103,6 +120,8 @@ resources:
               - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
               - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
               - DBX_APP_TOKEN={{job.parameters.DBX_APP_TOKEN}}
+              - DBX_OAUTH_CLIENT_ID={{job.parameters.DBX_OAUTH_CLIENT_ID}}
+              - DBX_OAUTH_CLIENT_SECRET={{job.parameters.DBX_OAUTH_CLIENT_SECRET}}
               - DBX_LAKEBASE_DSN={{job.parameters.DBX_LAKEBASE_DSN}}
               - DBX_LAKEBASE_USER={{job.parameters.DBX_LAKEBASE_USER}}
               - DBX_LAKEBASE_SCHEMA={{job.parameters.DBX_LAKEBASE_SCHEMA}}

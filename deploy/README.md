@@ -176,6 +176,19 @@ presenting the other's token fails as an ordinary authentication error;
 `/healthz` reports `degraded: lakebase_identity` when those two variables
 disagree, before any connection is attempted.
 
+**The job derives its own role and usually needs no `lakebase_user` at all.**
+`JobConfig.lakebase_role` returns `DBX_LAKEBASE_USER` if set and the OAuth
+client id otherwise, so the role and the token cannot disagree by omission.
+That default exists because omission is what a real deploy hit: with neither
+value set, `job/lakebase.py` falls back to the OS account the way libpq does,
+which on serverless is a container user no instance has heard of —
+
+    password authentication failed for user 'spark-b4db33d9-a048-4e0c-89b3-4c'
+
+— an error that names something you cannot grant and points nowhere useful.
+Set `DBX_LAKEBASE_USER` only to connect as a principal other than the one
+whose token is being presented, which Lakebase will refuse anyway.
+
 ## Layout: `app/` is the whole app
 
 The shape the [Databricks app template][t] uses — `server/` for the FastAPI
@@ -304,14 +317,61 @@ Any of these, in order, because a job can legitimately have any of them:
    spellings), exchanged at `/oidc/v1/token`. **This is the "same principal as
    the app" case** — the same exchange `app/server/oauth.py` does.
 3. `DATABRICKS_TOKEN`.
-4. **The job's own runtime identity**, via `dbutils`. No secret to distribute
-   anywhere: it is the principal the task already runs as, and it is the
-   option to prefer unless you specifically want app and job to be one
-   identity.
+4. **The job's own runtime identity**, via `dbutils`.
 
 Whichever answers, the job logs which one it was. Nothing here is fatal: a job
 with no Databricks identity runs unobserved, exactly as it does when the app is
 simply down, and the durable path never depended on the app being reachable.
+
+**Option 2 is the one to use, and the app now supplies it for you.** This used
+to recommend option 4 — no secret to distribute, the principal the task already
+runs as. It does not work on serverless, and the failure is worth recording
+because nothing about it says "wrong kind of token":
+
+    job.auth: app credential from the job's runtime identity
+    job.bus:  ws session ended (https://<app>.databricksapps.com/ws/job/run-17bd6cf8efcf
+              isn't a valid URI: scheme isn't ws or wss); retrying in 30.0s
+    job.lakebase: could not report ... (DatabaseError: 28P01 password
+              authentication failed for user 'spark-b4db33d9-a048-4e0c-89b3-4c')
+
+`dbutils` hands out `context.apiToken()`, a **workspace REST API token**. The
+Apps proxy answered it with a redirect to a login page — which is how it says
+no; it never returns 401 — and Lakebase refused it as a password. Both want a
+Databricks **OAuth** token, and only the OIDC exchange in option 2 mints one.
+
+So `app/server/routes/runs.py::build_job_parameters` forwards the app's
+`DBX_OAUTH_CLIENT_ID` and `DBX_OAUTH_CLIENT_SECRET` as job parameters at
+trigger time, alongside the shared `DBX_APP_TOKEN` it already sent. Option 2
+ranks above option 4, so it simply takes over — the eleven job files declare
+both names with empty defaults and forward them to the entrypoint, and nothing
+in the job changed. A run triggered outside the app gets no credentials and
+runs unobserved, which is a supported state.
+
+Two things to know before relying on it:
+
+- **The credentials travel, not a token.** A Databricks OAuth token lasts about
+  an hour; a queued run can start well after that and `heartbeat` alone runs for
+  up to thirty minutes. Minting one at trigger time would be a guess about when
+  the job runs. `AppCredential` mints and refreshes its own instead.
+- **A client secret lands in the run's parameter list**, visible to anyone who
+  can read the job's runs. That is the same exposure `DBX_APP_TOKEN` already
+  has, but a client secret is worth more than a per-deployment shared token. A
+  `{{secrets/<scope>/<key>}}` reference in each job's own parameter default
+  would avoid it — **unverified for a serverless `spark_python_task`**, and
+  worth checking on a workspace before eleven files depend on it.
+
+Setting it up, once:
+
+```bash
+databricks secrets put-secret dbx-leaning oauth-client-secret \
+  --string-value "<the SP's OAuth secret>"
+```
+
+then uncomment **both** the `oauth-client-secret` resource block and the
+`DBX_OAUTH_CLIENT_SECRET` env entry in `resources/app.yml`, set the
+`oauth_client_id` variable to that principal's application id, and grant it
+`CAN_USE` on the app as below. `lakebase_user` can stay empty — the job
+derives it, and the app already has both halves.
 
 ### The grant that makes it work
 
@@ -327,10 +387,13 @@ databricks apps set-permissions dbx-leaning --json '{
 }'
 ```
 
-For option 4 that principal is the job's `run_as` — the deploying user by
-default, or whatever `run_as` the bundle sets. For option 2 it is the
-`oauth_client_id` service principal, which needs the same grant even though it
-already has one on the jobs.
+For option 2 — the one to use — that principal is the `oauth_client_id`
+service principal, which needs this grant even though it already has one on the
+jobs. The job's `run_as` (the deploying user by default) does **not** need it:
+the run-as identity decides what the job may touch in the workspace, while the
+credentials the app forwards decide who the job presents itself as to the app
+and to Lakebase. Those are two different questions, and only the second one is
+what the proxy checks.
 
 If this is missing, the symptom is a run that completes normally with
 `observed=False` in its log and no live telemetry in the UI, while every row

@@ -116,8 +116,16 @@ def test_the_apps_own_trigger_parameters_are_accepted(launcher):
         schema = "dbx_leaning"
         public_url = "http://127.0.0.1:8000"
         job_token = "tok"
+        # The app forwards its OAuth identity when it has one, so this stub
+        # carries one: a launcher that accepts the parameters of an app with
+        # no credentials configured is not the case worth pinning — the whole
+        # point of the check is that every name the app CAN send is declared.
+        has_client_credentials = True
+        oauth_client_id = "an-application-id"
+        oauth_client_secret = "a-secret"
 
     parameters = build_job_parameters("r1", "scenario", {"seed": 7}, Config())
+    assert "DBX_OAUTH_CLIENT_SECRET" in parameters
 
     launcher.run_now(launcher.job_ids["scenario"], parameters)
 

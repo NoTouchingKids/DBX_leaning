@@ -371,14 +371,20 @@ Full procedure: `deploy/README.md`.
    `_diagnosis` in `job/bus.py`) and **Lakebase refused the password**. That
    source is `dbutils`' `context.apiToken()`, a workspace REST API token —
    which is not what either of those two wants. Both want a Databricks OAuth
-   token, and the one path in `job/auth.py` that mints a real one, client
-   credentials against `/oidc/v1/token`, has nowhere to arrive from: no job
-   yml declares `DBX_OAUTH_CLIENT_ID`/`SECRET`, so it logs "not configured
-   here" and falls through. That, plus `DBX_LAKEBASE_USER` being unset (the
-   Postgres user must be the token's own principal, and with none set the
-   driver falls back to the serverless OS account), is what stands between
-   this and a watched end-to-end run. Neither live path has been seen working
-   from a deployed job. And nothing writes `run_status_history` with `recorded_by='app'`, so a
+   token, and only the client-credentials exchange in `job/auth.py` mints one.
+   It had nowhere to arrive from, so the app now **forwards its own
+   `DBX_OAUTH_CLIENT_ID`/`SECRET` as job parameters at trigger time**
+   (`build_job_parameters`), the way it already forwarded `DBX_APP_TOKEN`;
+   that source outranks `dbutils`, so it takes over with no change inside the
+   job. `JobConfig.lakebase_role` then defaults the Postgres user to that
+   client id, since Lakebase names the role after the principal whose token is
+   presented — with neither set, the driver fell back to the serverless OS
+   account, which is what `password authentication failed for user
+   'spark-b4db33d9-...'` was. Both are built and tested; **neither has been
+   seen working from a deployed job**, and they still need the workspace half:
+   the secret created, the two blocks in `resources/app.yml` uncommented,
+   `oauth_client_id` set, and `CAN_USE` on the app granted to it
+   (`deploy/README.md`). And nothing writes `run_status_history` with `recorded_by='app'`, so a
    run's history starts at the job's first report and never records `QUEUED`.
    Do not read "built and tested" as "deployed".
    What *is* confirmed against a real workspace: WebSocket and SSE both

@@ -10,6 +10,7 @@ import time
 import pytest
 
 from job.bus import WebSocketBus
+from job.config import JobConfig
 from job.delta import JsonlWriter
 from job.lakebase import LakebaseStatus
 from job.loader import describe_object
@@ -387,3 +388,59 @@ async def test_a_status_report_that_cannot_be_delivered_is_not_the_run(cfg, writ
     assert outcome.status_reports == 0 and reporter.failures == 2
     # run_events is the durable record of the same transitions.
     assert [r["status"] for r in rows(writer, "run_events")] == ["RUNNING", "SUCCEEDED"]
+
+
+class TestTheRoleLakebaseIsConnectedAs:
+    """Lakebase names the Postgres role after the principal whose OAuth token
+    is presented, so the two have to agree. With neither configured the driver
+    falls back to the OS account the way libpq does — on serverless a
+    `spark-...` container user no instance has heard of, which is what a real
+    deploy hit:
+
+        password authentication failed for user 'spark-b4db33d9-a048-...'
+    """
+
+    def test_the_role_defaults_to_the_principal_the_token_belongs_to(self):
+        cfg = JobConfig.from_env(
+            {
+                "DBX_RUN_ID": "r1",
+                "DBX_MODEL": "job.models.heartbeat",
+                "DBX_OAUTH_CLIENT_ID": "an-application-id",
+            }
+        )
+
+        assert cfg.lakebase_user is None
+        assert cfg.lakebase_role == "an-application-id"
+
+    def test_an_explicit_user_still_wins(self):
+        """A deploy that genuinely needs another role can say so, and saying so
+        must not be silently overridden by a derived default."""
+        cfg = JobConfig.from_env(
+            {
+                "DBX_RUN_ID": "r1",
+                "DBX_MODEL": "job.models.heartbeat",
+                "DBX_OAUTH_CLIENT_ID": "an-application-id",
+                "DBX_LAKEBASE_USER": "someone-else",
+            }
+        )
+
+        assert cfg.lakebase_role == "someone-else"
+
+    def test_with_neither_there_is_no_role_to_offer(self):
+        """None, not a guess. `job/lakebase.py` then falls back to the OS
+        account, and the resulting error names it — which is how the real
+        misconfiguration was found."""
+        cfg = JobConfig.from_env({"DBX_RUN_ID": "r1", "DBX_MODEL": "job.models.heartbeat"})
+
+        assert cfg.lakebase_role is None
+
+    def test_the_databricks_spelling_of_the_client_id_is_read_too(self):
+        cfg = JobConfig.from_env(
+            {
+                "DBX_RUN_ID": "r1",
+                "DBX_MODEL": "job.models.heartbeat",
+                "DATABRICKS_CLIENT_ID": "injected-by-the-platform",
+            }
+        )
+
+        assert cfg.lakebase_role == "injected-by-the-platform"
