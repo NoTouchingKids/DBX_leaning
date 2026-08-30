@@ -82,8 +82,10 @@ without changing shape.
   revision.
 - **The app volume, which already exists.** `main.dbx_leaning.app_store` is
   created, granted, mounted at `/Volumes/main/dbx_leaning/app_store`, and
-  already a `Path` in `app/server/services.py`. The durable path below is not
-  new plumbing — it is a second, larger use of plumbing that is deployed.
+  already a `Path` in `app/server/services.py`. It keeps its current job —
+  the app's own files: exports, uploads, cached artefacts. Run telemetry does
+  **not** go here; it gets a second volume of its own (below). The pattern is
+  proven and deployed, which is what carries forward.
 - **The deployment lessons below.**
 
 ### Deployment lessons that must not regress
@@ -174,18 +176,46 @@ task/pump/flusher choreography in `runner.py`, and the ipykernel dance. The
 job becomes a program that does one thing on one thread and talks over a
 socket on another.
 
-### Durability: write through to a volume file
+### Durability: write through to a job-only volume
 
 The job **stops buffering telemetry in memory** and instead writes each record
-through to a file on a Unity Catalog volume:
+through to a file on a Unity Catalog volume — **a new one, separate from the
+app's**:
 
 ```
-/Volumes/<catalog>/<schema>/<vol>/runs/<run_id>/…
+/Volumes/main/dbx_leaning/log/runs/<run_id>/…
 ```
 
 A **separate scheduled or streaming ingestion job** reads those files and
 loads them into SQL. That is a different job on a different schedule; it is
-not on the live path and does not block anything in this plan.
+not on the live path.
+
+#### Two volumes, and the grant matrix is the architecture
+
+| Volume | Purpose | App | Job | Ingestion |
+|---|---|---|---|---|
+| `main.dbx_leaning.app_store` | The app's own files — exports, uploads, cached artefacts | **READ + WRITE** | — | — |
+| `main.dbx_leaning.log` | Run telemetry, written as it is produced | **none** | **READ + WRITE** | **READ** |
+
+**The app has no grant on the log volume, and that is the point.** "The app
+never reads run telemetry from files" stops being a design principle someone
+has to remember and becomes something Unity Catalog refuses. A future session
+cannot take the shortcut, because the shortcut returns a permission error.
+This is the strongest form of the separation and it costs one `CREATE VOLUME`.
+
+Consequences worth stating explicitly:
+
+- The app should not even be **configured** with the log volume's path. No
+  path, no grant, no temptation. `DBX_APP_VOLUME` keeps pointing at
+  `app_store` and gains no sibling on the app side.
+- The job needs `READ` as well as `WRITE`, because **replay reads back what it
+  wrote** (below).
+- The ingestion job is the only other principal with access, and only `READ`.
+
+> **Naming.** `log` is narrower than what the volume holds — the envelope
+> carries `progress`, `status` and `result` as well as `log`. `run_log` or
+> `telemetry` would age better. Worth deciding now: renaming a volume later
+> means touching grants, paths, the bundle and every written path prefix.
 
 Consequences, all of them good:
 
@@ -218,8 +248,8 @@ The check gets easier, not harder — it becomes "did the writes land", not
 > whether the simpler single-file version is available; the fallback is safe
 > either way.
 >
-> Note also: the volume is currently granted to the **app**. The job needs its
-> own `WRITE` grant.
+> The probe runs against the new `log` volume with the job's own principal,
+> so it exercises the grant matrix at the same time.
 
 ### Backfill: the job replays from its own log
 
@@ -229,15 +259,27 @@ file and sends those records over the WebSocket.
 
 This is the design's keystone, and it is why RPC-over-WS is worth doing:
 
-- The app **never reads volume files**, so no Files API dependency, no second
-  credential path, no parsing the durable format in two places.
+- The app **cannot read the log volume** — it holds no grant on it — so this
+  is not one option among several. It is the only live backfill path there is.
+- No Files API dependency, no second credential path, no parsing the durable
+  format in two places.
 - The job is the authority on its own run while it is alive, and it already
   has the data on disk.
 - Backfill stops being a warehouse query, which is the cost mistake this
   platform was built to avoid.
 
-For a **finished** run, history comes from SQL after the ingestion job has run.
-That is a later slice and deliberately not on the critical path.
+> **The consequence to accept deliberately.** For a **finished** run the job is
+> gone, and the app still cannot read the log volume — so history has exactly
+> one path: **SQL, after the ingestion job has run.** There is no fallback. If
+> ingestion is broken or lagging, a completed run's telemetry is durable and
+> correct on the volume and *invisible to the app*.
+>
+> In v3 the app could always fall back to reading Delta directly. That
+> fallback is gone by design, and it is a fair trade — it is what makes the
+> separation real rather than advisory. But it moves the ingestion job from
+> "nice to have later" to **"required before the app can display any finished
+> run"**. Slices 0–3 are unaffected: heartbeat, cancel and replay all concern a
+> live run, where the job serves its own history.
 
 ### Run state: Lakebase Postgres
 
@@ -264,8 +306,10 @@ The ordering principle, and the one most different from v3: **prove comms with
 no model in the picture.** This plan commits to Slices 0–3 only. Everything
 after is a later decision made with a working platform in hand.
 
-**Slice 0 — one probe.** Incremental volume append from a serverless job, with
-rolling part files as the fallback. Half a day. Nothing else is unverified.
+**Slice 0 — create the `log` volume, then one probe.** Apply the DDL and the
+grants in the matrix above, then probe incremental volume append from a
+serverless job with the job's own principal, with rolling part files as the
+fallback. Half a day. Nothing else is unverified.
 
 **Slice 1 — heartbeat, end to end.** A "model" that emits a tick a second and
 nothing else, ~50 lines. Job (threaded) → RPC over WS → app → SSE → browser,
@@ -281,9 +325,15 @@ status. The first thing the RPC interface buys.
 kill the app entirely and confirm the run completes and its files are intact.
 That is the autonomy invariant tested rather than asserted.
 
+**Slice 4 — the ingestion job (volume → SQL).** Promoted out of "later" by the
+grant matrix: with the app locked out of the log volume, this is the *only*
+way a finished run becomes visible. It is not on the live path and it is not
+urgent for Slices 1–3, but the platform is not usable without it, so it should
+not drift.
+
 **Later, once the above is deployed and boring:** one real model on the generic
-view; the ingestion job (volume → SQL); history for finished runs; and only
-then the question of whether any model has *earned* a bespoke view.
+view, and only then the question of whether any model has *earned* a bespoke
+view.
 
 ## The language decision, deferred on purpose
 
