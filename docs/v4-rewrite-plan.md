@@ -514,15 +514,19 @@ status. The first thing the RPC interface buys.
 kill the app entirely and confirm the run completes and its files are intact.
 That is the autonomy invariant tested rather than asserted.
 
-**Slice 4 — the ingestion job (volume → SQL).** Promoted out of "later" by the
+**Slice 4 — one real model, then the ingestion job (volume → SQL).** The
+model comes first: a heartbeat never exercises result reporting, model status,
+or a run long enough to meet the ingress's real timeouts, and all three gate
+"the job side is stable". The ingestion job is promoted out of "later" by the
 grant matrix: with the app locked out of the telemetry volume, this is the *only*
 way a finished run becomes visible. It is not on the live path and it is not
 urgent for Slices 1–3, but the platform is not usable without it, so it should
 not drift.
 
-**Later, once the above is deployed and boring:** one real model on the generic
-view, and only then the question of whether any model has *earned* a bespoke
-view.
+**Only once all of that is deployed and boring** — which is the same bar as
+"the job side is stable", below — does anything else start: the app's language
+migration, more models, and last of all the question of whether any model has
+*earned* a bespoke view.
 
 ## The language decision, deferred on purpose
 
@@ -582,12 +586,53 @@ reverses that decision and puts the OAuth code back.
 **Recommendation, not a decision:** if the goal is to try different tech
 without re-litigating settled choices, **Go is the one that costs least and
 teaches most** — it keeps the SDK, suits a WS/SSE relay, and its one risk is
-answerable by a probe you can run in an hour. Python-with-a-different-framework
+answerable by a probe (deferred — see below). Python-with-a-different-framework
 is the honest answer if the appetite is for architecture rather than language.
 
-**Decide after Slice 1 is deployed**, so the choice is made against a real RPC
-surface rather than an imagined one — and run the binary probe *before*
-committing to Go or Rust, alongside Slice 0's volume probe if convenient.
+### Deferred until the job side is stable
+
+**The app stays Python and FastAPI until then.** Not as the final answer — as
+the way to keep one variable moving at a time. The job is being rewritten in
+almost every dimension at once: threaded instead of asyncio, RPC instead of
+one-way frames, volume files instead of Delta, its own Postgres state, no
+Spark. Rewriting the app in an unfamiliar language *at the same time* means
+every failure has two candidate causes, and the one being learned is the one
+that gets blamed.
+
+It is also the discipline this repo already has, twice: `shared/` was frozen
+before the tracks fanned out, and `contract.ts` was frozen before the
+per-model views. **Freeze the contract, then rebuild against it.** Rewriting
+the app while the RPC surface is still moving is chasing a live contract in a
+language you are still learning.
+
+What the app needs meanwhile is small and worth doing in Python regardless,
+because it is the same work in any language: an RPC endpoint the job connects
+to, the warehouse read path deleted, JSON instead of msgpack, and run state
+read rather than owned.
+
+#### What "stable" means, so this deferral has an end
+
+"Stable" is exactly the kind of word that never resolves. It is met when all
+of these are true:
+
+1. **Slices 0–3 are deployed and behaving** — heartbeat streaming, cancel
+   acknowledged, replay filling a real gap, and a run completing with the app
+   deliberately killed.
+2. **The telemetry write strategy is settled** — the append probe answered,
+   and rolling part files either adopted or ruled out.
+3. **The job writes its own run state**, and the app reads it without
+   repairing it.
+4. **The RPC method surface has stopped changing.** This is the real gate. The
+   others can wobble; this one cannot, because it is the contract the rewrite
+   is built against.
+5. **At least one real model has run through it end to end** — a heartbeat
+   never exercises result reporting, model status, or a run long enough to
+   meet the ingress's actual timeouts.
+
+Only then: run the binary probe, pick the language, rewrite the app against a
+contract that is no longer moving. The binary probe is therefore **not** part
+of Slice 0 — probing a runtime for a decision months away is effort spent to
+answer a question nobody is asking yet.
 
 ## What "done" means for v4
 
