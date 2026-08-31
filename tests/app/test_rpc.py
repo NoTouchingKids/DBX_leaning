@@ -262,3 +262,76 @@ def test_the_right_token_on_the_right_header_is_accepted(app_and_hub):
         ws.send_text(request(Method.PING, {}, id=1).decode())
         assert json.loads(ws.receive_text())["result"]["pong"] is True
         assert hub.job_sockets.is_connected("r1")
+
+
+# --- triggering ------------------------------------------------------------
+
+
+def test_triggering_needs_no_run_store(app_and_hub):
+    """The change from v3, and the reason `/docs` works without Lakebase.
+
+    v3 reserved a slot, launched, then attached the job run id — so a missing
+    store meant no run could start. Two things retired that: a scheduled run
+    never passes through this route, so a ceiling enforced only here was
+    counting the wrong number; and the JOB writes its own `run_status` row, so
+    registering it here would be the app writing a record it does not own.
+
+    The ceiling still holds — Databricks holds it, and every job file sets
+    `queue.enabled` so a sixth task waits rather than failing.
+    """
+    from server.config import AppConfig
+
+    app, hub = app_and_hub(
+        AppConfig(
+            catalog="main",
+            schema="dbx_leaning",
+            reconcile_on_startup=False,
+            job_ids={"heartbeat": 42},
+        )
+    )
+
+    launched: dict = {}
+
+    class FakeJobs:
+        async def run_now(self, job_id, params):
+            launched.update(job_id=job_id, params=params)
+            return 987654
+
+    hub.jobs_api = FakeJobs()
+    assert hub.store is None, "precondition: this test is about having no store"
+
+    response = TestClient(app).post(
+        "/api/runs",
+        json={"model": "heartbeat", "config": {"seconds": 180, "hz": 1}, "run_id": "hb-001"},
+    )
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["run_id"] == "hb-001"
+    assert body["job_run_id"] == 987654
+    # The link a human actually wants back: where to watch what they started.
+    assert body["watch"] == "/?run=hb-001"
+
+    assert launched["job_id"] == 42
+    assert launched["params"]["DBX_MODEL"] == "job.models.heartbeat"
+    assert json.loads(launched["params"]["DBX_MODEL_CONFIG"]) == {"seconds": 180, "hz": 1}
+
+
+def test_an_unknown_model_names_what_was_discovered(app_and_hub):
+    """A 404 here almost always means discovery found nothing, not that the
+    caller typed the name wrong — so say which models exist."""
+    from server.config import AppConfig
+
+    app, hub = app_and_hub(
+        AppConfig(catalog="main", schema="dbx_leaning", reconcile_on_startup=False)
+    )
+
+    class FakeJobs:
+        async def run_now(self, job_id, params):  # pragma: no cover - never reached
+            raise AssertionError("should not launch")
+
+    hub.jobs_api = FakeJobs()
+
+    response = TestClient(app).post("/api/runs", json={"model": "nope"})
+    assert response.status_code == 404
+    assert "check the project tag" in response.json()["detail"]

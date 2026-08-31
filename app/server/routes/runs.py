@@ -17,7 +17,6 @@ from shared.rpc import Method, RpcError
 
 from ..deps import Hub, Store
 from ..jobs_api import JobsApiError
-from ..store import DuplicateRun, SlotDenied
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -94,15 +93,29 @@ class TriggerRequest(BaseModel):
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
-async def trigger_run(body: TriggerRequest, request: Request, store: Store, hub: Hub) -> dict:
-    """Launch a model as a Databricks Job, and register the run.
+async def trigger_run(body: TriggerRequest, request: Request, hub: Hub) -> dict:
+    """Launch a model as a Databricks Job. That is the whole route.
 
-    **Reserve, then launch, then attach** — in that order. Registering after
-    the launch left a window where the job was running and the registry did
-    not know: nothing could list it, and startup reconciliation, which finds
-    work by reading that table, would never see it. Claiming the slot first
-    also makes the concurrency ceiling real rather than advisory, because on
-    Lakebase the count and the insert happen in one transaction.
+    **It does not touch the run store, and that is the change from v3.** v3
+    reserved a slot, launched, then attached the job run id — count-and-insert
+    in one transaction, so the 5-task ceiling was "real rather than advisory".
+
+    Two things retire that, and both come from a job being a service rather
+    than a subroutine:
+
+    - **A scheduled run never passes through here at all**, so a ceiling
+      enforced only on this path was already counting the wrong number. The
+      authority on what is running is the Jobs API, which cannot drift.
+    - **The job writes its own `run_status` row** and keeps it current whether
+      or not this app is up — so registering the run here would be the app
+      writing a record it does not own, on the one code path that happens to
+      pass through it.
+
+    The ceiling still holds; Databricks holds it. Every job file sets
+    `queue.enabled`, so a sixth concurrent task waits instead of failing.
+
+    The upshot worth knowing when testing: **triggering needs no Lakebase.**
+    Only listing and reading runs do.
     """
     if hub.jobs_api is None:
         raise HTTPException(
@@ -114,64 +127,29 @@ async def trigger_run(body: TriggerRequest, request: Request, store: Store, hub:
     if job_id is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            f"no job configured for model {body.model!r}; "
-            f"triggerable models are {hub.config.triggerable_models or '(none)'}",
+            f"no job found for model {body.model!r}; discovered models are "
+            f"{hub.config.triggerable_models or '(none — check the project tag and /healthz)'}",
         )
 
     run_id = body.run_id or f"run-{uuid.uuid4().hex[:12]}"
-    requested_by = request.headers.get("x-forwarded-email")
-
-    # Free Edition allows 5 concurrent job tasks per account, across all
-    # models. Refusing here with a clear reason beats Databricks queueing or
-    # rejecting the run somewhere the user cannot see.
-    try:
-        await store.claim_slot(
-            run_id,
-            model=body.model,
-            ceiling=hub.config.max_concurrent_runs,
-            requested_by=requested_by,
-        )
-    except SlotDenied as exc:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
-    except DuplicateRun as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - the store being down is not a crash
-        # Nothing has been launched yet, so this is a clean refusal: better an
-        # honest 503 than an orphan job the registry never heard of.
-        log.exception("could not claim a slot for %s", run_id)
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"could not register the run, so nothing was launched: {exc}",
-        ) from exc
-
     parameters = build_job_parameters(run_id, body.model, body.config, hub.config)
 
     try:
         job_run_id = await hub.jobs_api.run_now(job_id, parameters)
     except JobsApiError as exc:
-        # Nothing was launched, so give the slot back rather than leaving a
-        # phantom holding a place in the ceiling.
-        await store.release_slot(run_id)
+        # Nothing to unwind: no slot was claimed and no row was written.
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-
-    try:
-        await store.attach_job_run(run_id, job_run_id)
-        attached = True
-    except Exception:  # noqa: BLE001 - the job is running; that is what matters
-        log.exception(
-            "run %s launched as job run %s but the id could not be stored", run_id, job_run_id
-        )
-        attached = False
 
     log.info("triggered %s as job run %s (model=%s)", run_id, job_run_id, body.model)
     return {
         "run_id": run_id,
         "job_run_id": job_run_id,
         "model": body.model,
+        # QUEUED is what Databricks has accepted, not something we recorded.
+        # The job writes the authoritative row when it starts.
         "status": "QUEUED",
-        "registered": True,
-        "job_run_id_stored": attached,
         "stream": f"/api/runs/{run_id}/stream",
+        "watch": f"/?run={run_id}",
     }
 
 

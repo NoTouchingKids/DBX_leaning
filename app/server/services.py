@@ -380,7 +380,9 @@ class ServiceHub:
             return
 
         self.degraded["store"] = (
-            "no run store: neither Lakebase nor a SQL warehouse is configured; "
+            "no run store: Lakebase is not configured. Triggering and streaming "
+            "still work; listing and reading past runs do not, because that is "
+            "where the job records them. See DBX_LAKEBASE_* in resources/app.yml. "
             "runs cannot be registered, listed or triggered"
         )
         log.warning(self.degraded["store"])
