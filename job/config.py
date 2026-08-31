@@ -148,7 +148,3 @@ class JobConfig:
             return None
         base = self.app_url.replace("https://", "wss://").replace("http://", "ws://")
         return f"{base}/ws/job/{self.run_id}"
-
-    @property
-    def push_url(self) -> str | None:
-        return f"{self.app_url}/api/runs/{self.run_id}/push" if self.app_url else None

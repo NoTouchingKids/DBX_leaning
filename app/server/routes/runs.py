@@ -72,12 +72,25 @@ def build_job_parameters(
 class TriggerRequest(BaseModel):
     """What the client sends to start a run."""
 
-    model: str = Field(min_length=1, description="a key of DBX_JOB_IDS")
+    model: str = Field(
+        min_length=1,
+        description=(
+            "A model the app has discovered — e.g. 'heartbeat'. Jobs are found "
+            "in the workspace by their `project: dbx-leaning` tag, so this is "
+            "whatever GET /api/models lists, not a key of any configured map."
+        ),
+        examples=["heartbeat"],
+    )
     #: Passed through to the model's factory verbatim as DBX_MODEL_CONFIG.
-    config: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Model-specific. The heartbeat takes {'seconds': int, 'hz': float}.",
+        examples=[{"seconds": 120, "hz": 1}],
+    )
     #: Supply one to make the trigger idempotent from the caller's side;
-    #: otherwise the app mints it.
-    run_id: str | None = None
+    #: otherwise the app mints it. Worth supplying when testing by hand: it is
+    #: what you put in the client's `?run=` to watch the run you just started.
+    run_id: str | None = Field(default=None, examples=["hb-001"])
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
