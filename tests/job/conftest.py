@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from job.config import JobConfig
-from job.delta import JsonlWriter
 
 
 class FakeModel:
@@ -102,11 +101,6 @@ class ChunkedModel:
 
 
 @pytest.fixture
-def writer(tmp_path):
-    return JsonlWriter(tmp_path / "delta")
-
-
-@pytest.fixture
 def cfg(tmp_path):
     def _make(**overrides):
         base = dict(
@@ -116,8 +110,6 @@ def cfg(tmp_path):
             app_url=None,
             catalog="main",
             schema="dbx_leaning",
-            writer="jsonl",
-            local_root=str(tmp_path / "delta"),
             flush_tick_s=0.05,
             flush_max_age_s=0.2,
         )

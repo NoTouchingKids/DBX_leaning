@@ -23,9 +23,7 @@ from .config import AppConfig
 from .discovery import map_jobs_to_models
 from .jobs_api import JobsApi
 from .oauth import OAuthTokenProvider
-from .repository import RunRepository
-from .sql import SqlClient
-from .store import PostgresRunStore, RunStore, WarehouseRunStore
+from .store import PostgresRunStore
 
 log = logging.getLogger(__name__)
 
@@ -79,11 +77,9 @@ class ServiceHub:
         #: one is a socket registry, the other is the Databricks REST client.
         self.job_sockets = JobConnections()
         self.jobs_api: JobsApi | None = None
-        self.sql: SqlClient | None = None
-        self.repo: RunRepository | None = None
         #: Run state. Postgres when Lakebase is configured, else the
         #: warehouse-backed one — see app/server/store.py for why it moved.
-        self.store: RunStore | None = None
+        self.store: PostgresRunStore | None = None
         self.degraded: dict[str, str] = {}
         #: Where `config.job_ids` came from — "config" when DBX_JOB_IDS was
         #: set, "discovered" when the workspace was asked instead, "none" when
@@ -108,26 +104,15 @@ class ServiceHub:
     async def startup(self) -> None:
         cfg = self.config
         self.token_provider = self._token_source(cfg)
-        sql = SqlClient(
-            cfg.workspace_host,
-            cfg.warehouse_id,
-            cfg.token,
-            token_provider=self.token_provider,
-            wait_timeout_s=cfg.sql_wait_timeout_s,
-            timeout_s=cfg.sql_timeout_s,
-            statement_deadline_s=cfg.sql_statement_deadline_s,
-        )
-        if sql.available:
-            self.sql = sql
-            self.repo = RunRepository(sql, self.tables)
-        else:
-            # Live streaming still works without a warehouse; only backfill,
-            # status reads and reconciliation degrade.
-            self.degraded["sql"] = (
-                "no SQL warehouse configured (DATABRICKS_HOST / DBX_WAREHOUSE_ID); "
-                "backfill and reconciliation are unavailable"
-            )
-            log.warning(self.degraded["sql"])
+
+        # No SQL warehouse client here any more, deliberately. v4 takes the
+        # warehouse off the app's live path entirely: run state is Postgres,
+        # a live gap is replayed by the JOB from its own telemetry log, and a
+        # finished run's history arrives in SQL via the ingestion job rather
+        # than being queried by the app. See docs/v4-rewrite-plan.md.
+        #
+        # What went with it: SqlClient, RunRepository, startup reconciliation,
+        # and the cold-warehouse start race they all had to handle.
 
         await self._start_store(cfg)
 
@@ -145,23 +130,25 @@ class ServiceHub:
         self._check_volume(cfg)
 
     async def _resolve_job_ids(self, cfg: AppConfig) -> None:
-        """Make sure the app knows which job runs which model.
+        """Ask the workspace which jobs are available, by tag.
 
-        `DBX_JOB_IDS` is the normal answer and always wins — it is the
-        allow-list as well as the map, so a deployment that names three models
-        means three, not "and whatever else is in the workspace".
+        **Discovery is the mechanism now, not the fallback.** v3 had it the
+        other way round: `DBX_JOB_IDS` was interpolated at deploy time from
+        `${resources.jobs.model_x.id}`, and discovery only covered the case
+        where that env var did not reach the app.
 
-        Absent, ask the workspace. The env var only reaches the app when the
-        LIVE app deployment was created by the bundle; a deploy that skipped
-        `bundle run`, or a redeploy from the Apps UI, leaves the app running an
-        environment built from `app/app.yaml`, which cannot have job ids
-        because a hand deploy has no bundle to interpolate them from. That
-        produced an app where everything worked except that `/api/models` was
-        empty, with nothing on the app itself to point at.
+        That inversion is the point. Registering ids at deploy time means the
+        app and the jobs must be built by the same bundle, in the same repo —
+        so moving the jobs anywhere else breaks the app, which is exactly the
+        coupling v4 exists to remove. A tag does not care where a job is
+        defined, who deployed it, or whether it still lives in this
+        repository. Out of hundreds of jobs in a workspace, the ones carrying
+        `project: dbx-leaning` are ours; that is the whole contract.
 
-        Discovery is best-effort by construction: it needs the Jobs API, which
-        needs a host and a credential, and any of those missing lands in the
-        same degraded state as before. It never raises into startup.
+        `DBX_JOB_IDS` is still honoured when explicitly set, because someone
+        who sets it means it — it is an allow-list, narrowing to exactly the
+        models named. It is no longer produced by the bundle, and nothing
+        depends on it existing.
         """
         if cfg.job_ids or cfg.default_job_id is not None:
             self.job_ids_source = "config"
@@ -312,7 +299,7 @@ class ServiceHub:
         """
         if cfg.lakebase_dsn:
             self._check_lakebase_identity(cfg)
-            store: RunStore = PostgresRunStore(
+            store = PostgresRunStore(
                 cfg.lakebase_dsn,
                 schema=cfg.lakebase_schema,
                 password_provider=self.token_provider,
@@ -328,8 +315,6 @@ class ServiceHub:
                 log.info("run store: Lakebase (postgres %s)", version or "version unknown")
                 return
 
-        if self.repo is not None:
-            self.store = WarehouseRunStore(self.repo)
             log.info(
                 "run store: SQL warehouse. No Lakebase configured, so the "
                 "concurrency ceiling is checked without a transaction and a "
@@ -348,8 +333,6 @@ class ServiceHub:
             task.cancel()
         if self._status_tasks:
             await asyncio.gather(*self._status_tasks, return_exceptions=True)
-        if self.sql is not None:
-            await self.sql.close()
         if self.jobs_api is not None:
             await self.jobs_api.close()
         if self.store is not None:

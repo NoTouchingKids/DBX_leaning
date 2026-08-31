@@ -17,10 +17,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# --- transport tracks -------------------------------------------------
-# No databricks-sdk on either side: both the Statement Execution API and the
-# Jobs API are reached over plain REST with httpx, which CLAUDE.md allows and
-# which keeps every model environment that much smaller.
+# Two extras, because there are two deployable units and no models yet.
+#
+# The per-model extras that used to be here — gurobi, forecasting, mcmc,
+# bayesian, nn, scenario, streaming, annealing, ortools, panel, and the
+# `models` aggregate — are on `dev` with the models they scoped. That split was
+# the good part of v3's packaging and it comes back with them; it simply has
+# nothing to scope right now.
+#
+# The SDK note that used to sit here has changed, and v4 reverses half of it:
+# `databricks-sdk` is adopted for TOKEN ACQUISITION AND REFRESH, because
+# hand-rolling that cost 343 lines and two deploy bugs. The Jobs API stays
+# plain httpx — a few REST calls do not justify the weight in every model
+# environment. See docs/v4-rewrite-plan.md, "Auth: the SDK, for credentials
+# only". Neither is wired up yet.
 app = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -30,76 +40,6 @@ app = [
 job = [
     "websockets>=12",
     "httpx>=0.27",
-]
-# INVERTED since this was written, and this comment was the last place in the
-# repo still asserting the old design. Spark is THE write path, not a
-# fallback: it needs no pin because a session already exists on Databricks
-# serverless. delta-rs is unimplemented and `job/delta.py::DeltaRsWriter`
-# raises `NotImplementedError` rather than doing what it used to — handed a
-# three-part Unity Catalog name it wrote to a LOCAL DIRECTORY without
-# erroring, so a run reported SUCCEEDED with its telemetry in a container
-# about to be discarded. `select_writer("auto")` never picks it.
-#
-# The extra is kept for the day it is built (it needs credential vending
-# first, see job/delta.py). Nothing installs it today:
-# `scripts/export_requirements.py` excludes it from every model environment,
-# and `scripts/build_model_wheel.py` excludes it unless asked.
-delta = [
-    "deltalake>=0.18",
-    "pyarrow>=15",
-]
-
-# --- model tracks -----------------------------------------------------
-# gurobipy: the bundled restricted licence has a FIXED EXPIRY PER RELEASE
-# and fails hard, not gracefully, once past it (docs/free-edition-constraints.md).
-#
-#   PINNED:  gurobipy 13.x
-#   BUNDLED LICENCE EXPIRY:  2027-11-29  (verified 2026-08-22 against 13.0.2)
-#
-# Re-verify whenever this pin moves:  python scripts/check_gurobi_licence.py
-gurobi = ["gurobipy>=13,<14"]
-# OR-Tools CP-SAT: the open-source counterweight to the Gurobi models.
-# Constraint programming rather than branch-and-bound, and — the point —
-# NO variable or constraint cap, where the bundled Gurobi licence stops at
-# 2000/2000. A problem that outgrows gurobi_scheduling has somewhere to go.
-# Apache-2.0, CPU-only, no licence file and no token endpoint to reach.
-ortools = ["ortools>=9.14,<10"]
-forecasting = ["numpy>=1.26", "scikit-learn>=1.4"]
-mcmc = ["numpy>=1.26", "emcee>=3.1"]
-# Least squares on a country x year panel. numpy and nothing else — no
-# scikit-learn, no scipy: `polyfit` and `lstsq` are the whole toolkit, and a
-# per-country fit of a few dozen points does not need more.
-panel = ["numpy>=1.26"]
-# Conjugate arithmetic: math.lgamma for the incomplete beta, numpy for one
-# grid convolution. Its own extra rather than sharing mcmc's, which would
-# ship emcee to a job that never imports it — the same unused weight the
-# delta extra was pulled from the job environments for. The "third copy of
-# the numpy pin" this avoids is not a real risk: uv.lock pins numpy once for
-# the whole workspace, and tests/deploy asserts no version drift between
-# environments.
-bayesian = ["numpy>=1.26"]
-# The heavy one, deliberately. This is the model whose dependency actually
-# justifies per-model environments: torch must not reach the four models that
-# do not want it. If the split works, only this job carries it.
-nn = ["torch>=2.4", "numpy>=1.26"]
-scenario = ["numpy>=1.26"]
-# Rolling-origin backtest: numpy's lstsq, deliberately nothing heavier.
-# The platform value here is the chunked result path, not the modelling.
-streaming = ["numpy>=1.26"]
-# Deliberately empty, and that is the whole point of job/models/annealing: it is
-# the control case proving the microservice split really can produce a
-# minimal environment. Its job deploys with the harness's own transport and
-# nothing else. An empty list is valid PEP 621 and uv/setuptools accept it —
-# verified, not assumed. If anything ever needs adding here, the model has
-# lost its reason to exist and should be reconsidered rather than grown.
-annealing = []
-# Convenience for developing against every model at once. It deliberately
-# EXCLUDES `nn`: torch and its CUDA stack are ~4GB, and dragging that into
-# `pip install dbx-leaning[models]` would defeat the per-model split for
-# everyone who just wanted the light ones. Install [nn] explicitly.
-# tests/deploy/test_requirements.py enforces this rather than trusting it.
-models = [
-    "dbx-leaning[gurobi,forecasting,mcmc,bayesian,scenario,streaming,annealing,ortools,panel]",
 ]
 
 [dependency-groups]
@@ -143,30 +83,16 @@ default-groups = ["dev"]
 #
 # Directory names and extra names do not all match, which is exactly why this
 # is explicit rather than inferred.
-[tool.dbx-leaning.models]
-gurobi_scheduling = "gurobi"
-# Same extra as the scheduling model, deliberately: one gurobipy pin, one
-# bundled-licence expiry date, two jobs.
-gurobi_routing = "gurobi"
-scenario = "scenario"
-forecasting = "forecasting"
-mcmc = "mcmc"
-bayesian_ab = "bayesian"
-# The heavy one: torch, and only this job carries it.
-neural_net = "nn"
-streaming_results = "streaming"
-# Maps to an intentionally empty extra — see the note above it.
-annealing = "annealing"
-# The open-source scheduler. Same problem domain as gurobi_scheduling, a
-# different solver paradigm and no size cap.
-ortools_jobshop = "ortools"
-# Many small independent fits over panel data, with per-unit outcomes.
-panel_fit = "panel"
+# `[tool.dbx-leaning.models]` — the model name -> dependency extra map — is
+# gone with the models. It was read through `scripts/_registry.py` by the
+# requirements exporter and the wheel builder, and it existed because those two
+# had each kept their own copy and could disagree. Restore all three together
+# or none: a registry with one reader is just a dict in the wrong file.
 
 [tool.setuptools]
 packages = ["shared", "server", "job"]
 # Each deployable unit is a folder that carries everything it needs:
-# `server/` lives inside `app/`, and `job/models/` lives inside `job/`. See the
+# `server/` lives inside `app/`. See the
 # layout note in CLAUDE.md.
 package-dir = { server = "app/server" }
 

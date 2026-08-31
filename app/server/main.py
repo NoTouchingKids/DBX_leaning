@@ -13,8 +13,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config import AppConfig
-from .jobs_api import JobsApi
-from .reconcile import reconcile_once
 from .routes import ingest, meta, runs, stream
 from .services import ServiceHub
 from .spa import mount_spa
@@ -36,27 +34,18 @@ async def lifespan(app: FastAPI):
 
     await hub.startup()
 
-    if hub.config.reconcile_on_startup and hub.store is not None:
-        # Once, on the way up. A job that started or finished while the app
-        # was down is the normal case here — apps run ~8h/day, jobs do not.
-        # There is deliberately no periodic version of this.
-        #
-        # Gated on `store`, NOT on `repo`. It was gated on `repo` when
-        # `run_status` lived in the warehouse; after the move to Lakebase that
-        # left a deploy with Postgres and no warehouse — the recommended
-        # shape — silently never reconciling. Every job that died before
-        # emitting a status then held one of five account-wide slots forever,
-        # so five bad configs took the platform down with no way back short
-        # of editing the table by hand. `repo` is now optional and only
-        # sharpens the answer.
-        jobs = JobsApi(hub.config.workspace_host, hub.config.token)
-        try:
-            report = await reconcile_once(hub.repo, jobs, hub.store)
-            log.info("startup reconciliation: %r", report)
-        except Exception:  # noqa: BLE001 - never block startup on this
-            log.exception("startup reconciliation failed")
-        finally:
-            await jobs.close()
+    # There is no startup reconciliation here any more, and nothing replaces
+    # it. It read `run_events` from the SQL warehouse to repair run state a
+    # run had drifted out of while the app was down — and in v4 there is no
+    # drift to repair: the JOB keeps its own `run_status` row current in
+    # Lakebase whether or not anything is listening, and "is it running?" is
+    # answered by the Jobs API, which cannot go stale by construction.
+    #
+    # Worth noting what that retires, because it was load-bearing: a job that
+    # died before emitting a terminal status used to hold one of five
+    # account-wide slots forever, and reconciliation was the only way back
+    # short of editing the table by hand. A job that owns its own row does not
+    # create that state.
 
     try:
         yield

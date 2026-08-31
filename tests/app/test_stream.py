@@ -174,20 +174,6 @@ async def test_the_stream_tells_the_browser_how_fast_to_reconnect(app_and_hub):
     assert any(e.get("retry") == "2000" for e in events)
 
 
-async def test_the_stream_never_touches_the_warehouse(app_and_hub):
-    """Backfill is a separate, explicit endpoint. If streaming read Delta on
-    every reconnect, the warehouse would never sleep."""
-    app, hub = app_and_hub()
-    assert hub.repo is None  # no read path configured at all
-
-    async def publish(hub):
-        await asyncio.sleep(0.02)
-        await hub.broadcaster.publish("r1", log(0))
-
-    events = [e for e in await collect(app, hub, "r1", publish, deadline=0.2) if "id" in e]
-    assert len(events) == 1
-
-
 async def test_only_this_runs_messages_reach_this_stream(app_and_hub):
     app, hub = app_and_hub()
 

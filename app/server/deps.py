@@ -14,18 +14,15 @@ from fastapi import Depends, HTTPException, Request, status
 
 from .broadcaster import Broadcaster
 from .config import AppConfig
-from .repository import RunRepository
 from .services import ServiceHub
-from .store import RunStore
+from .store import PostgresRunStore
 
 __all__ = [
     "get_hub",
     "get_broadcaster",
-    "get_repo",
     "get_store",
     "get_config",
     "Hub",
-    "Repo",
     "Store",
     "Caster",
 ]
@@ -48,16 +45,7 @@ def get_broadcaster(hub: Annotated[ServiceHub, Depends(get_hub)]) -> Broadcaster
     return hub.broadcaster
 
 
-def get_repo(hub: Annotated[ServiceHub, Depends(get_hub)]) -> RunRepository:
-    if hub.repo is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            hub.degraded.get("sql", "the read path is unavailable"),
-        )
-    return hub.repo
-
-
-def get_store(hub: Annotated[ServiceHub, Depends(get_hub)]) -> RunStore:
+def get_store(hub: Annotated[ServiceHub, Depends(get_hub)]) -> PostgresRunStore:
     if hub.store is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -67,6 +55,5 @@ def get_store(hub: Annotated[ServiceHub, Depends(get_hub)]) -> RunStore:
 
 
 Hub = Annotated[ServiceHub, Depends(get_hub)]
-Repo = Annotated[RunRepository, Depends(get_repo)]
-Store = Annotated[RunStore, Depends(get_store)]
+Store = Annotated[PostgresRunStore, Depends(get_store)]
 Caster = Annotated[Broadcaster, Depends(get_broadcaster)]

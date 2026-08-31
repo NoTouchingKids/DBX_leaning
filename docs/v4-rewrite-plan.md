@@ -103,10 +103,42 @@ the only thing v3 bought that v1 and v2 did not.
 | The job→model id map may be absent from the environment and must be discoverable from the workspace | `app/server/discovery.py` |
 | Write against the **table's** schema, never one inferred from the batch | `job/delta.py` |
 | A workspace secret scope is not a Unity Catalog object | `deploy/README.md` |
+| A job whose principal lacks `CAN_USE` on the app gets a **302 to the OAuth login page**, and the websockets client reports `"...oidc/oauth2/v2.0/authorize... isn't a valid URI: scheme isn't ws or wss"` — which names nothing. v3 special-cased that string into a readable diagnosis | `job/channels.py::_diagnosis` (deleted with the v3 transport; **the new client needs the same explanation**) |
 
 Note the second row. It is about to stop being a problem — see below.
 
-## What gets deleted
+## What got deleted — done, on this branch
+
+Carried out rather than planned: **68,000 lines to 17,400**, and `uv.lock` from
+2,511 lines to 1,219. `dev` holds every one of them, deployed and working, so
+nothing here is lost — it is filed where it cannot be half-migrated by
+accident.
+
+- **All eleven models** (not ten — the heartbeat does not exist yet and is
+  Slice 1's to write), plus `job/models/_data`, the eleven job files, the
+  generated per-model requirements, `uc_ddl/002_model_results.sql`, the model
+  registry in `pyproject.toml`, every per-model dependency extra, and the
+  tooling that read them (`scripts/_registry.py`, `build_model_wheel.py`,
+  `export_requirements.py`'s model half, `check_gurobi_licence.py`).
+- **The entire client** — `app/client/` and the committed `app/dist/`. Slice 1
+  writes a new tiny one; stripping 36,000 lines down to a tick renderer is more
+  work than writing it.
+- **The v3 job transport** — `runner`, `emitter`, `relay`, `channels`, `main`,
+  `sink`, `buffer`, `delta`, `drivers`. This went further than "delete what is
+  unneeded", and deliberately: v4 replaces this layer wholesale, and a
+  half-migrated transport that still imports the old one is how two designs
+  ship at once. `job/` now holds config, auth, cancellation and the loader —
+  the four pieces that were not the problem.
+- **The app's warehouse path** — `sql.py`, `repository.py`, `reconcile.py`,
+  `WarehouseRunStore`, the `RunStore` Protocol, and the two routes that read
+  through them (`GET /{run_id}/messages`, `GET /{run_id}/results`).
+- **Four docs** whose subject is the models — the samples inventory and its
+  CSV, `ml-datasets.md`, `model-expansion-and-packaging.md` — and the six
+  per-model agent briefs.
+- **The tests for all of the above**, and the model-bound halves of the deploy
+  tests. **277 pass**, and every one of them still has a subject.
+
+### The original delete list, for the record
 
 - **The ten non-heartbeat models**, archived on `dev` and out of v4's tree
   until the platform is proven without them. Eleven models is why the platform
@@ -413,6 +445,38 @@ This is the design's keystone, and it is why RPC-over-WS is worth doing:
 > "nice to have later" to **"required before the app can display any finished
 > run"**. Slices 0–3 are unaffected: heartbeat, cancel and replay all concern a
 > live run, where the job serves its own history.
+
+### Finding the jobs: a tag, not a deploy-time registry
+
+v3 baked the map in at deploy: `resources/app.yml` interpolated
+`${resources.jobs.model_scenario.id}` into `DBX_JOB_IDS`, and the app was told
+its ids by the same bundle that created the jobs. Workspace discovery by tag
+existed only as a fallback for when that env var failed to arrive.
+
+**v4 inverts that: the tag is the mechanism.** Out of however many hundreds of
+jobs a workspace holds, the ones carrying `project: dbx-leaning` are ours.
+
+The reason is coupling, not convenience. Interpolating ids at deploy time
+requires the app and the jobs to be built by the same bundle, from the same
+repo — so **moving the jobs elsewhere breaks the app**, which is precisely the
+coupling this rewrite exists to remove. A tag does not care where a job is
+defined, who deployed it, or whether it still lives in this repository. It is
+the same "a job is a service, not a subroutine" rule applied to discovery.
+
+`DBX_JOB_IDS` survives as an explicit override — set it and it wins, because
+it is an allow-list as well as a map and someone who sets it means it. What
+changes is that nothing produces it any more, and nothing depends on it.
+
+Already in place: every job carries the tag, and `app/server/discovery.py`
+already knows how to read it (plus a job-name fallback for responses that omit
+tags). The change was promotion, not construction.
+
+> One thing to get right when the jobs do move out: the tag is currently the
+> only thing making a job "ours". That is fine and intended, but it means a
+> job tagged by accident is in, and a job whose tag is misspelled is silently
+> out — the same failure shape as the old empty `/api/models`, which took a
+> while to diagnose because nothing on the app said so. `/healthz` reporting
+> what was discovered, and from where, is what makes it visible.
 
 ### Run state: the job writes it, and there are two kinds
 

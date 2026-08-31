@@ -80,31 +80,6 @@ def test_cancel_with_no_live_job_names_the_escape_hatch(app_and_hub):
     assert "databricks jobs cancel-run" in resp.json()["detail"]
 
 
-def test_cancel_never_reads_or_writes_run_status(app_and_hub):
-    """Polling a table for a cancel flag would keep the warehouse awake for
-    the whole run — the exact cost mistake this rewrite exists to avoid."""
-
-    class Tripwire:
-        async def query(self, *a, **kw):
-            raise AssertionError("the cancel path touched SQL")
-
-        available = True
-
-        async def close(self): ...
-
-    from server.repository import RunRepository
-    from shared.tables import TableSet
-
-    app, hub = app_and_hub()
-    hub.sql = Tripwire()
-    hub.repo = RunRepository(Tripwire(), TableSet())
-
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws/job/r1"):
-            assert client.post("/api/runs/r1/cancel").status_code == 200
-        assert client.post("/api/runs/r1/cancel").status_code == 409
-
-
 def test_http_push_is_an_equal_ingest_path(app_and_hub):
     app, hub = app_and_hub()
     messages = [

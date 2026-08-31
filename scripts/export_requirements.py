@@ -24,7 +24,6 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from _registry import model_extras  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "deploy" / "requirements"
@@ -32,28 +31,25 @@ OUT_DIR = ROOT / "deploy" / "requirements"
 #: environment name -> the extras that make it up, derived from the single
 #: registry in pyproject.toml rather than repeated here.
 #:
-#: Every job carries `job` (the harness's own transport) plus its own model
-#: extra, and nothing else.
+#: Per-model environments, one per model, each `job` plus that model's own
+#: extra. Empty on this branch because there are no models — the map it was
+#: built from (`[tool.dbx-leaning.models]`, read through `scripts/_registry.py`)
+#: went with them, and both come back together.
 #:
-#: Notably NOT `delta`: the durable writer is Spark, which the runtime already
-#: provides, and the delta-rs writer is not implemented (see job/delta.py).
-#: Add it back in the same commit that makes DeltaRsWriter real.
-ENVIRONMENTS: dict[str, list[str]] = {
-    model: ["job", extra] for model, extra in sorted(model_extras().items())
-}
+#: The split itself was right and is not what v4 is changing: the MCMC job must
+#: not carry gurobipy, and `neural_net` is why — torch reached exactly one job
+#: environment. Restore this when the first model returns, not before.
+ENVIRONMENTS: dict[str, list[str]] = {}
 
-#: The app is not a model, and does not get a Delta writer or any model
-#: library — it observes, it does not compute.
+#: The app observes; it does not compute, and gets no model library.
 APP_EXTRAS = ["app"]
 
 #: The job unit's own baseline: the harness transport, no model library.
 #:
-#: Nothing installs this today — each job task installs
-#: `deploy/requirements/<model>.txt`, which is this plus exactly one model
-#: extra, because the whole point of the split is that the MCMC job does not
-#: carry gurobipy. It is written into `job/` so that folder states its own
-#: floor the way `app/` does, and so `job/` is a complete unit the moment it
-#: is packaged as a wheel.
+#: On this branch it is also the ONLY job environment, and it is what
+#: `resources/probe_volume.job.yml` installs — deliberately, so Slice 0 probes
+#: the runtime the harness actually gets rather than some model's. Per-model
+#: files return alongside ENVIRONMENTS above.
 JOB_EXTRAS = ["job"]
 
 HEADER = """\
@@ -101,13 +97,13 @@ def render(name: str, extras: list[str]) -> str:
 
 
 def targets() -> dict[pathlib.Path, str]:
+    # Empty while ENVIRONMENTS is; kept so restoring one restores the other.
     out = {OUT_DIR / f"{name}.txt": render(name, extras) for name, extras in ENVIRONMENTS.items()}
     # The app's list lives in `app/`, not at the repo root: Databricks Apps
     # installs requirements.txt from the app's SOURCE directory, and
     # `resources/app.yml` points that at `../app`.
     out[ROOT / "app" / "requirements.txt"] = render("databricks-app", APP_EXTRAS)
-    # The job unit's baseline — see JOB_EXTRAS. Every file under
-    # deploy/requirements/ is this plus one model extra.
+    # The job unit's baseline — see JOB_EXTRAS.
     out[ROOT / "job" / "requirements.txt"] = render("job-harness", JOB_EXTRAS)
     return out
 

@@ -194,37 +194,6 @@ def test_the_env_names_can_be_overridden():
 # --- every authenticated path uses it -------------------------------------
 
 
-async def test_the_sql_client_asks_for_a_token_per_request():
-    """`DATABRICKS_TOKEN` read once into a header works through the morning
-    and returns 401 for the rest of the day."""
-    from server.sql import SqlClient
-
-    seen: list[str] = []
-    tokens = iter(["t1", "t2"])
-
-    async def provider() -> str:
-        value = next(tokens)
-        seen.append(value)
-        return value
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request.headers["authorization"])
-        return httpx.Response(
-            200, json={"status": {"state": "SUCCEEDED"}, "manifest": {}, "result": {}}
-        )
-
-    client = SqlClient(
-        HOST,
-        "wh",
-        None,
-        token_provider=provider,
-        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
-    await client.query("SELECT 1")
-    await client.query("SELECT 1")
-    assert seen == ["t1", "Bearer t1", "t2", "Bearer t2"]
-
-
 async def test_the_jobs_api_asks_for_a_token_per_request():
     from server.jobs_api import JobsApi
 

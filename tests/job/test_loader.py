@@ -164,16 +164,3 @@ def test_refresh_also_picks_up_a_callback_defined_during_build():
     obj.build()
     handle.refresh()
     assert handle.model_callback is not None
-
-
-def test_a_gurobi_model_still_none_after_build_fails_with_an_actionable_message():
-    from job.drivers import select_driver
-
-    class NeverBuilt:
-        grb_model = None
-
-        def build(self): ...
-
-    handle = describe_object(NeverBuilt(), "never")
-    with pytest.raises(RuntimeError, match="still None after build"):
-        select_driver(handle, lambda *a, **k: None, lambda: False)

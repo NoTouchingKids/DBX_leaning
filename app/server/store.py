@@ -49,9 +49,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "DEFAULT_SCHEMA",
     "RunRecord",
-    "RunStore",
     "PostgresRunStore",
-    "WarehouseRunStore",
     "SlotDenied",
     "DuplicateRun",
     "UnsafeSchemaName",
@@ -502,76 +500,9 @@ def _filters(*, status: str | None, model: str | None) -> tuple[str, list[Any]]:
 
 # --------------------------------------------------------------------------
 # Warehouse (today's behaviour, kept so a deploy is never blocked on Lakebase)
-# --------------------------------------------------------------------------
 
-
-class WarehouseRunStore:
-    """Delta via the Statement Execution API.
-
-    Correct enough to run on, and honest about what it cannot do: the ceiling
-    check here is count-then-insert with no transaction around it, so two
-    simultaneous triggers can both pass. Postgres is the fix; this exists so
-    the platform works before Lakebase is provisioned.
-    """
-
-    name = "warehouse"
-
-    def __init__(self, repo: Any) -> None:
-        self.repo = repo
-
-    async def ensure_schema(self) -> None:
-        return None  # uc_ddl/ owns this table
-
-    async def claim_slot(
-        self, run_id: str, *, model: str, ceiling: int, requested_by: str | None = None
-    ) -> RunRecord:
-        active = await self.repo.active_run_count()
-        if active >= ceiling:
-            raise SlotDenied(active, ceiling)
-        if await self.repo.run_status(run_id) is not None:
-            raise DuplicateRun(f"run_id {run_id!r} is already registered")
-
-        await self.repo.create_run(run_id, model=model, job_run_id=None, requested_by=requested_by)
-        now = now_ms()
-        return RunRecord(
-            run_id=run_id,
-            model=model,
-            status=RunStatus.QUEUED,
-            started_ts=now,
-            updated_ts=now,
-            requested_by=requested_by,
-        )
-
-    async def attach_job_run(self, run_id: str, job_run_id: str | int) -> None:
-        await self.repo.set_run_status(run_id, RunStatus.QUEUED.value, job_run_id=str(job_run_id))
-
-    async def release_slot(self, run_id: str) -> None:
-        # Delta has no cheap single-row delete on this path, and a stranded
-        # QUEUED row is corrected by startup reconciliation. Saying so beats
-        # a delete that pretends to be transactional.
-        log.info("warehouse store cannot release %s; reconciliation will correct it", run_id)
-
-    async def set_status(
-        self, run_id: str, status: RunStatus | str, *, detail: str | None = None
-    ) -> None:
-        value = status.value if isinstance(status, RunStatus) else str(status)
-        await self.repo.set_run_status(run_id, value, detail=detail)
-
-    async def get(self, run_id: str) -> RunRecord | None:
-        row = await self.repo.run_status(run_id)
-        return RunRecord.from_row(row) if row else None
-
-    async def list_runs(
-        self, *, limit: int = 50, status: str | None = None, model: str | None = None
-    ) -> list[RunRecord]:
-        rows = await self.repo.list_runs(limit=limit, status=status, model=model)
-        return [RunRecord.from_row(r) for r in rows]
-
-    async def active_count(self) -> int:
-        return await self.repo.active_run_count()
-
-    async def non_terminal(self, limit: int = 200) -> list[RunRecord]:
-        return [RunRecord.from_row(r) for r in await self.repo.non_terminal_runs(limit)]
-
-    async def close(self) -> None:
-        return None
+# The warehouse-backed store that used to live here is gone. It existed so a
+# deploy was never blocked on provisioning Lakebase; Lakebase is provisioned,
+# and v4 takes the SQL warehouse off the app's live path entirely. The
+# `RunStore` Protocol went with it — one implementation does not need an
+# interface, and the seam it was holding open is not one v4 wants.
