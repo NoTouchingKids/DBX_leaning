@@ -43,7 +43,9 @@ class JobConfig:
     #: The platform's run identifier — what every message is keyed by, and
     #: what a browser subscribes to. Distinct from Databricks' own job run id.
     run_id: str
-    #: Import spec for the model: "job.models.scenario" or "job.models.scenario:build_model".
+    #: The model to run. Normally a NAME — "heartbeat" — resolved through the
+    #: `dbx_leaning.models` entry point every model package declares. An import
+    #: path still works for a model being developed and not yet installed.
     model_spec: str
     model_config: dict[str, Any] = field(default_factory=dict)
 
@@ -114,7 +116,7 @@ class JobConfig:
         if not model_spec:
             raise ValueError(
                 "DBX_MODEL is required — the import spec for the model to run, "
-                "e.g. 'job.models.scenario' or 'job.models.scenario:build_model'"
+                "e.g. 'heartbeat', or an import path for a model that is not installed"
             )
 
         app_url = (e.get("DBX_APP_URL") or "").strip() or None

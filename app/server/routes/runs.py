@@ -55,7 +55,11 @@ def build_job_parameters(
     """What the job is launched with. Every key must be in JOB_PARAMETER_NAMES."""
     parameters = {
         "DBX_RUN_ID": run_id,
-        "DBX_MODEL": f"job.models.{model}",
+        # A NAME, not an import path. The harness resolves it through the
+        # `dbx_leaning.models` entry point, so the app does not need to know
+        # where a model's code lives — which is what lets a model ship from
+        # another repository without the app changing.
+        "DBX_MODEL": model,
         "DBX_MODEL_CONFIG": json.dumps(config),
         "DBX_CATALOG": app_config.catalog,
         "DBX_SCHEMA": app_config.schema,

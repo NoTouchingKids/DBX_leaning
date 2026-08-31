@@ -13,10 +13,10 @@ import json
 import threading
 
 import pytest
+from heartbeat import Heartbeat
 
 from job.harness import Harness
 from job.loader import describe_object
-from job.models.heartbeat import Heartbeat
 from job.telemetry import PartFileWriter
 
 

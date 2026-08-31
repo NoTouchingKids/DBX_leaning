@@ -1,7 +1,14 @@
 # DBX_leaning
 
-Databricks modelling application platform — v2 rewrite. See `CLAUDE.md` for
-the full brief; this file is just "what do I do first."
+Databricks modelling application platform. See `CLAUDE.md` for the full
+brief; this file is just "what do I do first."
+
+> **This branch is `v4-plan`, and most of this README still describes v3.**
+> The transport, the durable path and the model packaging all changed —
+> `docs/v4-rewrite-plan.md` is the record, `CLAUDE.md` is current, and
+> everything below the "What's here" tree should be read with suspicion until
+> it has been rewritten. The eleven models, the HTTP-push fallback, the Delta
+> writer and the warehouse read path are all on `dev`, not here.
 
 ## First run
 
@@ -32,8 +39,8 @@ don't, so they go first.
 `docs/parallelization-plan.md` has the worktree-per-track breakdown. Short
 version: build `shared/` (the message envelope) once, sequentially, then
 fan out — one Claude Code session per track (`app/`, `job/`, and one per
-model in `job/models/`). The first five model tracks were briefed from a file in
-`.claude/agents/`; once `job/models/README.md` and `/new-model` existed the
+model in `models/`). The first five model tracks were briefed from a file in
+`.claude/agents/`; once `models/README.md` and `/new-model` existed the
 later six needed no brief at all, which is why there are fewer briefs there
 than models.
 
@@ -45,14 +52,17 @@ docs/                  Architecture rationale, platform constraints, envelope sp
 .claude/agents/        One brief per parallel track
 .claude/commands/      /orient, /spike-ws, /spike-sse, /new-model
 
-shared/                The message envelope + protocol. Imported by app/ and job/,
-                       never by job/models/. Build against this, don't fork it.
-job/                   The harness: model loader, thread->loop crossing, WS client
-                       with HTTP-push fallback, Delta writer, cancellation
-app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
-                       backfill, startup reconciliation, ServiceHub/DI
-job/models/                Eleven model packages. See job/models/README.md for the
-                       duck-typed contract a model has to satisfy.
+app/shared/            The message envelope + RPC frames. Imported by app/ and
+                       job/, never by a model. Canonical here because the app
+                       deploys alone; the job installs the repo and gets the
+                       same module. Build against this, don't fork it.
+job/                   The harness: model loader, RPC/WS client, telemetry
+                       part-file writer, cancellation, run_local()
+app/                   FastAPI: SSE to browsers, WS/RPC ingress for jobs,
+                       cancel, ServiceHub/DI
+models/                One installable distribution per model, each with its own
+                       dependencies and one entry point. See models/README.md
+                       for the duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
 lakebase_ddl/          Postgres DDL (run state) — applied at startup too
 databricks.yml         Asset bundle: eleven jobs (one per model) and the app
@@ -81,8 +91,10 @@ uv run ruff check .                     # lint
 uv run ty check                         # types (advisory — see below)
 
 # a full run with no app listening — the normal unobserved case
-DBX_MODEL=job.models.scenario DBX_WRITER=jsonl DBX_ALLOW_LOCAL_WRITER=1 \
-  uv run python -m job.main
+DBX_MODEL=heartbeat uv run python -m job.main
+
+# or, with nothing to configure at all:
+uv run python -c "from job.local import run_local; print(run_local('heartbeat', seconds=3)[0])"
 
 uv run uvicorn server.main:app --reload    # the observer, on :8000
 ```
@@ -138,7 +150,7 @@ production is how "works on my machine" gets built, so:
 
 | | Local | Deployed |
 |---|---|---|
-| `app/`, `job/`, `shared/`, `job/models/` | the same code | the same code |
+| `app/`, `job/`, `app/shared/`, `models/` | the same code | the same code |
 | Live path | real WS ingress, real HTTP-push fallback, real SSE | same |
 | Run registry | embedded Postgres (`pgserver`) via `PostgresRunStore` | Lakebase, same class |
 | Concurrency ceiling | the app's check is real; nothing enforces it behind that | the account's own 5-task limit too |
@@ -168,7 +180,7 @@ does it.
 | `GET /api/runs/{id}/messages` | Explicit backfill from Unity Catalog, client-triggered, paged by seq |
 | `GET /api/runs/{id}/results` | The full result set a `result` message only previews — the table its `fetch_hint` points at, paged |
 | `POST /api/runs/{id}/cancel` | Forwards over the job's WebSocket, or 409s naming the CLI escape hatch |
-| `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `job/models/` |
+| `GET /api/models` | What can be triggered — discovered by the `project: dbx-leaning` job tag, not by importing a model |
 | `WS /ws/job/{id}` | The job's ingress, and the only inbound path to a running job |
 | `POST /api/runs/{id}/push` | One-way HTTP fallback ingress |
 | `GET /api/schema` | The wire protocol as JSON Schema — generate the client's types from this |

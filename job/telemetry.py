@@ -40,7 +40,7 @@ import logging
 import pathlib
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +56,15 @@ DEFAULT_MAX_BYTES = 1_000_000
 DEFAULT_MAX_AGE_S = 30.0
 
 
-class TelemetryWriter:
-    """What the harness needs from a durable path. Implemented by
+class TelemetryWriter(Protocol):
+    """What the harness needs from a durable path. Satisfied by
     `PartFileWriter`; the interface exists so tests can substitute something
-    that does not touch a filesystem, not because a second one is planned."""
+    that does not touch a filesystem, not because a second one is planned.
+
+    A `Protocol` rather than a base class, and structurally so: `PartFileWriter`
+    does not inherit it, which is the point — a substitute has to match the
+    shape, not the ancestry.
+    """
 
     def append(self, record: dict[str, Any]) -> None: ...
     def roll_if_due(self) -> bool: ...

@@ -1,7 +1,7 @@
 """The message envelope and protocol helpers — the one contract every other
 track builds against.
 
-Imported by ``app/`` and ``job/``. **Not** imported by ``job/models/``: a model
+Imported by ``app/`` and ``job/``. **Not** imported by ``models/``: a model
 conforms to the envelope's documented shape via the ``emit()`` callback it is
 handed, and needs no import from the platform to run standalone.
 """

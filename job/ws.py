@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from .shared.rpc import (
+from shared.rpc import (
     ErrorCode,
     Method,
     Request,

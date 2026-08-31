@@ -13,6 +13,12 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+members = [
+    "dbx-leaning",
+    "dbx-model-heartbeat",
+]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"
@@ -422,6 +428,7 @@ job = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "dbx-model-heartbeat" },
     { name = "jsonschema" },
     { name = "pgserver", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'" },
     { name = "pytest" },
@@ -446,6 +453,7 @@ provides-extras = ["app", "job"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "dbx-model-heartbeat", editable = "models/heartbeat" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "pgserver", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or sys_platform == 'darwin'", specifier = ">=0.1.4" },
     { name = "pytest", specifier = ">=8" },
@@ -454,6 +462,11 @@ dev = [
     { name = "ruff", specifier = ">=0.4" },
     { name = "ty", specifier = ">=0.0.1a1" },
 ]
+
+[[package]]
+name = "dbx-model-heartbeat"
+version = "0.1.0"
+source = { editable = "models/heartbeat" }
 
 [[package]]
 name = "fastapi"

@@ -50,7 +50,7 @@ def test_missing_run_names_everything_that_was_tried():
 
     message = str(exc.value)
     expected_names = ("run", "solve", "fit", "sample", "execute", "grb_model")
-    for expected in (*expected_names, "job/models/README.md"):
+    for expected in (*expected_names, "models/README.md"):
         assert expected in message
 
 

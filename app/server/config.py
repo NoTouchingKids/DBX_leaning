@@ -55,7 +55,7 @@ class AppConfig:
 
     #: Which Databricks job runs which model: {"scenario": 1234, ...}. This
     #: map is also the allow-list — a model with no job here cannot be
-    #: triggered, so the app never needs to import job/models/ (and its gurobipy /
+    #: triggered, so the app never needs to import a model (and its gurobipy /
     #: sklearn / emcee weight) just to validate a request.
     job_ids: dict[str, int] = field(default_factory=dict)
     #: Fallback for a single generic harness job parameterised by model.

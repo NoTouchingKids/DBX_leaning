@@ -313,7 +313,7 @@ def test_triggering_needs_no_run_store(app_and_hub):
     assert body["watch"] == "/?run=hb-001"
 
     assert launched["job_id"] == 42
-    assert launched["params"]["DBX_MODEL"] == "job.models.heartbeat"
+    assert launched["params"]["DBX_MODEL"] == "heartbeat"
     assert json.loads(launched["params"]["DBX_MODEL_CONFIG"]) == {"seconds": 180, "hz": 1}
 
 

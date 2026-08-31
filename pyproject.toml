@@ -46,6 +46,14 @@ job = [
 # PEP 735 group, not an extra: `uv sync` installs these by default for
 # development, and nothing that installs the package can pull them in.
 dev = [
+    # The one model this branch has, installed editable so the suite can drive
+    # it. It is a DEV dependency and must stay one: the platform does not
+    # depend on any particular model — the harness finds whatever is installed
+    # by entry point — and, concretely, the job environment installs this
+    # repo's root with pip, which cannot resolve `dbx-model-heartbeat` from
+    # PyPI. Only `[tool.uv.sources]` below knows where it lives, and only uv
+    # reads that. A model in `[project.dependencies]` fails the deploy.
+    "dbx-model-heartbeat",
     "jsonschema>=4.26.0",
     # Embedded Postgres for tests/app/test_run_store.py, and the one dependency
     # here that does not exist everywhere: it publishes wheels for linux x86_64,
@@ -69,6 +77,16 @@ dev = [
     "ty>=0.0.1a1",
 ]
 
+[tool.uv.workspace]
+# Every model is its own distribution, and this is what makes `uv sync` install
+# them all editable in one go. A model added under `models/` is picked up by
+# the glob; nothing central lists them, which is the point — the harness finds
+# them by entry point, not by a registry that has to be kept in agreement.
+members = ["models/*"]
+
+[tool.uv.sources]
+dbx-model-heartbeat = { workspace = true, editable = true }
+
 [tool.uv]
 # One resolution covering every extra, so the lockfile describes a single
 # consistent world rather than one per install shape. The job installs a
@@ -90,21 +108,36 @@ default-groups = ["dev"]
 # or none: a registry with one reader is just a dict in the wrong file.
 
 [tool.setuptools]
-packages = ["shared", "server", "job"]
-# Each deployable unit is a folder that carries everything it needs:
-# `server/` lives inside `app/`. See the
-# layout note in CLAUDE.md.
-package-dir = { server = "app/server" }
+# Subpackages are listed, not globbed: `package-dir` maps two of these out of
+# `app/`, and setuptools' `find` directive does not see through that cleanly.
+# `server.routes` missing here was silent — nothing outside `app/` imports it —
+# but the metadata said the distribution carried `server` when it carried half.
+packages = ["shared", "server", "server.routes", "job"]
+# `models` is absent on purpose: each model is its own distribution under
+# `models/`, installed as a uv workspace member, and this package must not
+# carry any of them. See models/heartbeat/pyproject.toml.
+#
+# `server` AND `shared` are mapped out of `app/` because that folder is the
+# deployed app and nothing above it travels with it. `shared` living there is
+# the part that looks wrong and is not: Databricks Apps is handed `app/` as
+# its `source_code_path`, so the envelope has to be INSIDE it or the app
+# cannot import what it parses. Putting the canonical copy there and mapping
+# it back is what lets the job have the same module without a second copy —
+# the job installs this distribution and setuptools puts `shared` on its path
+# like any other package.
+#
+# The alternative, and what v3 did, was a tracked copy at `app/shared/` plus a
+# sync script plus a test that failed when they drifted. One directory in a
+# slightly odd place is the cheaper half of that trade.
+package-dir = { server = "app/server", shared = "app/shared" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-# The repo root FIRST, then the app folder. Order is load-bearing: `app/`
-# carries a tracked copy of `shared/` (it is deployed on its own and must be
-# self-contained), and with `app` ahead of `.` every test would import the
-# COPY. Root first means `shared` is always the canonical one and the copy is
-# only ever what the deployed app uses — which is also what
-# `tests/deploy/test_shared_copy.py` is there to keep true.
+# The repo root for `job`; `app/` for `server` and `shared`, which is exactly
+# where the deployed app finds them. There is no longer a second copy for the
+# order to matter against — the copies, the sync script and the drift test all
+# went when the units started installing packages instead of syncing files.
 pythonpath = [".", "app"]
 filterwarnings = ["error::DeprecationWarning:shared.*"]
 markers = [
@@ -118,6 +151,13 @@ markers = [
 line-length = 100
 target-version = "py311"
 
+[tool.ty.environment]
+# `app/` is a source root, not just a folder: `server` and `shared` both live
+# under it (see the package-dir note above), which is exactly what
+# `[tool.pytest.ini_options] pythonpath` says and what the deployed app sees.
+# Without this, every `from shared.x import ...` reads as unresolved.
+extra-paths = ["app"]
+
 [tool.ty.src]
 # Source only. The test suite is excluded deliberately, not because it is
 # exempt from care: its fixtures splat dicts into dataclasses, inject
@@ -125,9 +165,10 @@ target-version = "py311"
 # one of which a static checker objects to and none of which is a defect.
 # Contorting them to satisfy the checker would cost readability and buy
 # nothing. Scoped this way, `uv run ty check` is a signal that sits at zero.
-# `app/server`, not `app` — `app/client` is TypeScript and `app/shared` is a
-# generated copy of `shared`, which would be checked twice and reported twice.
-include = ["app/server", "job", "shared", "scripts"]
+# `app/server`, not `app` — `app/client` is TypeScript and `app/dist` is the
+# built bundle. `models/` is out too: a model is an independent distribution
+# and is checked in its own right, not as part of the platform.
+include = ["app/server", "app/shared", "job", "scripts"]
 
 [tool.ty.rules]
 # ty is pre-1.0, so it runs advisory (`uv run ty check`) rather than as a CI

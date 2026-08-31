@@ -4,7 +4,7 @@ A model is a plain Python object. No base class, no registration, no
 inheritance — the harness looks for a small set of conventional names on
 whatever object the model package hands back. See ``docs/architecture.md``
 ("Why models are duck-typed") for why this is the shape, and
-``job/models/README.md`` for the contract as a model author sees it.
+``models/README.md`` for the contract as a model author sees it.
 
 When something required is missing, the failure names every alternative that
 was tried. A model author should never have to read this file to find out
@@ -102,13 +102,42 @@ class ModelHandle:
         self.obj.should_cancel = should_cancel
 
 
-def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
-    """Import ``spec`` and discover the model object it produces.
+#: The entry-point group every model package declares.
+ENTRY_POINT_GROUP = "dbx_leaning.models"
 
-    ``spec`` is ``"job.models.scenario"`` (a factory is looked for by convention)
-    or ``"job.models.scenario:build_model"`` (an explicit attribute).
+
+def installed_models() -> dict[str, str]:
+    """Every model installed in this environment, by name.
+
+    This is the whole model registry. `[tool.dbx-leaning.models]` in
+    `pyproject.toml`, `scripts/_registry.py`, and a dotted module path in
+    `DBX_MODEL` are all replaced by asking importlib.metadata what declares
+    the `dbx_leaning.models` entry point — so a model in another repository is
+    discovered exactly as one in this one is, and nothing central has to be
+    kept in agreement with anything.
+    """
+    from importlib.metadata import entry_points
+
+    return {ep.name: ep.value for ep in entry_points(group=ENTRY_POINT_GROUP)}
+
+
+def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
+    """Load a model by NAME, or by an import path.
+
+    ``spec`` is normally a plain name — ``"heartbeat"`` — resolved through the
+    entry points above. An import path (``"mypkg.thing"`` or
+    ``"mypkg.thing:build_model"``) still works, because a model being developed
+    in a notebook may not be installed yet and should not have to be.
     """
     config = dict(config or {})
+
+    # An installed model wins, but a spec that is not one is still tried as an
+    # import path. A model being written in a notebook is not installed yet and
+    # should not have to be — insisting on the entry point would make the
+    # framework something you have to package before you can run it once.
+    installed = installed_models()
+    spec = installed.get(spec, spec)
+
     module_name, _, attr = spec.partition(":")
 
     try:
@@ -117,7 +146,10 @@ def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
         raise ModelLoadError(
             f"could not import model module {module_name!r}: {exc}\n"
             f"  spec given: {spec!r}\n"
-            f"  expected an importable package under job/models/, e.g. 'job.models.scenario'"
+            f"  installed models: {', '.join(sorted(installed)) or '(none)'}\n"
+            f"  a model is installed by adding it under models/ and running "
+            f"`uv sync`, or from anywhere by declaring a "
+            f"{ENTRY_POINT_GROUP!r} entry point"
         ) from exc
 
     factory = _resolve_factory(module, module_name, attr)
@@ -142,7 +174,7 @@ def _resolve_factory(module: Any, module_name: str, attr: str) -> Any:
         f"{module_name} exposes no model factory.\n"
         f"  tried, in order: {', '.join(CONVENTIONS['factory'])}\n"
         f"  a model package needs one module-level callable taking an optional\n"
-        f"  config dict and returning the model object (see job/models/README.md)"
+        f"  config dict and returning the model object (see models/README.md)"
     )
 
 
@@ -211,7 +243,7 @@ def describe_object(obj: Any, spec: str = "<object>") -> ModelHandle:
             f"{', '.join(CONVENTIONS['gurobi_model'])}\n"
             f"  object was {type(obj).__name__} with public attributes: "
             f"{', '.join(sorted(n for n in dir(obj) if not n.startswith('_'))) or '(none)'}\n"
-            f"  see job/models/README.md for the contract"
+            f"  see models/README.md for the contract"
         )
 
     return handle

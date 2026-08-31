@@ -162,6 +162,104 @@ accident.
   plus a sync script and a drift test to make the duplication safe. v4 either
   packages it as a wheel or accepts one copy — not three.
 
+## Packaging: a model is a package, not a folder
+
+Decided after Slice 1 was already running, because that is when the problem
+became visible. The complaint that started it:
+
+> I don't like the `job/` folder structure — if I want to work within a
+> notebook I get all kinds of import errors and file-stating issues. When I
+> went self-contained I was really meaning to allow me to work on a model
+> independently of all the stuff, and `repo_root` and all of the path
+> traversal is not something I expected.
+
+That is the correct diagnosis, and it points further back than it looks. The
+delete list above already had "the triple copy of `shared/`" on it, and
+`CLAUDE.md` had carried the admission for months: *"a known compromise, scoped
+to this stage — packaging `shared` as a wheel retires it."* The copies were
+never the disease. **Every one of them was a symptom of code being SYNCED as
+loose files instead of INSTALLED as a package**, and loose files are on
+nobody's `sys.path`.
+
+Count what that one fact was paying for:
+
+| Machinery | Existed because |
+|---|---|
+| `run_model.py`'s four-way repo-root search (144 lines) | nothing put the tree on `sys.path` |
+| `job/*.py` importing `.shared` — relative | so `job` would be complete from wherever it was found |
+| `job/shared/` + `app/shared/` | each unit had to carry what it imported |
+| `scripts/sync_shared.py` | to make those copies |
+| `experimental.scripts.preinit` in `databricks.yml` | to run it before every sync |
+| `tests/deploy/test_shared_copy.py` | because copies drift |
+| `conftest.py` generating a copy before collection | a fresh checkout could not `import job` |
+| `[tool.dbx-leaning.models]` + `scripts/_registry.py` | a central list of models, to be kept in agreement |
+| two distinct `MessageType` enums | `job.shared.envelope` and `shared.envelope` are different types |
+
+All of it is gone. The whole change is three lines in a job's environment:
+
+```yaml
+dependencies:
+  - -r ${workspace.file_path}/job/requirements.txt
+  - ${workspace.file_path}            # this repo: job/ and shared/
+  - ${workspace.file_path}/models/heartbeat
+```
+
+**A model is now its own distribution** under `models/`, with its own
+`pyproject.toml`, its own dependency list, and one entry point:
+
+```toml
+[project.entry-points."dbx_leaning.models"]
+heartbeat = "heartbeat:build_model"
+```
+
+`DBX_MODEL` therefore carries a NAME, not an import path, and the harness asks
+`importlib.metadata` what is installed. Nothing central lists the models —
+which is the same move as discovering jobs by tag rather than by interpolated
+id, and buys the same thing: *a model in another repository is found
+identically to one here.* The user's framing, and it is the right one:
+
+> we are making a wrapper or framework that any model will fit inside
+
+The proof that the wrapper costs a model nothing is that
+`models/heartbeat/pyproject.toml` has `dependencies = []`. A model imports
+neither `job` nor `shared`; it reaches the platform only through the `emit`
+callback it is handed. `models/README.md` is the contract as a model author
+sees it, and it is what `job/loader.py`'s failures point at.
+
+Working on a model independently — the thing that was asked for — is now two
+imports with nothing to arrange:
+
+```python
+from heartbeat import Heartbeat  # the model alone; loads two files
+from job.local import run_local  # the real harness, no Databricks
+
+outcome, messages = run_local("heartbeat", seconds=10, hz=2)
+```
+
+### The one copy that stayed, and where it went
+
+`shared/` is canonical at **`app/shared/`**, which looks wrong and is not.
+Databricks Apps is handed `../app` as its `source_code_path`, and an app can
+also be deployed with no bundle at all — the Apps UI, `databricks apps deploy
+--source-code-path ...` — which sees only tracked files. So the envelope has
+to be physically inside `app/` or the deployed app cannot import what it
+parses. `[tool.setuptools] package-dir` maps it back out, so the job's install
+of this repo gets the same module rather than a second copy of it. One
+directory in an odd place, instead of two copies, a script, a hook and a drift
+test.
+
+This was found the hard way, and the way it was found is the lesson: deleting
+`app/shared/` as obvious duplication left the full suite green, because pytest
+has the repo root on its path and a Databricks App does not.
+`tests/deploy/test_app_is_self_contained.py` now walks every import under
+`server/` and fails if one resolves outside `app/`.
+
+A second deploy-only failure came out of the same pass: `dbx-model-heartbeat`
+sat in `[project.dependencies]`, resolvable through `[tool.uv.sources]` —
+which **only uv reads**. The job environment installs this repo with pip,
+which would have gone looking on PyPI. A model belongs in the dev group and
+nowhere else; the same test asserts it.
+
 ## The v4 architecture
 
 ### The direction every boundary below is drawn from

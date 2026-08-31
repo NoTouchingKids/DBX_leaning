@@ -42,7 +42,10 @@ resources:
         - name: DBX_RUN_ID
           default: ""
         - name: DBX_MODEL
-          default: job.models.heartbeat
+          # A name, resolved by entry point — not an import path. The
+          # harness asks importlib.metadata what is installed, so this stays
+          # correct if the model moves to its own repository.
+          default: heartbeat
         # seconds/hz. 60s at 1Hz is long enough to watch and short enough to
         # iterate on; raise `seconds` well past the ingress's suspected ~120s
         # cut when the question is whether a long stream survives it.
@@ -69,7 +72,17 @@ resources:
           spec:
             client: "3"
             dependencies:
+              # INSTALLED, not synced. This is what retires the 144-line
+              # repo-root search in run_model.py, job/shared/, the sync script
+              # and the drift test: Python finds an installed package, so there
+              # is no root to find and nothing to copy.
+              #
+              # The model is its own distribution and brings its own
+              # dependencies, so a model needing torch says so in ITS
+              # pyproject.toml and no other environment pays for it.
               - -r ${workspace.file_path}/job/requirements.txt
+              - ${workspace.file_path}
+              - ${workspace.file_path}/models/heartbeat
 
       tasks:
         - task_key: run

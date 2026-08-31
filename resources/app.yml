@@ -24,12 +24,17 @@ resources:
       #   app/server/        the FastAPI package (their server/)
       #   app/client/        the React source (their client/) — never deployed
       #   app/dist/          the built SPA, committed, served by server/spa.py
-      #   app/shared/        a TRACKED copy of the repo root's shared/, because
-      #                      this folder deploys alone and server/ imports it
+      #   app/shared/        the envelope and the RPC frames. THE canonical
+      #                      copy, not a copy of one: this folder deploys
+      #                      alone and server/ imports it, so it has to be
+      #                      here. The job gets the same module by installing
+      #                      the repo, which maps it back out — see
+      #                      `[tool.setuptools] package-dir` in pyproject.toml
       #   app/requirements.txt   where Databricks Apps looks for it
       #
-      # `scripts/sync_shared.py` makes that copy and
-      # `tests/deploy/test_shared_copy.py` fails the moment it drifts.
+      # `tests/deploy/test_app_is_self_contained.py` fails if anything under
+      # `server/` starts importing something that is not in this folder — the
+      # failure it exists for works locally and only breaks on the workspace.
       #
       # What the export cannot survive is a SYMLINK:
       #

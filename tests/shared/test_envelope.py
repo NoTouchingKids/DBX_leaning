@@ -85,7 +85,7 @@ def test_non_finite_primary_metric_becomes_null(bad):
 
 def test_finite_sentinels_are_not_this_layers_job():
     # Gurobi's pre-incumbent ±1e100 is finite, so it passes here by design —
-    # it is handled where it is produced (job/models/gurobi_scheduling).
+    # it is handled where it is produced, inside the model.
     assert sanitize_metric(1e100) == 1e100
     assert sanitize_metric(None) is None
     assert sanitize_metric(math.nan) is None

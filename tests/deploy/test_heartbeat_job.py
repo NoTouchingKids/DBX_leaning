@@ -39,7 +39,9 @@ def test_it_carries_the_tag_the_app_discovers_it_by(job):
 
 
 def test_it_runs_the_heartbeat_through_the_shared_entrypoint(job, params):
-    assert params["DBX_MODEL"] == "job.models.heartbeat"
+    assert params["DBX_MODEL"] == "heartbeat", (
+        "DBX_MODEL is a model NAME resolved by entry point, not an import path"
+    )
     task = job["tasks"][0]["spark_python_task"]
     assert task["python_file"].endswith("/job/run_model.py")
     assert task["source"] == "WORKSPACE"
@@ -91,8 +93,31 @@ def test_it_queues_rather_than_failing_when_the_ceiling_is_hit(job):
     assert job["timeout_seconds"] > 0
 
 
-def test_it_installs_only_the_harness_floor(job):
-    """No model extra, because a heartbeat imports nothing a solver would —
-    and the per-model dependency split has nothing to split yet."""
+def test_the_job_installs_its_packages_rather_than_syncing_loose_files(job):
+    """The change that retired the path machinery.
+
+    A synced tree is on nobody's `sys.path`, which is why `run_model.py` once
+    searched four ways for the repo root, why `job/shared/` existed as a
+    generated copy, and why a fresh checkout could not `import job` at all.
+    Installing the distributions makes all of that unnecessary — Python finds
+    an installed package.
+
+    The model is installed as its own distribution, so it brings its own
+    dependencies and no other environment pays for them.
+    """
     deps = job["environments"][0]["spec"]["dependencies"]
-    assert deps == ["-r ${workspace.file_path}/job/requirements.txt"]
+
+    assert "${workspace.file_path}" in deps, "the harness is not installed"
+    assert "${workspace.file_path}/models/heartbeat" in deps, "the model is not installed"
+
+
+def test_no_model_dependencies_leak_into_the_harness_floor(job):
+    """`job/requirements.txt` is the harness and nothing else.
+
+    A model's libraries belong in ITS pyproject — that is the whole point of a
+    model being its own distribution — so a heartbeat needing nothing and a
+    model needing torch cost the same here.
+    """
+    floor = (ROOT / "job" / "requirements.txt").read_text().lower()
+    for model_library in ("torch", "gurobipy", "scikit-learn", "ortools", "emcee"):
+        assert model_library not in floor, f"{model_library} reached the harness floor"

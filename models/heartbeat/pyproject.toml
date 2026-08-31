@@ -1,0 +1,32 @@
+# The heartbeat, as its own distribution.
+#
+# One model, one package, one dependency list. A model that later needs torch
+# says so here and nowhere else — which is what the per-model dependency extras
+# in v3 were reaching for, without a central registry that has to agree with
+# eleven other files.
+#
+# It declares an ENTRY POINT rather than being found by path. That is what
+# retires `[tool.dbx-leaning.models]`, `scripts/_registry.py` and the dotted
+# module path in DBX_MODEL: the harness asks importlib.metadata what models are
+# installed, so a model in another repo is discovered identically to this one.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbx-model-heartbeat"
+version = "0.1.0"
+description = "A tick a second. The model the transport is proven with."
+requires-python = ">=3.11"
+
+# Deliberately empty. A heartbeat needs nothing, and a model that needs
+# nothing should say so — it is the proof that the model contract costs a
+# model no dependencies at all.
+dependencies = []
+
+[project.entry-points."dbx_leaning.models"]
+heartbeat = "heartbeat:build_model"
+
+[tool.setuptools]
+packages = ["heartbeat"]

@@ -433,7 +433,7 @@ class ServiceHub:
                     "could not update run_status for %s -> %s; run_events has it and "
                     "startup reconciliation will pick it up",
                     run_id,
-                    msg.status.value,
+                    msg.status,
                     exc_info=True,
                 )
 

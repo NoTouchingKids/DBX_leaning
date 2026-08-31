@@ -33,10 +33,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from shared.envelope import RunStatus, make_message
+from shared.seq import SeqCounter
+
 from .cancellation import CancellationToken
 from .loader import ModelHandle, load_model
-from .shared.envelope import RunStatus, make_message
-from .shared.seq import SeqCounter
 from .telemetry import PartFileWriter
 
 log = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class Harness:
         run_id: str,
         writer: PartFileWriter,
         *,
-        model_spec: str = "job.models.heartbeat",
+        model_spec: str = "heartbeat",
         model_config: dict[str, Any] | None = None,
         handle: ModelHandle | None = None,
         on_message: Callable[[dict[str, Any]], None] | None = None,

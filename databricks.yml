@@ -134,37 +134,20 @@ variables:
 # workspace with no Node runtime, and the build output is not in that
 # directory anyway — `vite.config.ts` writes `../dist`, i.e. `app/dist`, which
 # is committed and syncs like any other tracked file.
-# Runs before the bundle is loaded, on `validate` and `deploy` alike.
+# There is no preinit hook, and its absence is the change that made this
+# branch simpler rather than an omission.
 #
-# `job/` is a self-contained deployable unit and carries its own copy of
-# `shared/` — but that copy is gitignored, because a job is only ever deployed
-# from here and this is the hook that makes it. One canonical `shared/` in the
-# repo; a complete `job/` in the workspace.
+# It used to run `scripts/sync_shared.py`, which copied the repo root's
+# `shared/` into `job/shared/` before every sync, because `job/` was synced as
+# loose files that were on nobody's `sys.path` and had to carry a copy of
+# everything it imported. The hook itself had to be `python3` and stdlib-only
+# — not `uv run` — because a deploy driven from inside Databricks runs on
+# aarch64, where the dev group's `pgserver` publishes no wheel and the deploy
+# died resolving a test dependency it had no reason to install.
 #
-# `preinit` and not the top-level `scripts:` block: in CLI v1.13.0 only
-# `experimental.scripts` actually fires. Verified against a scratch bundle
-# rather than assumed, because a hook that silently does not run would deploy
-# a `job/` with no `shared/` in it and fail at import time in the workspace.
-#
-# `python3`, NOT `uv run` — and this is the one line in the repo where the
-# project's own "use uv" rule is deliberately not followed.
-#
-# `uv run` resolves and syncs the project environment before it runs anything,
-# and `[tool.uv] default-groups = ["dev"]` puts the dev group in that
-# resolution. A deploy driven from INSIDE Databricks runs on aarch64, where
-# `pgserver` — an embedded Postgres for one test file — publishes no wheel:
-#
-#   × No solution found when resolving dependencies:
-#   ╰─▶ Because pgserver==0.1.4 has no wheels with a matching platform tag
-#       (e.g., `manylinux_2_39_aarch64`) ... your requirements are unsatisfiable
-#
-# So the deploy died on a test dependency it had no reason to install. The
-# script is stdlib-only (argparse, filecmp, pathlib, shutil, sys) precisely so
-# the hook can run on whatever interpreter is already there and install
-# nothing. `tests/deploy/test_shared_copy.py` holds both halves of that.
-experimental:
-  scripts:
-    preinit: python3 scripts/sync_shared.py
+# The job now installs `${workspace.file_path}` as a package (see
+# `resources/model_heartbeat.job.yml`), so Python finds `shared` the ordinary
+# way. No copy, no script, no hook, and nothing to keep in agreement.
 
 sync:
   exclude:

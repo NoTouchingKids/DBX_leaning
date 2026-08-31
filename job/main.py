@@ -19,9 +19,10 @@ import logging
 import signal
 import sys
 
+from shared.envelope import RunStatus
+
 from .config import JobConfig
 from .harness import Harness
-from .shared.envelope import RunStatus
 from .telemetry import PartFileWriter
 from .ws import RpcClient
 
