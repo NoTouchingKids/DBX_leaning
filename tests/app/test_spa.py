@@ -165,7 +165,7 @@ def test_a_missing_dist_says_so_instead_of_a_bare_404(app_and_hub, config, tmp_p
     with TestClient(app) as client:
         resp = client.get("/runs/run-abc123")
     assert resp.status_code == 503
-    assert "has not been built" in resp.json()["detail"]
+    assert "no client at this path" in resp.json()["detail"]
 
 
 def test_a_missing_dist_is_logged_once_at_startup(app_and_hub, config, tmp_path, caplog):

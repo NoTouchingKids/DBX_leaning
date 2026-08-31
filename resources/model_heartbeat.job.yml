@@ -1,0 +1,88 @@
+# The heartbeat job — Slice 1's whole point.
+#
+# A tick a second, no data read, no results written. It exists so the transport
+# can be proven with no model in the picture: when a tick reaches a browser
+# from a run started here, and the part files are on the telemetry volume, the
+# platform exists.
+#
+#   databricks bundle deploy -t dev
+#   databricks bundle run model_heartbeat -t dev
+#
+# `project: dbx-leaning` is load-bearing rather than decorative. v4's app finds
+# its jobs by that tag instead of being handed ids the bundle interpolated —
+# which is what lets a job live in another bundle, another repo, or be created
+# by hand, without the app changing. A misspelling here means the app simply
+# does not see this job; `/healthz` reports what was discovered, which is what
+# keeps that from being a mystery.
+#
+# What it does NOT have, and deliberately:
+#
+#   * no model-specific dependency extra. The harness floor is the whole
+#     environment, because a heartbeat imports nothing a solver would.
+#   * no DBX_RESULTS_TABLE. A model owns its own data lifecycle in v4, so the
+#     harness has no table to be told about, and this model has no results.
+
+resources:
+  jobs:
+    model_heartbeat:
+      name: "[${bundle.target}] dbx-leaning · heartbeat"
+      description: >-
+        Emits a tick a second and nothing else. The model Slice 1 exists to
+        stream — if something breaks it is the transport, because there is
+        nothing else here.
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: true
+      tags:
+        project: dbx-leaning
+        model: heartbeat
+
+      parameters:
+        - name: DBX_RUN_ID
+          default: ""
+        - name: DBX_MODEL
+          default: job.models.heartbeat
+        # seconds/hz. 60s at 1Hz is long enough to watch and short enough to
+        # iterate on; raise `seconds` well past the ingress's suspected ~120s
+        # cut when the question is whether a long stream survives it.
+        - name: DBX_MODEL_CONFIG
+          default: '{"seconds": 60, "hz": 1}'
+        - name: DBX_CATALOG
+          default: ${var.catalog}
+        - name: DBX_SCHEMA
+          default: ${var.schema}
+        # Where telemetry part files go — uc_ddl/004_telemetry_volume.sql.
+        # Slice 0 settled the shape: a part is durable only when CLOSED, so
+        # this volume sees whole files, never a handle held open.
+        - name: DBX_TELEMETRY_VOLUME
+          default: /Volumes/${var.catalog}/${var.schema}/telemetry
+        # Empty means the run proceeds unobserved, which is the normal case
+        # rather than a degraded one — apps run ~8h/day and jobs do not.
+        - name: DBX_APP_URL
+          default: ${var.app_public_url}
+        - name: DBX_APP_TOKEN
+          default: ""
+
+      environments:
+        - environment_key: heartbeat
+          spec:
+            client: "3"
+            dependencies:
+              - -r ${workspace.file_path}/job/requirements.txt
+
+      tasks:
+        - task_key: run
+          environment_key: heartbeat
+          spark_python_task:
+            python_file: ${workspace.file_path}/job/run_model.py
+            source: WORKSPACE
+            parameters:
+              - DBX_RUN_ID={{job.parameters.DBX_RUN_ID}}
+              - DBX_MODEL={{job.parameters.DBX_MODEL}}
+              - DBX_MODEL_CONFIG={{job.parameters.DBX_MODEL_CONFIG}}
+              - DBX_CATALOG={{job.parameters.DBX_CATALOG}}
+              - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
+              - DBX_TELEMETRY_VOLUME={{job.parameters.DBX_TELEMETRY_VOLUME}}
+              - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
+              - DBX_APP_TOKEN={{job.parameters.DBX_APP_TOKEN}}

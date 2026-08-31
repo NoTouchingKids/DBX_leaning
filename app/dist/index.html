@@ -1,0 +1,227 @@
+<!doctype html>
+<!--
+  The Slice 1 client. Hand-written, committed, served as-is — see
+  app/client/README.md for why there is no build step.
+
+  One job: show that a tick left a deployed job and arrived here. If something
+  breaks during Slice 1 it is the transport, because there is nothing else in
+  this file to break.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DBX_leaning · heartbeat</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1b1b19; --dim: #6b6b66;
+    --line: #e3e3df; --accent: #2f6df6; --ok: #17803d; --bad: #c02b2b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16161a; --fg:#e8e8e4; --dim:#95958d; --line:#2c2c32; --accent:#7aa2ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:12px;
+           align-items:center; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:-.01em; }
+  input, button { font:inherit; padding:6px 10px; border:1px solid var(--line);
+                  border-radius:6px; background:var(--bg); color:var(--fg); }
+  button { cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  .pill { font:600 11px var(--mono); padding:3px 8px; border-radius:99px;
+          border:1px solid var(--line); color:var(--dim); text-transform:uppercase; }
+  .pill.live { color:var(--ok); border-color:var(--ok); }
+  .pill.down { color:var(--bad); border-color:var(--bad); }
+  main { padding:20px; display:grid; gap:16px; max-width:900px; }
+  .bar { height:6px; background:var(--line); border-radius:99px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:0; background:var(--accent);
+             transition:width .3s ease; }
+  .stats { display:flex; gap:24px; flex-wrap:wrap; color:var(--dim); font:12px var(--mono); }
+  .stats b { color:var(--fg); font-weight:600; }
+  #gap { display:none; padding:10px 12px; border:1px solid var(--bad); border-radius:6px;
+         color:var(--bad); gap:12px; align-items:center; }
+  #gap.show { display:flex; }
+  #feed { border:1px solid var(--line); border-radius:8px; overflow:auto; max-height:56vh; }
+  table { border-collapse:collapse; width:100%; font:12px/1.6 var(--mono); }
+  td { padding:3px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  td.seq { color:var(--dim); text-align:right; width:1%; }
+  td.kind { width:1%; color:var(--dim); }
+  tr.status td.kind { color:var(--accent); font-weight:600; }
+  tr.WARNING td, tr.ERROR td { color:var(--bad); }
+  .empty { padding:24px; color:var(--dim); text-align:center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DBX_leaning · heartbeat</h1>
+  <input id="run" placeholder="run_id" size="26" spellcheck="false">
+  <button id="watch">Watch</button>
+  <span id="conn" class="pill">idle</span>
+  <span id="status" class="pill">—</span>
+</header>
+
+<main>
+  <div class="bar"><i id="progress"></i></div>
+  <div class="stats">
+    <span>seq <b id="seq">—</b></span>
+    <span>messages <b id="count">0</b></span>
+    <span>metric <b id="metric">—</b></span>
+    <span>reconnects <b id="reconnects">0</b></span>
+  </div>
+
+  <!-- Never automatic. A routine reconnect is a gap of milliseconds, and some
+       gaps are permanent by design — client_visible=false records never travel
+       live — so a client that loops "backfill until contiguous" spins forever. -->
+  <div id="gap">
+    <span id="gapText"></span>
+    <button id="fill">Ask the job to resend</button>
+  </div>
+
+  <div id="feed"><div class="empty">Enter a run id and press Watch.</div></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let es = null, runId = null, seen = new Set(), lastSeq = -1, failures = 0, count = 0;
+
+function conn(text, cls) {
+  $("conn").textContent = text;
+  $("conn").className = "pill" + (cls ? " " + cls : "");
+}
+
+function row(msg) {
+  const feed = $("feed");
+  if (feed.firstElementChild && feed.firstElementChild.className === "empty") feed.textContent = "";
+  let table = feed.querySelector("table");
+  if (!table) { table = document.createElement("table"); feed.append(table); }
+
+  const tr = table.insertRow();
+  tr.className = msg.type + " " + (msg.level || "");
+  const cells = [
+    [msg.seq, "seq"],
+    [msg.type, "kind"],
+    [describe(msg), "body"],
+  ];
+  for (const [text, cls] of cells) {
+    const td = tr.insertCell();
+    td.className = cls;
+    td.textContent = text;
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function describe(m) {
+  if (m.type === "log") return m.message;
+  if (m.type === "status") return m.status + (m.detail ? " — " + m.detail : "");
+  if (m.type === "progress") {
+    const pct = m.percent_complete == null ? "" : m.percent_complete.toFixed(1) + "%";
+    const met = m.primary_metric == null ? "" :
+      ` ${m.primary_metric_label || "metric"}=${m.primary_metric}`;
+    return `${pct}${met}  (${m.elapsed_seconds.toFixed(1)}s)`;
+  }
+  if (m.type === "result") return `${m.row_count} rows, chunk ${m.chunk_index}` +
+    (m.final ? " (final)" : "");
+  return JSON.stringify(m);
+}
+
+function apply(msg) {
+  if (seen.has(msg.seq)) return;   // live and replayed records meet here
+  seen.add(msg.seq);
+  count += 1;
+  $("count").textContent = count;
+  $("seq").textContent = msg.seq;
+
+  // A gap means records exist that have not arrived. It is reported, never
+  // acted on automatically — see the note by #gap.
+  if (msg.seq > lastSeq + 1 && lastSeq >= 0) {
+    const missing = msg.seq - lastSeq - 1;
+    $("gapText").textContent = `${missing} message${missing === 1 ? "" : "s"} missing ` +
+      `(seq ${lastSeq + 1}–${msg.seq - 1})`;
+    $("gap").classList.add("show");
+    $("fill").dataset.from = lastSeq + 1;
+    $("fill").dataset.to = msg.seq - 1;
+  }
+  lastSeq = Math.max(lastSeq, msg.seq);
+
+  if (msg.type === "progress") {
+    if (msg.percent_complete != null) $("progress").style.width = msg.percent_complete + "%";
+    if (msg.primary_metric != null) {
+      $("metric").textContent = `${msg.primary_metric_label || "metric"} ${msg.primary_metric}`;
+    }
+  }
+  if (msg.type === "status") {
+    $("status").textContent = msg.status;
+    // `terminal` is stated by the producer, never inferred from the status
+    // string — which is what lets a model send a status of its own.
+    if (msg.terminal) { conn("finished", ""); if (es) es.close(); }
+  }
+  row(msg);
+}
+
+function watch() {
+  if (es) es.close();
+  runId = $("run").value.trim();
+  if (!runId) return;
+  seen = new Set(); lastSeq = -1; count = 0; failures = 0;
+  $("feed").innerHTML = '<div class="empty">Waiting for the first message…</div>';
+  $("gap").classList.remove("show");
+  open();
+}
+
+function open() {
+  conn("connecting", "");
+  es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
+
+  es.onopen = () => {
+    // CONSECUTIVE failures, reset on every success. A naive "give up after N"
+    // would kill a healthy stream within minutes if the ingress cuts
+    // long-lived connections periodically.
+    failures = 0;
+    conn("live", "live");
+  };
+  es.onmessage = (e) => { try { apply(JSON.parse(e.data)); } catch (err) { console.error(err, e.data); } };
+  es.onerror = () => {
+    failures += 1;
+    $("reconnects").textContent = failures;
+    if (failures >= 10) { es.close(); conn("gave up", "down"); return; }
+    conn(`reconnecting (${failures})`, "down");
+    // EventSource reconnects on its own, carrying Last-Event-ID — which is why
+    // the server sets `id:` to the message's seq and no handshake is needed.
+  };
+}
+
+async function fill() {
+  const from = $("fill").dataset.from, to = $("fill").dataset.to;
+  $("fill").disabled = true;
+  try {
+    const res = await fetch(
+      `/api/runs/${encodeURIComponent(runId)}/replay?from_seq=${from}&to_seq=${to}`);
+    if (!res.ok) {
+      $("gapText").textContent = `replay failed: ${res.status} ${await res.text()}`;
+      return;
+    }
+    const body = await res.json();
+    // The job answers from its closed part files AND its in-flight buffer, so
+    // the newest records come back too — the ones a files-only implementation
+    // would silently omit.
+    body.messages.sort((a, b) => a.seq - b.seq).forEach(apply);
+    $("gap").classList.remove("show");
+  } finally {
+    $("fill").disabled = false;
+  }
+}
+
+$("watch").addEventListener("click", watch);
+$("run").addEventListener("keydown", (e) => { if (e.key === "Enter") watch(); });
+$("fill").addEventListener("click", fill);
+
+// ?run=... so a link can go straight to a run.
+const fromUrl = new URLSearchParams(location.search).get("run");
+if (fromUrl) { $("run").value = fromUrl; watch(); }
+</script>
+</body>
+</html>

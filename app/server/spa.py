@@ -49,10 +49,10 @@ _APP_ROOT = Path(__file__).resolve().parents[1]
 RESERVED_PREFIXES = frozenset({"api", "ws", "healthz", "docs", "redoc", "openapi.json"})
 
 NO_BUNDLE = (
-    "the frontend bundle has not been built, so there is nothing to serve at "
-    "this path. Build it (`bun run build` in app/client/, which writes ../dist) "
-    "or point DBX_FRONTEND_DIST at the dist directory. The API is "
-    "unaffected."
+    "no client at this path. Slice 1's client is a single hand-written "
+    "index.html with no build step — see app/client/README.md — so restore "
+    "app/dist/index.html, or point DBX_FRONTEND_DIST at the directory holding "
+    "it. The API is unaffected."
 )
 
 
@@ -102,9 +102,12 @@ def mount_spa(app: FastAPI, dist_dir: str | Path) -> bool:
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
         else:
-            # A bundle with no assets/ is odd but not fatal — the catch-all
-            # serves any file that is actually in dist/.
-            log.warning("frontend bundle at %s has no assets/ directory", dist)
+            # No assets/ is the NORMAL case now, not an odd one: Slice 1's
+            # client is a single hand-written index.html with no build step
+            # (app/client/README.md), so there is nothing hashed to mount. The
+            # catch-all below still serves any real file in dist/, so a
+            # favicon or a second page needs no change here.
+            log.info("frontend bundle at %s has no assets/ (single-file client)", dist)
         log.info("serving the frontend bundle from %s", dist)
     else:
         # Once, at startup, and loudly enough to be findable in the app log.
