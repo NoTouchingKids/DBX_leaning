@@ -15,9 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["JobConfig", "WriterKind"]
-
-WriterKind = str  # "auto" | "delta-rs" | "spark" | "jsonl"
+__all__ = ["JobConfig"]
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -67,14 +65,21 @@ class JobConfig:
 
     catalog: str = "main"
     schema: str = "dbx_leaning"
-    #: Where this model's result rows go. Unqualified names get the
-    #: catalog/schema above.
-    results_table: str | None = None
+    # There is no `results_table` here any more. A model owns its own data
+    # lifecycle in v4 — it reads its inputs and writes its own results table —
+    # so the harness has no table to be told about. See the plan's "Who writes
+    # what": the harness is comms and telemetry, and nothing else.
 
-    writer: WriterKind = "auto"
-    #: Only used by the jsonl writer (local development and tests).
-    local_root: str = ".delta-local"
+    #: Where telemetry part files go. A Unity Catalog volume on a workspace;
+    #: any writable directory off one, which is what makes the whole harness
+    #: runnable on a laptop with no Databricks connection at all.
+    #:
+    #: The APP has no equivalent setting and must not gain one — it holds no
+    #: grant on this volume, deliberately (uc_ddl/004_telemetry_volume.sql),
+    #: and a live gap is served by `replay` rather than by reading these files.
+    telemetry_root: str = "/Volumes/main/dbx_leaning/telemetry"
 
+    #: Roll a telemetry part at this size. See job/telemetry.py.
     flush_max_bytes: int = 1_000_000
     #: The bound that actually caps data loss on a crash. Size alone is not a
     #: durability guarantee — a slow run may never reach 1 MB.
@@ -125,9 +130,7 @@ class JobConfig:
             or None,
             catalog=e.get("DBX_CATALOG", "main"),
             schema=e.get("DBX_SCHEMA", "dbx_leaning"),
-            results_table=(e.get("DBX_RESULTS_TABLE") or "").strip() or None,
-            writer=e.get("DBX_WRITER", "auto"),
-            local_root=e.get("DBX_LOCAL_ROOT", ".delta-local"),
+            telemetry_root=e.get("DBX_TELEMETRY_VOLUME", "/Volumes/main/dbx_leaning/telemetry"),
             flush_max_bytes=_env_int(e, "DBX_FLUSH_MAX_BYTES", 1_000_000),
             flush_max_age_s=_env_float(e, "DBX_FLUSH_MAX_AGE_S", 30.0),
             flush_tick_s=_env_float(e, "DBX_FLUSH_TICK_S", 1.0),
