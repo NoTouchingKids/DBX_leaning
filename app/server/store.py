@@ -58,11 +58,14 @@ __all__ = [
     "TERMINAL_SQL_LIST",
 ]
 
-#: The terminal statuses as a SQL list literal. Built from the enum rather
-#: than typed out, so adding a status cannot leave this behind.
-TERMINAL_SQL_LIST = ", ".join(
-    f"'{s.value}'" for s in sorted(TERMINAL_STATUSES, key=lambda s: s.value)
-)
+#: The terminal statuses as a SQL list literal, for counting what is still
+#: active against the concurrency ceiling.
+#:
+#: This is one of the few places entitled to use `TERMINAL_STATUSES` now that a
+#: status is an open string: the run store deals in the platform's own six, and
+#: a model-defined status never reaches this column. Anything asking "is this
+#: MESSAGE the last one" wants `StatusMessage.terminal` instead.
+TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in sorted(TERMINAL_STATUSES))
 
 
 class SlotDenied(RuntimeError):
@@ -88,7 +91,7 @@ class RunRecord:
 
     run_id: str
     model: str
-    status: RunStatus
+    status: str = RunStatus.QUEUED
     job_run_id: str | None = None
     detail: str | None = None
     started_ts: int = 0
@@ -101,13 +104,14 @@ class RunRecord:
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RunRecord:
-        raw = row.get("status")
-        try:
-            status = RunStatus(raw)
-        except ValueError:
-            # A status nobody recognises is a data problem, not a crash: keep
-            # the run visible and let a human see the odd value.
-            log.warning("run %s has unknown status %r", row.get("run_id"), raw)
+        # A status is a plain string now, so there is nothing to coerce and
+        # nothing to reject. An unfamiliar value is carried through rather than
+        # rewritten to FAILED, which is what the enum forced and which lost the
+        # only evidence of what actually happened. A blank is still a data
+        # problem and says so.
+        status = str(row.get("status") or "")
+        if not status:
+            log.warning("run %s has no status", row.get("run_id"))
             status = RunStatus.FAILED
         return cls(
             run_id=str(row["run_id"]),
@@ -124,7 +128,7 @@ class RunRecord:
         return {
             "run_id": self.run_id,
             "model": self.model,
-            "status": self.status.value,
+            "status": self.status,
             "job_run_id": self.job_run_id,
             "detail": self.detail,
             "started_ts": self.started_ts,
@@ -154,9 +158,7 @@ class RunStore(Protocol):
     async def release_slot(self, run_id: str) -> None:
         """Undo a claim whose launch then failed."""
 
-    async def set_status(
-        self, run_id: str, status: RunStatus | str, *, detail: str | None = None
-    ) -> None: ...
+    async def set_status(self, run_id: str, status: str, *, detail: str | None = None) -> None: ...
 
     async def get(self, run_id: str) -> RunRecord | None: ...
 
@@ -341,7 +343,7 @@ class PostgresRunStore:
                     VALUES (%s, NULL, %s, %s, NULL, %s, %s, %s)
                     ON CONFLICT (run_id) DO NOTHING
                     """,
-                    (run_id, model, RunStatus.QUEUED.value, now, now, requested_by),
+                    (run_id, model, RunStatus.QUEUED, now, now, requested_by),
                 )
                 if cur.rowcount == 0:
                     await conn.rollback()
@@ -376,15 +378,13 @@ class PostgresRunStore:
             # reporting, or a late status write would resurrect a ghost row.
             await conn.execute(
                 f"DELETE FROM {self._table} WHERE run_id = %s AND status = %s",
-                (run_id, RunStatus.QUEUED.value),
+                (run_id, RunStatus.QUEUED),
             )
         finally:
             await conn.close()
 
-    async def set_status(
-        self, run_id: str, status: RunStatus | str, *, detail: str | None = None
-    ) -> None:
-        value = status.value if isinstance(status, RunStatus) else str(status)
+    async def set_status(self, run_id: str, status: str, *, detail: str | None = None) -> None:
+        value = str(status)
         conn = await self._conn()
         try:
             await conn.execute(

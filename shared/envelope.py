@@ -21,6 +21,7 @@ __all__ = [
     "MessageType",
     "LogLevel",
     "RunStatus",
+    "PLATFORM_STATUSES",
     "TERMINAL_STATUSES",
     "LogMessage",
     "ProgressMessage",
@@ -76,7 +77,20 @@ class LogLevel(str, Enum):
     ERROR = "ERROR"
 
 
-class RunStatus(str, Enum):
+class RunStatus:
+    """The platform's own statuses — **string constants, not an enum.**
+
+    A status is a plain ``str`` on the wire, and a model may send one of its
+    own: a fitting stage, a phase name, whatever that model's progress is
+    actually made of. That is the point. A closed enum has to be re-declared in
+    every language that touches the contract and goes stale the first time it
+    gains a member — a cost paid by the frontend, the ingestion job, and
+    anything written in a language the app is not.
+
+    These six remain the convention every model should reach for first, and
+    what the platform itself emits. They are a starting point, not a wall.
+    """
+
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
@@ -85,9 +99,35 @@ class RunStatus(str, Enum):
     INFEASIBLE = "INFEASIBLE"
 
 
-#: A run in one of these is finished; nothing further will arrive for it.
+#: The platform's six, for the places that only ever deal in those — the run
+#: store's defaults, the Jobs API mapping. NOT a validation rule: a status
+#: outside this set is legal on the wire.
+PLATFORM_STATUSES = frozenset(
+    {
+        RunStatus.QUEUED,
+        RunStatus.RUNNING,
+        RunStatus.SUCCEEDED,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+        RunStatus.INFEASIBLE,
+    }
+)
+
+#: Which of the platform's six mean "finished".
+#:
+#: **Do not use this to decide whether a message is terminal.** It cannot
+#: answer for a model-defined status, and reaching for it is how the closed
+#: enum grows back somewhere less visible. `StatusMessage.terminal` is the
+#: authority — the producer says so, nothing downstream infers it. This set is
+#: for code that already knows it is holding one of the platform's own, such as
+#: seeding a `run_status` row.
 TERMINAL_STATUSES = frozenset(
-    {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.INFEASIBLE}
+    {
+        RunStatus.SUCCEEDED,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+        RunStatus.INFEASIBLE,
+    }
 )
 
 
@@ -147,7 +187,16 @@ class StatusMessage(_Common):
     """
 
     type: Literal[MessageType.STATUS] = MessageType.STATUS
-    status: RunStatus
+    #: Free-form. `RunStatus` holds the platform's six as constants and every
+    #: model should prefer them, but a model-defined status is legal and is how
+    #: per-model categorical progress travels without a second field.
+    status: str = Field(min_length=1)
+    #: **Whether this is the last word on the run.** Stated by the producer,
+    #: never inferred downstream — which is the whole thing that makes an open
+    #: `status` safe rather than merely convenient. The harness knows to stop,
+    #: the app knows to close the stream, and the client knows to stop waiting,
+    #: without any of them holding a list of which strings mean "finished".
+    terminal: bool = False
     detail: str | None = None
 
 

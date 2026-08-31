@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_status (
     run_id       STRING  NOT NULL,
     job_run_id   STRING,            -- Databricks' own run id, for reconciliation
     model        STRING,
-    status       STRING  NOT NULL,  -- QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED|INFEASIBLE
+    status       STRING  NOT NULL,  -- the platform's six; see run_events.status
     detail       STRING,
     started_ts   BIGINT,            -- epoch ms
     updated_ts   BIGINT  NOT NULL,
@@ -80,7 +80,13 @@ CREATE TABLE IF NOT EXISTS main.dbx_leaning.run_events (
     run_id STRING NOT NULL,
     seq    BIGINT NOT NULL,
     ts     BIGINT NOT NULL,
-    status STRING NOT NULL,
+    status STRING NOT NULL,      -- free-form; the platform's own six are
+                                 -- QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED|
+                                 -- INFEASIBLE, but a model may send its own
+    terminal BOOLEAN NOT NULL,   -- whether this was the last word on the run.
+                                 -- Stated by the producer, never inferred from
+                                 -- `status` -- which is what lets `status` be
+                                 -- open in the first place
     detail STRING
 )
 USING DELTA

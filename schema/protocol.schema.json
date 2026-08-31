@@ -266,18 +266,6 @@
           "title": "ResultMessage",
           "type": "object"
         },
-        "RunStatus": {
-          "enum": [
-            "QUEUED",
-            "RUNNING",
-            "SUCCEEDED",
-            "FAILED",
-            "CANCELLED",
-            "INFEASIBLE"
-          ],
-          "title": "RunStatus",
-          "type": "string"
-        },
         "StatusMessage": {
           "additionalProperties": false,
           "description": "A lifecycle transition \u2014 a notification, not the record of truth.\n\nThe record of truth is the ``run_status`` row; this announces a change to\nit. See ``docs/architecture.md``.",
@@ -305,7 +293,14 @@
               "type": "integer"
             },
             "status": {
-              "$ref": "#/$defs/RunStatus"
+              "minLength": 1,
+              "title": "Status",
+              "type": "string"
+            },
+            "terminal": {
+              "default": false,
+              "title": "Terminal",
+              "type": "boolean"
             },
             "ts": {
               "description": "epoch milliseconds",
@@ -357,6 +352,14 @@
         }
       ],
       "title": "DBX_leaning run message envelope",
+      "x-platform-statuses": [
+        "CANCELLED",
+        "FAILED",
+        "INFEASIBLE",
+        "QUEUED",
+        "RUNNING",
+        "SUCCEEDED"
+      ],
       "x-schema-version": "1.0.0",
       "x-terminal-statuses": [
         "CANCELLED",

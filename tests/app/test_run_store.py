@@ -99,7 +99,7 @@ async def test_a_claimed_run_is_registered_as_queued(store):
         requested_by="kp",
     )
     stored = await store.get("r1")
-    assert stored.status is RunStatus.QUEUED and stored.requested_by == "kp"
+    assert stored.status == RunStatus.QUEUED and stored.requested_by == "kp"
     assert await store.active_count() == 1
 
 
@@ -162,7 +162,7 @@ async def test_status_transitions_are_recorded(store):
     await store.set_status("r1", "SUCCEEDED", detail="all draws done")
 
     record = await store.get("r1")
-    assert record.status is RunStatus.SUCCEEDED and record.detail == "all draws done"
+    assert record.status == RunStatus.SUCCEEDED and record.detail == "all draws done"
     assert record.terminal
     assert record.model == "mcmc", "a status write must not clobber the model"
 
@@ -171,7 +171,7 @@ async def test_a_status_for_an_unknown_run_creates_it(store):
     """A job can start while the app is down; its first status message may be
     the app's first sight of the run."""
     await store.set_status("appeared-from-nowhere", RunStatus.RUNNING)
-    assert (await store.get("appeared-from-nowhere")).status is RunStatus.RUNNING
+    assert (await store.get("appeared-from-nowhere")).status == RunStatus.RUNNING
 
 
 async def test_attaching_the_databricks_run_id(store):

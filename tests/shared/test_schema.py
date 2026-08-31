@@ -14,7 +14,7 @@ import subprocess
 import pytest
 
 from shared.codec import to_jsonable
-from shared.envelope import LogLevel, MessageType, RunStatus, make_message
+from shared.envelope import LogLevel, MessageType, make_message
 from shared.protocol import ControlKind, cancel, hello
 from shared.schema import SCHEMA_VERSION, control_schema, envelope_schema, protocol_schema
 
@@ -109,19 +109,56 @@ def test_the_union_is_discriminated_on_type_so_a_client_can_narrow():
 # --- enums reach the client as enums, not as bare strings ------------------
 
 
-@pytest.mark.parametrize("name,enum", [("LogLevel", LogLevel), ("RunStatus", RunStatus)])
+@pytest.mark.parametrize("name,enum", [("LogLevel", LogLevel)])
 def test_every_enum_member_is_in_the_schema(name, enum):
     """So the frontend gets string-literal unions instead of retyping these
-    by hand and going stale the first time one is added."""
+    by hand and going stale the first time one is added.
+
+    `LogLevel` is the only enum left. `RunStatus` used to be here and is now
+    six string constants — see the next two tests, which assert the opposite
+    of what this one used to say about it.
+    """
     defs = envelope_schema()["$defs"]
     assert defs[name]["enum"] == [m.value for m in enum]
     assert defs[name]["type"] == "string"
 
 
-def test_the_status_enum_covers_what_the_run_store_can_produce():
+def test_status_is_an_open_string_not_an_enum():
+    """The change that lets a model send its own categorical status.
+
+    Publishing `status` as an enum would put every consumer back to rejecting
+    or mangling anything outside the platform's six — which is exactly what
+    the frontend did to unfamiliar values before, and why a model's own
+    progress had nowhere to live.
+    """
+    props = envelope_schema()["$defs"]["StatusMessage"]["properties"]
+    assert props["status"]["type"] == "string"
+    assert "enum" not in props["status"], (
+        "status is closed again; a model-defined status would now be invalid"
+    )
+
+
+def test_terminality_is_published_as_a_field_not_inferred_from_a_list():
+    """`x-terminal-statuses` is advisory. `terminal` is the contract.
+
+    With an open `status`, a list of which strings mean "finished" cannot
+    answer for a model's own — so a consumer matching against the list would
+    wait forever on a run that ended in one. The boolean is what it must read.
+    """
+    props = envelope_schema()["$defs"]["StatusMessage"]["properties"]
+    assert props["terminal"]["type"] == "boolean"
+
+    schema = envelope_schema()
+    assert set(schema["x-terminal-statuses"]) <= set(schema["x-platform-statuses"])
+
+
+def test_the_platform_statuses_cover_what_the_run_store_counts_as_active():
+    """The run store deals only in the platform's six, and its concurrency
+    ceiling turns on the terminal ones — so those two must not drift, even
+    though the wire is open."""
     from server.store import TERMINAL_SQL_LIST
 
-    published = set(envelope_schema()["$defs"]["RunStatus"]["enum"])
+    published = set(envelope_schema()["x-platform-statuses"])
     for value in TERMINAL_SQL_LIST.replace("'", "").split(", "):
         assert value in published
 

@@ -89,7 +89,7 @@ def to_row(msg: Message) -> dict[str, Any]:
         }
 
     if isinstance(msg, StatusMessage):
-        return {**base, "status": msg.status.value, "detail": msg.detail}
+        return {**base, "status": msg.status, "terminal": msg.terminal, "detail": msg.detail}
 
     if isinstance(msg, ResultMessage):
         return {
