@@ -88,10 +88,11 @@ def diagnose(exc: BaseException) -> str:
     if redirected:
         return (
             "the app's ingress redirected the handshake to an OAuth login page. "
-            "Either this job presented no Databricks identity — check "
-            "DATABRICKS_HOST and see job/auth.py for the sources it tries — or "
-            "its principal lacks CAN_USE on the app. The run continues "
-            "unobserved either way."
+            "If the line above says an identity was presented, that principal "
+            "lacks CAN_USE on the app — grant it with `databricks apps "
+            "set-permissions`, see 'The grant that makes it work' in "
+            "deploy/README.md. If no identity was presented, that is the fault "
+            "instead. The run continues unobserved either way."
         )
     if "401" in text or "403" in text:
         return (

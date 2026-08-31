@@ -72,7 +72,16 @@ def auth_headers(host: str | None = None, config: Any = None) -> dict[str, str]:
         return {}
 
     if not headers:
+        log.info("the Databricks SDK returned no auth headers; running unobserved")
         return {}
+
+    # Say WHICH identity, and say it once per attempt. Without this the only
+    # signal that authentication worked is the ABSENCE of the failure line
+    # above — so "no identity" and "an identity the app rejects" look identical
+    # in a job log, and both present as a 302. That ambiguity cost a debugging
+    # round on 2026-08-31.
+    auth_type = getattr(config, "auth_type", None) or "unknown"
+    log.info("presenting a Databricks identity to the app ingress (auth_type=%s)", auth_type)
     return dict(headers)
 
 

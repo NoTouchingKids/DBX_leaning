@@ -58,3 +58,33 @@ def test_a_job_with_nothing_at_all_gets_an_empty_dict_rather_than_an_error():
 def test_auth_headers_never_raises_whatever_the_sdk_does():
     for boom in (RuntimeError("x"), ValueError("y"), OSError("z")):
         assert auth_headers(config=FakeConfig(raises=boom)) == {}
+
+
+def test_a_successful_auth_says_so_rather_than_being_silent(caplog):
+    """The absence of a failure line is not evidence of success.
+
+    A real run on 2026-08-31 got six 302s with no "no credential" line, and
+    the only way to tell "no identity" from "an identity the app rejects" was
+    to notice which log line was MISSING. Both present as a 302, and they have
+    different fixes, so the successful path has to speak.
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="job.auth"):
+        auth_headers(config=FakeConfig({"Authorization": "Bearer abc"}))
+
+    assert any("presenting a Databricks identity" in r.message for r in caplog.records)
+
+
+def test_the_auth_type_is_named_so_the_source_is_not_a_guess(caplog):
+    """Which of the SDK's chain answered decides where to look next — a job's
+    runtime identity and a stray PAT fail differently."""
+    import logging
+
+    config = FakeConfig({"Authorization": "Bearer abc"})
+    config.auth_type = "oauth-m2m"
+
+    with caplog.at_level(logging.INFO, logger="job.auth"):
+        auth_headers(config=config)
+
+    assert any("auth_type=oauth-m2m" in r.getMessage() for r in caplog.records)
