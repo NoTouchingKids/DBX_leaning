@@ -545,8 +545,23 @@ every dependency set." **That rule was half right, and the wrong half cost 343
 lines** (`job/auth.py` 193, `app/server/oauth.py` 150) plus two of the Aug 27
 fixes.
 
-- **SDK for token acquisition and refresh.** Nobody should hand-roll OAuth
-  token exchange, and this project's history is the evidence.
+- **SDK for token acquisition and refresh. Done, 2026-08-31.** `job/auth.py`
+  went from 193 lines to 92: four token sources tried in order, a cache and an
+  expiry clock, all replaced by `Config.authenticate()`, which returns fresh
+  headers and refreshes itself. The SDK's default chain already covers every
+  source the hand-rolled version was reimplementing.
+
+  **The cost, measured rather than waved through:** `databricks-sdk` is ~16 MB
+  and lands in every model environment, which is exactly what the original
+  "no SDK" rule was protecting. It is worth it here and would not be for the
+  Jobs API — the difference is that nobody should hand-roll OAuth, and the
+  evidence is that doing so cost 343 lines and two deploy bugs. For scale:
+  torch, which one v3 model needed, was 1.1 GB.
+
+  It also produces a better failure than the code it replaced. The SDK says
+  "cannot configure default credentials" with a link to the auth docs; the
+  hand-rolled version said "no app credential from the job's runtime identity:
+  No module named 'pyspark'".
 - **Plain `httpx` for the Jobs API.** The original reasoning holds: it is a few
   REST calls, and the SDK's weight would otherwise be paid by every model
   environment.

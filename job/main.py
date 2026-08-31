@@ -46,38 +46,23 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         log.info("no DBX_APP_URL — running unobserved, durable path only")
         return None
 
-    import asyncio
-
     from websockets.sync.client import connect
 
-    from .auth import AppCredential, ingress_headers
+    from .auth import ingress_headers
 
     url = cfg.ws_url
-    credential = AppCredential(host=cfg.workspace_host)
 
     def headers() -> dict[str, str]:
         """Both credentials, fetched fresh per connection attempt.
 
-        **Two of them, on two different headers, and both are required.**
+        Two of them, on two different headers, and both are required — see
+        `job/auth.py` for why `Authorization` cannot carry the shared secret.
 
-        `Authorization` belongs to the Databricks Apps PROXY, which sits in
-        front of the app and answers an unauthenticated upgrade with a 302 to
-        the OAuth login page — never a 401. So a job with no Databricks
-        identity does not get "unauthorised"; it gets a redirect, and
-        `websockets` reports `HTTP 302` with nothing in it that names the
-        cause. `X-DBX-App-Token` is the app's own shared secret and is checked
-        by `app/server/routes/rpc.py`, well after the proxy has already decided.
-        See `job/auth.py`, and the deployment-lessons table in the plan.
-
-        Fetched per attempt rather than once: `AppCredential` caches until
-        expiry itself, and a reconnect an hour into a run should not present a
-        token that expired forty minutes ago.
-
-        `asyncio.run` is safe here because this is called from the socket
-        THREAD, which owns no event loop — the same property that let the whole
-        harness stop working around serverless's ipykernel.
+        Fresh per attempt rather than once: the SDK caches and refreshes
+        internally, and a reconnect an hour into a run must not present a token
+        that expired forty minutes ago.
         """
-        return asyncio.run(ingress_headers(cfg.app_token, credential))
+        return ingress_headers(cfg.app_token, cfg.workspace_host)
 
     return RpcClient(
         url,
