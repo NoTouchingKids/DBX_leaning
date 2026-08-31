@@ -46,9 +46,8 @@
 -- volume is created in one place, the job writes to another, and the failure
 -- arrives inside a run on a workspace.
 --
--- Likewise the PRINCIPALS below are placeholders. There is no substitution
--- here either, so fill in the service principal the jobs actually run as
--- before applying, or the GRANTs fail with a principal that does not exist.
+-- The GRANTs below are commented out and the file is applicable as-is; see the
+-- note above them for when that stops being true.
 
 CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
 
@@ -56,22 +55,37 @@ CREATE VOLUME IF NOT EXISTS main.dbx_leaning.telemetry
   COMMENT 'Run telemetry, written by the job as it happens. Job-only: the app has no grant here by design — see uc_ddl/004_telemetry_volume.sql.';
 
 -- --------------------------------------------------------------------------
--- Grants. Replace the placeholders with real principals before applying.
+-- Grants — COMMENTED OUT, and read this before uncommenting.
 --
--- `<job-service-principal>` is whoever the model jobs run as — the
--- `run_as` in databricks.yml, or the deploying user if none is set.
--- `<ingestion-service-principal>` may well be the same one to begin with; keep
--- the statements separate anyway, so splitting them later is an edit rather
--- than an archaeology exercise.
+-- You probably do not need them yet. `databricks.yml` sets no `run_as`, and
+-- the `dev` target is `mode: development`, so jobs run as the DEPLOYING USER.
+-- If that is also who owns `main.dbx_leaning`, the owner already holds every
+-- privilege on a volume in it and these statements are no-ops.
+--
+-- They are commented rather than deleted because the moment any of that stops
+-- being true, this is the file someone comes looking in:
+--
+--   * a `run_as` service principal on the job,
+--   * the `prod` target, where jobs run as a named principal,
+--   * the ingestion job, if it runs as something else,
+--   * or the day the jobs move to their own bundle entirely — which is the
+--     direction v4 is going, and the point at which the app can no longer
+--     grant anything on their behalf.
+--
+-- Uncomment, substitute a real principal, and note that READ and WRITE are
+-- SEPARATE privileges: WRITE VOLUME does not imply READ VOLUME, and the job
+-- needs READ because replay reads back what it wrote.
+--
+-- The app is not on this list and must not be added — see the header.
 -- --------------------------------------------------------------------------
 
-GRANT READ VOLUME, WRITE VOLUME
-  ON VOLUME main.dbx_leaning.telemetry
-  TO `<job-service-principal>`;
+-- GRANT READ VOLUME, WRITE VOLUME
+--   ON VOLUME main.dbx_leaning.telemetry
+--   TO `<the principal the model jobs run as>`;
 
-GRANT READ VOLUME
-  ON VOLUME main.dbx_leaning.telemetry
-  TO `<ingestion-service-principal>`;
+-- GRANT READ VOLUME
+--   ON VOLUME main.dbx_leaning.telemetry
+--   TO `<the principal the ingestion job runs as>`;
 
 -- The path the job sees. Volumes mount read/write at a fixed location, so this
 -- is not configurable and not worth deriving:
