@@ -103,6 +103,7 @@ the only thing v3 bought that v1 and v2 did not.
 | The job→model id map may be absent from the environment and must be discoverable from the workspace | `app/server/discovery.py` |
 | Write against the **table's** schema, never one inferred from the batch | `job/delta.py` |
 | A workspace secret scope is not a Unity Catalog object | `deploy/README.md` |
+| **A Unity Catalog volume file is durable only when CLOSED.** `write` + `flush` + `fsync` all return success while the content sits in a local FUSE buffer no other reader can see — 0.3ms p50, i.e. memory speed. Measured 2026-09-01, `scripts/probe_volume_append.py` | Slice 0. Never judge a write path by whether the write returned |
 | A job whose principal lacks `CAN_USE` on the app gets a **302 to the OAuth login page**, and the websockets client reports `"...oidc/oauth2/v2.0/authorize... isn't a valid URI: scheme isn't ws or wss"` — which names nothing. v3 special-cased that string into a readable diagnosis | `job/channels.py::_diagnosis` (deleted with the v3 transport; **the new client needs the same explanation**) |
 
 Note the second row. It is about to stop being a problem — see below.
@@ -388,39 +389,46 @@ Consequences, all of them good:
   fixed on Aug 27 — and all of it goes. Spark remains a **model** concern,
   inside the model, where the session it needs is the one it already uses to
   read its inputs.
-- **The in-memory buffer goes.** `buffer.py` + `sink.py` (225 lines) collapse
-  into "write a line, flush periodically". Durability stops depending on a
-  flush policy holding data hostage.
+- **The buffer shrinks and moves; it does not go.** This bullet claimed it
+  went entirely, and Slice 0 disproved that: a volume file becomes durable only
+  when it is **closed**, so records accumulate somewhere until then however the
+  code is written. `buffer.py` + `sink.py` (225 lines) collapse into "append to
+  the current part, roll it on size OR age OR end-of-run" — v3's flush rule
+  with a cheaper flush. **Durability granularity is the roll interval**, now
+  literally rather than approximately.
 - **Concurrency stops being a question.** Each run owns its own directory, so
   there is nothing to conflict — simpler than Delta's optimistic concurrency
   and its S3 locking caveat.
 - **The 5-task ceiling is the only remaining shared resource.**
 
-Retained: **a run must never report `SUCCEEDED` over a failed durable write.**
-The check gets easier, not harder — it becomes "did the writes land", not
-"did the flush of a buffer land".
+Retained, and Slice 0 turned the flush rule from a convention into a priced
+one: roll on **size OR age OR end-of-run**, where the age bound caps loss on a
+crash and a close costs ~117ms (p99 157ms) — so the cadence is a trade, not a
+free dial. And **a run must never report `SUCCEEDED` over a failed durable
+write**: the check becomes "did every part close", which is a stronger question
+than "did the writes return", because on this mount a write returns whether or
+not anything reached storage.
 
-> **⚠️ The one probe this plan actually needs.** Can a serverless job **append
-> incrementally** to a file under `/Volumes/...`, holding a handle open across
-> a long run? Volume FUSE supports sequential writes to new files, but "keep a
-> handle open for an hour and flush repeatedly" is a stronger claim and is not
-> documented as supported.
->
-> **Fallback, which may simply be the design:** roll part files —
-> `part-00001.jsonl`, `part-00002.jsonl`, each written whole and closed. That
-> is append-only at the directory level, needs no FUSE append semantics, and is
-> exactly the layout Auto Loader wants to ingest anyway. Probing decides
-> whether the simpler single-file version is available; the fallback is safe
-> either way.
->
-> The probe runs against the new `telemetry` volume with the job's own principal,
-> so it exercises the grant matrix at the same time.
+> **Answered by Slice 0 (verdict below).** Holding a handle open across a run
+> is **not** available. Volume FUSE buffers the whole file and materialises it
+> on close: a fresh reader sees nothing until then, and `fsync` returns success
+> without pushing anything through. **Rolling part files** —
+> `part-00001.jsonl`, `part-00002.jsonl`, each written whole and closed — was
+> the fallback and is now simply the design. It needs no FUSE append semantics
+> and is the layout Auto Loader wants anyway.
 
 ### Backfill: the job replays from its own log
 
 When a client reconnects mid-run and finds a gap, **the app asks the job to
-resend it** — `replay(from_seq, to_seq)` — and the job re-reads its own log
-file and sends those records over the WebSocket.
+resend it** — `replay(from_seq, to_seq)` — and the job answers from **its
+closed part files plus its current in-flight buffer**.
+
+Both halves are needed, and Slice 0 is why. The current part is not readable
+back off the volume until it closes, so a replay that only reads files would
+silently miss the newest records — exactly the ones a client that just
+reconnected is most likely to be missing. The job holds that buffer anyway in
+order to write it, so the union costs nothing and is precisely the set of
+records the job has issued.
 
 This is the design's keystone, and it is why RPC-over-WS is worth doing:
 
@@ -549,36 +557,79 @@ The ordering principle, and the one most different from v3: **prove comms with
 no model in the picture.** This plan commits to Slices 0–3 only. Everything
 after is a later decision made with a working platform in hand.
 
-**Slice 0 — create the `telemetry` volume, then one probe. Written; not yet
-run.** The artifacts exist:
+**Slice 0 — DONE, 2026-09-01.** Answer: **rolling part files. Strategy A is
+not available, and it fails silently.**
 
-| | |
-|---|---|
-| `uc_ddl/004_telemetry_volume.sql` | The volume and its grants. **Fill in the placeholder principals before applying** |
-| `scripts/probe_volume_append.py` | The probe. Runs both strategies, judges each on four criteria, reports latency |
-| `resources/probe_volume.job.yml` | Runs it as a job, because the question has no answer off a workspace |
+```
+VOLUME APPEND PROBE — /Volumes/main/dbx_leaning/telemetry   (60s, 5 records/s)
 
-```bash
-databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/004_telemetry_volume.sql
-databricks bundle deploy -t dev
-databricks bundle run probe_volume -t dev
+PARTIAL  A: single file, handle held open
+         writes=149 bytes=33,901
+         visible to a fresh reader mid-run: 0
+         read back=149 identical=True ordered=True
+         write latency: p50=0.3ms p99=6.0ms
+
+   PASS  B: rolling part files (25 records each)
+         writes=6 bytes=33,443
+         visible to a fresh reader mid-run: 25
+         read back=147 identical=True ordered=True
+         write latency: p50=117.1ms p99=156.4ms
+
+   PASS  directory listing — 6 entries: part-00001.jsonl … part-00006.jsonl
 ```
 
-The probe passes a strategy only if all four hold: writes do not raise; **a
-second reader opening the path fresh mid-run sees data already written**;
-bytes read back are identical to what went in; and nothing is lost or
-reordered across the run. "It did not raise" is explicitly not enough — this
-repo has already shipped a write that succeeded into the wrong place.
+**Read strategy A's row carefully, because it is the whole reason this probe
+existed.** Nothing raised. `flush()` and `fsync()` both returned cleanly. Every
+record was present, identical and in order when the file was read back. By the
+two checks anyone writes first — *did it error*, *is the data right at the end*
+— A passed.
 
-It also reports write latency, which decides flush cadence. **If a small write
-costs ~200 ms on FUSE, the write-through design is dead** and some form of the
-buffer this plan deletes has to come back. Better learned here than in Slice 1.
+It was buffering the entire file locally and materialising it on close. The
+0.3ms p50 is the tell: that is memory speed, not network-storage speed, and
+`fsync` on this mount does not push through FUSE. A job built on A that died
+mid-run would have lost **everything**, silently, while its own metrics showed
+healthy writes — which is the same failure shape as delta-rs writing a
+three-part UC name to a doomed local directory, arriving by a different route.
 
-**Paste the output into this file when it runs.** Slice 0 is not finished when
-the probe passes; it is finished when the answer is written where the next
-session reads it — which is the discipline `docs/spike-results.md` exists to
-enforce, and the one v3 half-kept (both probes passed, none of the timings
-recorded).
+The mid-run visibility check is the only one of the four that caught it. That
+is the argument for judging a write path on what an *independent reader* can
+see, not on what the writer believes.
+
+#### What this changes in the design
+
+**1. The buffer is back, and the plan must stop saying otherwise.** "Write
+through to a file, no in-memory buffer" is not achievable here: content only
+becomes durable when a part file is *closed*, so records accumulate somewhere
+until then whatever the code looks like. What actually changed from v3 is
+where the buffer lives and what flushing it costs — not whether one exists.
+
+So **v3's flush rule returns almost unaltered, and it was right**: roll a part
+on **size OR age OR end-of-run**. The age bound is what caps loss on a crash,
+and that is now literally true rather than nearly so: **durability granularity
+is exactly the roll interval.** Anything written since the last close is at
+risk.
+
+**2. Roll cadence is a real trade with a measured price.** A close costs
+~117ms (p99 157ms), and that is per *file*, not per record — at 25 records a
+part it amortises to ~4.7ms each. Rolling every 5s at 5 records/s spends ~2.3%
+of wall-clock on closes. Rolling every 500ms would spend ~23%. Pick the age
+bound with that number in hand; do not tune it downward for "better
+durability" without pricing it.
+
+**3. Replay has to serve two sources, not one.** `replay(from_seq, to_seq)`
+cannot read the current part back from the volume — that is precisely what A
+proved impossible. So the job answers replay from **closed part files ∪ the
+current in-flight buffer**. This is not extra machinery: the job is holding
+that buffer anyway in order to write it, and the union is exactly the set of
+records the job has issued. Worth stating because reading it back off the
+volume is the obvious implementation and it would silently miss the newest
+records — the ones a reconnecting client is most likely to want.
+
+**4. `part-NNNNN.jsonl` ordering is confirmed** by the listing, and Auto Loader
+gets the layout it prefers, so Slice 4's ingestion job needs nothing special.
+
+The probe ran with `--keep`, so those files are on the volume as a real sample
+for Slice 4 to be developed against.
 
 **Slice 1 — heartbeat, end to end.** A "model" that emits a tick a second and
 nothing else, ~50 lines. Job (threaded) → RPC over WS → app → SSE → browser,
