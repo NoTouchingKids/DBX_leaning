@@ -121,100 +121,45 @@ resources:
 
         # --- the jobs this app triggers --------------------------------
         #
-        # DBX_JOB_IDS below tells the app WHICH job runs which model. It does
-        # not give it the right to run one. Without these, `POST /api/runs`
-        # reaches Databricks and is refused:
+        # THERE ARE NO JOB GRANTS HERE ANY MORE, and their absence is a
+        # deliberate consequence of how v4 finds jobs. Read this before adding
+        # one back, because the obvious fix reintroduces what was removed.
+        #
+        # v3 declared one grant per model, each `${resources.jobs.model_x.id}`
+        # — which works only because this same bundle created those jobs. That
+        # is exactly the coupling v4 drops: jobs are discovered by their
+        # `project: dbx-leaning` tag (app/server/discovery.py), so they can be
+        # defined in another bundle, another repo, or by hand, and the app
+        # still finds them.
+        #
+        # The cost is real and worth stating plainly. **Discovery finds a job;
+        # it does not grant permission to run one.** Without CAN_MANAGE_RUN the
+        # app sees the job, lists it, and then `POST /api/runs` is refused:
         #
         #   run-now failed for job 123: HTTP 403 {"error_code":
         #   "PERMISSION_DENIED", "message": "User ... does not have Manage Run
         #   or Owner permissions on job 123"}
         #
-        # which the trigger route surfaces verbatim. The two have to be
-        # declared together, and `tests/deploy/test_bundle.py` fails if a
-        # model is in one and not the other.
+        # which the trigger route surfaces verbatim. An app resource can only
+        # name a job by id, so a bundle cannot grant on a job it does not
+        # create. The grant therefore moves OUT of band, and belongs with
+        # whoever owns the job: the job's own bundle grants CAN_MANAGE_RUN to
+        # this app's service principal, or it is applied by hand once.
         #
-        # WHO THIS GRANTS TO: the service principal Databricks Apps created
-        # for this app — NOT the `oauth_client_id` principal. An app resource
-        # can only grant to the app's own identity. If you point the app at a
-        # principal of your own, that one needs the grant separately; see
-        # "Running as your own service principal" in deploy/README.md.
-        #
-        # CAN_MANAGE_RUN, not CAN_MANAGE: enough to start and cancel a run,
-        # not to edit the job definition. The bundle owns the definition.
-        #
-        # Unlike the secret resource above, declaring these cannot 404 the
-        # deploy — this same bundle creates the jobs, so the ids always
-        # resolve to something that exists.
-        - name: job-gurobi-scheduling
-          description: Trigger the gurobi_scheduling model.
-          job:
-            id: ${resources.jobs.model_gurobi_scheduling.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-gurobi-routing
-          description: Trigger the gurobi_routing model.
-          job:
-            id: ${resources.jobs.model_gurobi_routing.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-scenario
-          description: Trigger the scenario model.
-          job:
-            id: ${resources.jobs.model_scenario.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-forecasting
-          description: Trigger the forecasting model.
-          job:
-            id: ${resources.jobs.model_forecasting.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-mcmc
-          description: Trigger the mcmc model.
-          job:
-            id: ${resources.jobs.model_mcmc.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-bayesian-ab
-          description: Trigger the bayesian_ab model.
-          job:
-            id: ${resources.jobs.model_bayesian_ab.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-annealing
-          description: Trigger the annealing model.
-          job:
-            id: ${resources.jobs.model_annealing.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-neural-net
-          description: Trigger the neural_net model.
-          job:
-            id: ${resources.jobs.model_neural_net.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-streaming-results
-          description: Trigger the streaming_results model.
-          job:
-            id: ${resources.jobs.model_streaming_results.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-ortools-jobshop
-          description: Trigger the ortools_jobshop model.
-          job:
-            id: ${resources.jobs.model_ortools_jobshop.id}
-            permission: CAN_MANAGE_RUN
-        - name: job-panel-fit
-          description: Trigger the panel_fit model.
-          job:
-            id: ${resources.jobs.model_panel_fit.id}
-            permission: CAN_MANAGE_RUN
+        # That is a fair trade for the decoupling — but it means "the app can
+        # see it" and "the app can run it" are now two separate facts, and only
+        # the first is visible from here. `/healthz` reporting what was
+        # discovered is what keeps the second from being a mystery.
 
-        # The warehouse the read path uses — backfill, history and startup
-        # reconciliation. Nothing WRITES through it (see docs/architecture.md);
-        # telemetry goes to Delta from the job. CAN_USE is run-queries-on,
-        # not administer.
+        # The SQL warehouse resource is gone with the read path that used it.
+        # v4's app queries no warehouse at all: run state is Postgres, a live
+        # gap is replayed by the job over its own channel, and a finished run's
+        # history arrives in SQL through the ingestion job rather than being
+        # read by the app. See docs/v4-rewrite-plan.md.
         #
-        # This one is validated at deploy time like any resource, so a
-        # `warehouse_id` naming a warehouse that does not exist fails the
-        # deploy rather than 403-ing at run time. That is the better end of
-        # the trade, but it does mean the id has to be right before deploying.
-        - name: sql-warehouse
-          description: Read path — backfill, history and reconciliation.
-          sql_warehouse:
-            id: ${var.warehouse_id}
-            permission: CAN_USE
+        # `var.warehouse_id` survives for the DDL in uc_ddl/, which is applied
+        # by hand with `databricks sql query --warehouse-id`. Nothing the app
+        # does needs it.
 
         # --- Lakebase, when you have an instance ------------------------
         #
@@ -277,8 +222,6 @@ resources:
             value: ${var.catalog}
           - name: DBX_SCHEMA
             value: ${var.schema}
-          - name: DBX_WAREHOUSE_ID
-            value: ${var.warehouse_id}
 
           # --- Lakebase: where run_status lives --------------------------
           #
@@ -338,22 +281,14 @@ resources:
           # - name: DBX_OAUTH_CLIENT_SECRET
           #   value_from: oauth-client-secret
 
-          # Which job runs which model. This map is also the app's allow-list:
-          # a model with no job here cannot be triggered, so the app never
-          # imports job/models/ just to validate a request.
-          - name: DBX_JOB_IDS
-            value: >-
-              {"gurobi_scheduling": ${resources.jobs.model_gurobi_scheduling.id},
-               "gurobi_routing": ${resources.jobs.model_gurobi_routing.id},
-               "scenario": ${resources.jobs.model_scenario.id},
-               "forecasting": ${resources.jobs.model_forecasting.id},
-               "mcmc": ${resources.jobs.model_mcmc.id},
-               "bayesian_ab": ${resources.jobs.model_bayesian_ab.id},
-               "annealing": ${resources.jobs.model_annealing.id},
-               "neural_net": ${resources.jobs.model_neural_net.id},
-               "streaming_results": ${resources.jobs.model_streaming_results.id},
-               "ortools_jobshop": ${resources.jobs.model_ortools_jobshop.id},
-               "panel_fit": ${resources.jobs.model_panel_fit.id}}
+          # DBX_JOB_IDS IS DELIBERATELY ABSENT. The app discovers its jobs
+          # from the workspace by the `project: dbx-leaning` tag rather than
+          # being handed a map the bundle interpolated — see the note beside
+          # the (removed) job grants above, and app/server/services.py.
+          #
+          # The variable is still READ if something sets it, because an
+          # explicit map is also an allow-list and someone who sets one means
+          # it. Nothing produces it, and nothing depends on it.
 
           # Where a job should attach. Empty until the app has a URL — jobs
           # then run unobserved, which is a normal state, not a failure.

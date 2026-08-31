@@ -87,7 +87,6 @@ def test_the_ingress_token_comes_from_the_secret_in_both():
 MIRRORED = {
     "DBX_CATALOG": "catalog",
     "DBX_SCHEMA": "schema",
-    "DBX_WAREHOUSE_ID": "warehouse_id",
     "DBX_APP_PUBLIC_URL": "app_public_url",
     "DBX_LAKEBASE_SCHEMA": "lakebase_schema",
 }
@@ -109,17 +108,33 @@ def test_the_volume_path_is_built_from_the_same_three_names():
     assert runtime["DBX_APP_VOLUME"] == expected
 
 
-def test_job_ids_are_absent_from_the_runtime_file():
-    """Deliberately. Job ids do not exist until the bundle creates the jobs,
-    so a literal here would be stale the first time a job is recreated —
-    pointing the app at a job that no longer exists, which fails at trigger
-    time rather than at deploy time. Absent, `/healthz` says so up front.
-    """
-    runtime = {e["name"] for e in _app_yaml()["env"]}
-    assert "DBX_JOB_IDS" not in runtime
+def test_job_ids_are_absent_from_both_files():
+    """v4 discovers jobs by tag, so neither file should name any.
 
-    bundle = {e["name"] for e in _resource_config()["env"]}
-    assert "DBX_JOB_IDS" in bundle, "the bundle is the only thing that can fill this in"
+    This test used to assert the opposite of half of itself: absent from the
+    runtime file, PRESENT in the bundle, because only the bundle could
+    interpolate `${resources.jobs.model_x.id}`. That is the coupling v4
+    removes — the app now finds its jobs by their `project: dbx-leaning` tag,
+    which works however the app was deployed and wherever the jobs are defined.
+
+    `DBX_JOB_IDS` is still read if something sets it, as an allow-list. What
+    must not come back is anything PRODUCING it, because that is what ties the
+    app's deploy to the jobs'.
+    """
+    for where, env in (("app/app.yaml", _app_yaml()), ("resources/app.yml", _resource_config())):
+        assert "DBX_JOB_IDS" not in {e["name"] for e in env["env"]}, (
+            f"{where} declares DBX_JOB_IDS; v4 discovers jobs by tag instead"
+        )
+
+
+def test_the_app_asks_for_no_sql_warehouse():
+    """v4's app queries no warehouse: run state is Postgres, live gaps are
+    replayed by the job, and history arrives via the ingestion job. A
+    DBX_WAREHOUSE_ID here would be a warehouse someone eventually wakes up."""
+    for where, env in (("app/app.yaml", _app_yaml()), ("resources/app.yml", _resource_config())):
+        assert "DBX_WAREHOUSE_ID" not in {e["name"] for e in env["env"]}, (
+            f"{where} still hands the app a warehouse id"
+        )
 
 
 def test_the_runtime_file_deploys_with_the_app():

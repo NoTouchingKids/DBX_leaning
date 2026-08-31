@@ -42,8 +42,6 @@ env:
     value: main
   - name: DBX_SCHEMA
     value: dbx_leaning
-  - name: DBX_WAREHOUSE_ID
-    value: "e4a96cfb1f5b262b"
   - name: DBX_APP_PUBLIC_URL
     value: https://dbx-leaning-7474655945367403.aws.databricksapps.com
 
@@ -86,20 +84,31 @@ env:
   # - name: DBX_OAUTH_CLIENT_SECRET
   #   valueFrom: oauth-client-secret
 
-# DBX_JOB_IDS IS DELIBERATELY ABSENT, and it is the one thing a hand deploy
-# cannot have. It maps model name -> job id, and those ids do not exist until
-# the bundle creates the jobs, so only `resources/app.yml` can fill it in
-# (`${resources.jobs.model_scenario.id}` and friends).
+# DBX_JOB_IDS IS DELIBERATELY ABSENT, and it no longer costs a hand deploy
+# anything — which is a change from v3, where it was this file's one real gap.
 #
-# The consequence is visible, not silent: /api/models answers
-# {"models": [], "default_job_id": null}, /healthz reports "no DBX_JOB_IDS
-# configured; no model can be triggered from this app", and every other path —
-# observing a run someone else triggered, streaming, history, results — works
-# normally.
+# v3 could not have it: the map is model name -> job id, those ids do not exist
+# until the bundle creates the jobs, and only `resources/app.yml` can
+# interpolate them. So a hand-deployed app answered /api/models with an empty
+# list and could trigger nothing.
 #
-# To get triggering, deploy through the bundle — and note that this is TWO
-# commands, because `bundle deploy` uploads this folder without creating an app
-# deployment from it:
+# v4 does not need it. The app discovers its jobs from the workspace by their
+# `project: dbx-leaning` tag (app/server/discovery.py), which works the same
+# whether this app was deployed by the bundle, from the Apps UI, or by hand.
+# Set DBX_JOB_IDS only to NARROW what the app may trigger — it is an
+# allow-list, and nothing produces it.
+#
+# What discovery does NOT give the app is permission to run what it finds.
+# CAN_MANAGE_RUN on each job is a separate grant, and since v4's jobs need not
+# come from this bundle, it is applied by whoever owns them. Without it a
+# trigger returns the workspace's own 403 verbatim.
+#
+# There is no DBX_WAREHOUSE_ID here either, and that is not an omission: v4's
+# app queries no SQL warehouse. `var.warehouse_id` in the bundle survives only
+# for applying uc_ddl/ by hand.
+#
+# Deploying through the bundle is still TWO commands, because `bundle deploy`
+# uploads this folder without creating an app deployment from it:
 #
 #   databricks bundle deploy -t dev
 #   databricks bundle run    dbx_leaning -t dev

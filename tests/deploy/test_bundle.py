@@ -60,13 +60,17 @@ def test_every_job_file_declares_the_job_its_name_promises():
         assert declared == [expected], f"{path.name} declares {declared}, expected ['{expected}']"
 
 
-def test_the_read_path_may_use_the_warehouse(bundle):
-    """Backfill, history and startup reconciliation all query through it, and
-    a missing grant shows up as a 403 at run time rather than at deploy."""
+def test_the_app_declares_no_sql_warehouse_resource(bundle):
+    """The read path that needed it is gone — see docs/v4-rewrite-plan.md.
+
+    Worth asserting rather than just deleting the old test: a `sql_warehouse`
+    resource grants CAN_USE, and the whole cost model of this platform turns on
+    the warehouse staying asleep. Something that can wake it should have to
+    argue for itself.
+    """
     app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
-    warehouse = next(r for r in app["resources"] if "sql_warehouse" in r)["sql_warehouse"]
-    assert warehouse["id"] == "${var.warehouse_id}", "grant the warehouse the app is told to use"
-    assert warehouse["permission"] == "CAN_USE", "running queries, not administering"
+    kinds = [k for r in app.get("resources", []) for k in r if k != "name" and k != "description"]
+    assert "sql_warehouse" not in kinds, "the app is asking for a warehouse again"
 
 
 def test_no_resource_is_declared_that_a_deploy_cannot_validate(bundle):
