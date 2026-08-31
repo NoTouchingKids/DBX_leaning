@@ -215,6 +215,6 @@ def test_imports_resolve_to_the_canonical_shared_not_the_copy():
 
 
 @pytest.mark.parametrize("copy", COPIES, ids=str)
-@pytest.mark.parametrize("name", ["envelope", "protocol", "schema", "tables", "codec", "seq"])
+@pytest.mark.parametrize("name", ["envelope", "rpc", "schema", "tables", "codec", "seq"])
 def test_every_module_the_units_import_is_in_the_copy(copy, name):
     assert (ROOT / copy / f"{name}.py").is_file()

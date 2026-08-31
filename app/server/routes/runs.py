@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from shared.protocol import cancel as cancel_frame
+from shared.rpc import Method, RpcError
 
 from ..deps import Hub, Store
 from ..jobs_api import JobsApiError
@@ -214,15 +214,81 @@ async def get_run(run_id: str, store: Store, hub: Hub) -> dict:
 
 @router.post("/{run_id}/cancel")
 async def cancel_run(run_id: str, request: Request, hub: Hub) -> dict:
-    """Forward a cancel to the job over its WebSocket, if one is live.
+    """Ask the job to cancel, and report what it said.
 
-    This is the only inbound path to a running job. There is no fallback that
-    polls a table for a cancel flag: that would keep the SQL warehouse awake
-    for the whole run.
+    The only inbound path to a running job, and the first thing the RPC
+    interface buys that v3 could not: v3 sent a fire-and-forget frame and
+    answered the caller optimistically, so "the job never got it" and "the job
+    accepted it" looked identical from here.
+
+    There is still no fallback that polls a table for a cancel flag. That would
+    keep the SQL warehouse awake for the whole run, which is the cost mistake
+    this platform was built to avoid — and there is no warehouse on the app's
+    path any more anyway.
     """
     requested_by = request.headers.get("x-forwarded-email") or "unknown"
-    delivered = await hub.job_sockets.send(run_id, cancel_frame(run_id, requested_by=requested_by))
-    if not delivered:
-        raise HTTPException(status.HTTP_409_CONFLICT, CANCEL_ESCAPE_HATCH)
-    log.info("cancel for %s forwarded (requested by %s)", run_id, requested_by)
-    return {"run_id": run_id, "cancel_requested": True, "requested_by": requested_by}
+    try:
+        result = await hub.job_sockets.call(run_id, Method.CANCEL, {"requested_by": requested_by})
+    except ConnectionError as exc:
+        # No job attached, or it went away mid-call. Both mean the same thing
+        # to a user: nobody heard you.
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{CANCEL_ESCAPE_HATCH} ({exc})") from exc
+    except RpcError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"the job refused: {exc}") from exc
+
+    log.info("cancel for %s acknowledged by the job (requested by %s)", run_id, requested_by)
+    return {
+        "run_id": run_id,
+        "cancel_requested": True,
+        "requested_by": requested_by,
+        # Straight from the job. `accepted` and `already_cancelling` are its
+        # words, not ours — the point of an ack is that it is the job speaking.
+        "acknowledged": result,
+    }
+
+
+@router.get("/{run_id}/replay")
+async def replay(
+    run_id: str,
+    hub: Hub,
+    from_seq: int = Query(0, ge=0),
+    to_seq: int | None = Query(None, ge=0),
+) -> dict:
+    """Fill a gap by asking the JOB to resend it.
+
+    This is the design's keystone. The app holds no grant on the telemetry
+    volume — deliberately, see uc_ddl/004_telemetry_volume.sql — so it cannot
+    read the files even if it wanted to, and there is no warehouse to query.
+    Asking the job is not one option among several; it is the only live
+    backfill path there is.
+
+    The job answers from its closed part files AND its in-flight buffer, so a
+    client that just reconnected gets the newest records too — the ones a
+    files-only implementation would silently omit.
+
+    Client-triggered, never on a timer: a routine reconnect produces a gap of
+    milliseconds, and demanding a click for a real one is honest.
+    """
+    try:
+        result = await hub.job_sockets.call(
+            run_id, Method.REPLAY, {"from_seq": from_seq, "to_seq": to_seq}
+        )
+    except ConnectionError as exc:
+        # The run has finished, or was never observed. Its telemetry is on the
+        # volume and reaches SQL through the ingestion job; it is simply not
+        # available from here, live.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"no job attached to {run_id}; a finished run's history comes from SQL ({exc})",
+        ) from exc
+    except RpcError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"the job refused: {exc}") from exc
+
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    return {
+        "run_id": run_id,
+        "from_seq": from_seq,
+        "to_seq": to_seq,
+        "count": len(messages),
+        "messages": messages,
+    }

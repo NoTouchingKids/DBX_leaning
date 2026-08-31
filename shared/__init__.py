@@ -32,7 +32,7 @@ from .envelope import (
     now_ms,
     sanitize_metric,
 )
-from .protocol import ControlFrame, ControlKind, Frame, pack_frame, unpack_frame
+from .rpc import ErrorCode, Method, RpcError, notification, parse, request
 from .seq import SeqCounter
 from .tables import TableSet, table_for, to_row
 
@@ -41,6 +41,12 @@ __all__ = [
     "LogMessage",
     "Message",
     "MessageAdapter",
+    "Method",
+    "ErrorCode",
+    "RpcError",
+    "notification",
+    "parse",
+    "request",
     "MessageType",
     "ProgressMessage",
     "ResultMessage",
@@ -62,11 +68,6 @@ __all__ = [
     "TableSet",
     "table_for",
     "to_row",
-    "ControlFrame",
-    "ControlKind",
-    "Frame",
-    "pack_frame",
-    "unpack_frame",
     "lttb",
     "downsample_rows",
 ]

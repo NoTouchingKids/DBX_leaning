@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config import AppConfig
-from .routes import ingest, meta, runs, stream
+from .routes import meta, rpc, runs, stream
 from .services import ServiceHub
 from .spa import mount_spa
 
@@ -64,7 +64,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.hub = ServiceHub(cfg)
 
     app.include_router(meta.router)
-    app.include_router(ingest.router)
+    app.include_router(rpc.router)
     app.include_router(stream.router)
     app.include_router(runs.router)
 

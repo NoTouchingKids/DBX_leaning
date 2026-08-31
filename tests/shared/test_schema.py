@@ -15,8 +15,8 @@ import pytest
 
 from shared.codec import to_jsonable
 from shared.envelope import LogLevel, MessageType, make_message
-from shared.protocol import ControlKind, cancel, hello
-from shared.schema import SCHEMA_VERSION, control_schema, envelope_schema, protocol_schema
+from shared.rpc import Method
+from shared.schema import control_schema, envelope_schema
 
 jsonschema = pytest.importorskip("jsonschema")
 
@@ -163,29 +163,39 @@ def test_the_platform_statuses_cover_what_the_run_store_counts_as_active():
         assert value in published
 
 
-# --- control frames --------------------------------------------------------
+# --- the RPC surface -------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "frame", [hello("r1", next_seq=4000), cancel("r1", requested_by="kp")], ids=["hello", "cancel"]
-)
-def test_control_frames_validate(frame):
-    validator(control_schema()).validate(frame.model_dump(mode="json"))
+def test_the_published_methods_are_exactly_the_ones_the_code_has():
+    """The schema is what a future non-Python harness builds against.
+
+    v3 generated this from Pydantic control-frame models; a JSON-RPC method set
+    is a vocabulary rather than a shape, so what is published is which methods
+    exist, which are notifications, and which way each goes. Drift here would
+    hand someone a contract the app does not actually speak.
+    """
+    published = control_schema()["x-methods"]
+    declared = {v for k, v in vars(Method).items() if not k.startswith("_") and isinstance(v, str)}
+    assert set(published) == declared
+
+    for name, spec in published.items():
+        assert spec["kind"] in {"request", "notification"}, name
+        assert spec["from"] in {"job", "app", "either"}, name
+        assert spec["summary"], name
 
 
-def test_every_control_kind_is_published():
-    schema = control_schema()
-    kinds = schema["$defs"]["ControlKind"]["enum"]
-    assert set(kinds) == {k.value for k in ControlKind}
+def test_telemetry_is_published_as_a_notification():
+    """If this ever says `request`, someone has started acknowledging every
+    telemetry batch — doubling the frames to confirm something the volume
+    already guarantees."""
+    assert control_schema()["x-methods"][Method.TELEMETRY]["kind"] == "notification"
 
 
-# --- versioning ------------------------------------------------------------
-
-
-def test_the_schema_carries_a_version_a_client_can_compare():
-    for build in (envelope_schema, control_schema, protocol_schema):
-        assert build()["x-schema-version"] == SCHEMA_VERSION
-
-
-def test_the_combined_document_holds_both_halves():
-    assert set(protocol_schema()["$defs"]) == {"envelope", "control"}
+def test_the_two_methods_that_carry_answers_are_requests():
+    """`cancel` and `replay` are the entire reason this is RPC rather than
+    v3's one-way frames: an acknowledgement and a body of records cannot
+    travel back over a notification."""
+    methods = control_schema()["x-methods"]
+    for name in (Method.CANCEL, Method.REPLAY):
+        assert methods[name]["kind"] == "request"
+        assert methods[name]["from"] == "app"

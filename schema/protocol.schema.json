@@ -1,49 +1,43 @@
 {
   "$defs": {
     "control": {
-      "$defs": {
-        "ControlKind": {
-          "enum": [
-            "hello",
-            "hello_ack",
-            "cancel",
-            "ping",
-            "pong",
-            "bye"
-          ],
-          "title": "ControlKind",
-          "type": "string"
-        }
-      },
       "$id": "https://github.com/NoTouchingKids/DBX_leaning/schema/control.schema.json",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "description": "hello / hello_ack / cancel / ping / pong / bye, exchanged between a job and the app over the WebSocket. Generated from shared/protocol.py.",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/ControlKind"
+      "description": "JSON-RPC 2.0 over the job's WebSocket. Generated from shared/rpc.py.",
+      "title": "DBX_leaning job/app RPC methods",
+      "x-jsonrpc-version": "2.0",
+      "x-methods": {
+        "bye": {
+          "from": "job",
+          "kind": "notification",
+          "summary": "Clean shutdown; distinct from a dropped socket."
         },
-        "payload": {
-          "additionalProperties": true,
-          "title": "Payload",
-          "type": "object"
+        "cancel": {
+          "from": "app",
+          "kind": "request",
+          "summary": "Ask the job to stop. Answered, which v3 could not do."
         },
-        "run_id": {
-          "minLength": 1,
-          "title": "Run Id",
-          "type": "string"
+        "hello": {
+          "from": "job",
+          "kind": "request",
+          "summary": "Which run this is, and the seq it is picking up from."
         },
-        "ts": {
-          "title": "Ts",
-          "type": "integer"
+        "ping": {
+          "from": "either",
+          "kind": "request",
+          "summary": "Application-level keepalive, not a WS protocol ping."
+        },
+        "replay": {
+          "from": "app",
+          "kind": "request",
+          "summary": "Resend [from_seq, to_seq]. The only live backfill path."
+        },
+        "telemetry": {
+          "from": "job",
+          "kind": "notification",
+          "summary": "A batch of envelope messages. The bulk of all traffic."
         }
       },
-      "required": [
-        "kind",
-        "run_id"
-      ],
-      "title": "ControlFrame",
-      "type": "object",
       "x-schema-version": "1.0.0"
     },
     "envelope": {

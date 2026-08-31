@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 from .envelope import PLATFORM_STATUSES, TERMINAL_STATUSES, MessageAdapter
-from .protocol import ControlFrame
+from .rpc import JSONRPC_VERSION, Method
 
 __all__ = ["SCHEMA_VERSION", "envelope_schema", "control_schema", "protocol_schema"]
 
@@ -66,23 +66,54 @@ def envelope_schema() -> dict[str, Any]:
 
 
 def control_schema() -> dict[str, Any]:
-    """The job<->app control frames. Not run telemetry — connection management.
+    """The job<->app RPC surface: the methods, and what each is for.
 
-    A browser never sees these; they are here so the protocol is documented
-    in one place and a future non-Python job harness has something to build
-    against.
+    Not a Pydantic-derived shape any more. v3's control frames were a closed
+    set of Pydantic models, so a schema could be generated from them; a
+    JSON-RPC method set is a vocabulary, and the useful thing to publish is
+    which methods exist, which are notifications, and which direction each
+    goes. A browser never sees any of it — this is here so a future non-Python
+    harness has something to build against without reading `job/ws.py`.
     """
-    schema = ControlFrame.model_json_schema(mode="serialization")
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": f"{_BASE_ID}/control.schema.json",
-        "title": "DBX_leaning job/app control frame",
-        "description": (
-            "hello / hello_ack / cancel / ping / pong / bye, exchanged between a job "
-            "and the app over the WebSocket. Generated from shared/protocol.py."
-        ),
+        "title": "DBX_leaning job/app RPC methods",
+        "description": ("JSON-RPC 2.0 over the job's WebSocket. Generated from shared/rpc.py."),
         "x-schema-version": SCHEMA_VERSION,
-        **schema,
+        "x-jsonrpc-version": JSONRPC_VERSION,
+        "x-methods": {
+            Method.TELEMETRY: {
+                "kind": "notification",
+                "from": "job",
+                "summary": "A batch of envelope messages. The bulk of all traffic.",
+            },
+            Method.HELLO: {
+                "kind": "request",
+                "from": "job",
+                "summary": "Which run this is, and the seq it is picking up from.",
+            },
+            Method.BYE: {
+                "kind": "notification",
+                "from": "job",
+                "summary": "Clean shutdown; distinct from a dropped socket.",
+            },
+            Method.CANCEL: {
+                "kind": "request",
+                "from": "app",
+                "summary": "Ask the job to stop. Answered, which v3 could not do.",
+            },
+            Method.REPLAY: {
+                "kind": "request",
+                "from": "app",
+                "summary": "Resend [from_seq, to_seq]. The only live backfill path.",
+            },
+            Method.PING: {
+                "kind": "request",
+                "from": "either",
+                "summary": "Application-level keepalive, not a WS protocol ping.",
+            },
+        },
     }
 
 

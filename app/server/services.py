@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.envelope import Message, StatusMessage
-from shared.protocol import ControlFrame, pack_frame
+from shared.rpc import Response, RpcError, request
 from shared.tables import TableSet
 
 from .broadcaster import Broadcaster, InProcessBroadcaster
@@ -31,15 +31,25 @@ __all__ = ["ServiceHub", "JobConnections"]
 
 
 class JobConnections:
-    """Live WebSocket connections from jobs, one per run.
+    """Live RPC connections from jobs, one per run.
 
     The *only* path by which anything reaches a running job — which is why
     cancel goes through the app and never through a status table a client
-    polls.
+    polls, and why `replay` is possible at all now that the app holds no grant
+    on the telemetry volume.
+
+    It also holds the outstanding calls. A request the APP makes is answered on
+    the same socket, interleaved with whatever telemetry the job is streaming,
+    so `call()` parks a future under the request id and `resolve()` — driven by
+    the receive loop in `routes/rpc.py` — completes it. That indirection is the
+    price of request/response on a shared duplex channel, and it is the whole
+    of it.
     """
 
     def __init__(self) -> None:
         self._by_run: dict[str, Any] = {}
+        self._pending: dict[tuple[str, int], asyncio.Future] = {}
+        self._next_id = 0
 
     def register(self, run_id: str, ws: Any) -> None:
         self._by_run[run_id] = ws
@@ -47,21 +57,68 @@ class JobConnections:
     def unregister(self, run_id: str, ws: Any | None = None) -> None:
         if ws is None or self._by_run.get(run_id) is ws:
             self._by_run.pop(run_id, None)
+        # Fail every call waiting on this run rather than leaving a caller
+        # hanging until its own timeout: the socket is gone, and the answer is
+        # never arriving.
+        for key, fut in list(self._pending.items()):
+            if key[0] == run_id and not fut.done():
+                fut.set_exception(ConnectionError(f"job for {run_id} disconnected"))
+                self._pending.pop(key, None)
 
     def is_connected(self, run_id: str) -> bool:
         return run_id in self._by_run
 
-    async def send(self, run_id: str, frame: ControlFrame) -> bool:
+    async def call(
+        self,
+        run_id: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout_s: float = 10.0,
+    ):
+        """Ask the job something and wait for its answer.
+
+        Raises `ConnectionError` when no job is attached — which is a normal
+        state, not an error in itself, and the caller decides what it means.
+        """
         ws = self._by_run.get(run_id)
         if ws is None:
-            return False
+            raise ConnectionError(f"no job attached for {run_id}")
+
+        self._next_id += 1
+        call_id = self._next_id
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[(run_id, call_id)] = fut
+
         try:
-            await ws.send_bytes(pack_frame(frame))
-        except Exception:  # noqa: BLE001
-            log.info("job ws for %s failed on send; dropping it", run_id)
-            self.unregister(run_id, ws)
-            return False
-        return True
+            await ws.send_text(request(method, params, id=call_id).decode())
+            async with asyncio.timeout(timeout_s):
+                return await fut
+        except TimeoutError:
+            raise ConnectionError(
+                f"job for {run_id} did not answer {method} in {timeout_s}s"
+            ) from None
+        finally:
+            self._pending.pop((run_id, call_id), None)
+
+    def resolve(self, run_id: str, response: Response) -> None:
+        """Hand a reply to whoever is waiting for it.
+
+        An unmatched id is a late answer to a call that already timed out;
+        dropping it is right, and noisier handling would only log during
+        exactly the incidents that are already noisy.
+        """
+        key = (run_id, response.id)
+        fut = self._pending.pop(key, None)  # type: ignore[arg-type]
+        if fut is None or fut.done():
+            return
+        if response.ok:
+            fut.set_result(response.result)
+        else:
+            error = response.error or {}
+            fut.set_exception(
+                RpcError(error.get("code", 0), error.get("message", "job returned an error"))
+            )
 
     @property
     def run_ids(self) -> list[str]:
