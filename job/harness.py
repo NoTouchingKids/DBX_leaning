@@ -54,8 +54,10 @@ class RunOutcome:
     rows_written: int = 0
     unflushed: int = 0
     write_failures: int = 0
-    live_sent: int = 0
-    observed_live: bool = False
+    #: Messages HANDED to the live channel — not messages delivered. The
+    #: channel queues and may never connect, so this is an offer count and is
+    #: named like one. Whether anything arrived is the channel's to report.
+    live_offered: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -92,7 +94,7 @@ class Harness:
         #: listener is not degraded.
         self._on_message = on_message
         self._roll_tick_s = roll_tick_s
-        self._live_sent = 0
+        self._live_offered = 0
         self._stop_roller = threading.Event()
 
     # --- the callback a model is handed ------------------------------------
@@ -113,7 +115,7 @@ class Harness:
         if self._on_message is not None:
             try:
                 self._on_message(record)
-                self._live_sent += 1
+                self._live_offered += 1
             except Exception:  # noqa: BLE001 - a dead channel is not a failed run
                 log.debug("live channel refused a message; the run is unaffected", exc_info=True)
 
@@ -161,8 +163,7 @@ class Harness:
             rows_written=self.writer.rows_written,
             unflushed=self.writer.unflushed,
             write_failures=self.writer.write_failures,
-            live_sent=self._live_sent,
-            observed_live=self._live_sent > 0,
+            live_offered=self._live_offered,
         )
 
     def _drive(self, handle: ModelHandle) -> tuple[str, str | None]:

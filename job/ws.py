@@ -64,26 +64,40 @@ DEFAULT_MAX_FAILURES = 10
 
 
 def diagnose(exc: BaseException) -> str:
-    """Turn one specific unhelpful error into a sentence that names the cause.
+    """Turn the ingress's unhelpful rejections into a sentence naming the cause.
 
-    A job whose principal lacks `CAN_USE` on the app does not get a 401. The
-    Databricks Apps proxy answers the upgrade with a 302 to the OAuth login
-    page, the websockets client follows it, and the error is about the URL it
-    landed on:
+    A job whose request carries no Databricks identity does not get a 401. The
+    Databricks Apps proxy answers the upgrade with a **302 to the OAuth login
+    page**, and what surfaces depends on whether the client follows it:
 
+        server rejected WebSocket connection: HTTP 302
         ... /oidc/oauth2/v2.0/authorize?... isn't a valid URI:
-        scheme isn't ws or wss
+            scheme isn't ws or wss
 
-    Nothing in that names the cause, and v3 lost an afternoon to it. The v3
-    diagnosis died with `job/channels.py`; the plan's deployment-lessons table
-    says the new client needs it, so here it is.
+    Neither names the cause. v3 lost an afternoon to the second form; the
+    first is what `websockets.sync` reports, and is what a real deployed run
+    produced on 2026-08-31 — after this function had been written to match
+    only the second, so it stayed silent through six attempts.
+
+    Both are the same fault, and the fix is one of two things: the job has no
+    Databricks identity to present (no `Authorization` header at all), or it
+    has one whose principal lacks `CAN_USE` on the app.
     """
     text = str(exc)
-    if "oidc" in text or "authorize" in text:
+    redirected = "302" in text or "oidc" in text or "authorize" in text
+    if redirected:
         return (
-            "the app's ingress is rejecting the handshake and redirecting to an "
-            "OAuth login page — this job's principal almost certainly lacks "
-            "CAN_USE on the app. Grant it, or let the run proceed unobserved."
+            "the app's ingress redirected the handshake to an OAuth login page. "
+            "Either this job presented no Databricks identity — check "
+            "DATABRICKS_HOST and see job/auth.py for the sources it tries — or "
+            "its principal lacks CAN_USE on the app. The run continues "
+            "unobserved either way."
+        )
+    if "401" in text or "403" in text:
+        return (
+            "the app refused the handshake outright. A 401/403 here is the "
+            "APP's own check (DBX_APP_TOKEN), not the proxy's — the proxy "
+            "redirects rather than refusing."
         )
     return ""
 

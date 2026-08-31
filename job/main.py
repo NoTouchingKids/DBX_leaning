@@ -46,17 +46,43 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         log.info("no DBX_APP_URL — running unobserved, durable path only")
         return None
 
+    import asyncio
+
     from websockets.sync.client import connect
 
+    from .auth import AppCredential, ingress_headers
+
     url = cfg.ws_url
-    headers = {}
-    if cfg.app_token:
-        headers["X-DBX-App-Token"] = cfg.app_token
+    credential = AppCredential(host=cfg.workspace_host)
+
+    def headers() -> dict[str, str]:
+        """Both credentials, fetched fresh per connection attempt.
+
+        **Two of them, on two different headers, and both are required.**
+
+        `Authorization` belongs to the Databricks Apps PROXY, which sits in
+        front of the app and answers an unauthenticated upgrade with a 302 to
+        the OAuth login page — never a 401. So a job with no Databricks
+        identity does not get "unauthorised"; it gets a redirect, and
+        `websockets` reports `HTTP 302` with nothing in it that names the
+        cause. `X-DBX-App-Token` is the app's own shared secret and is checked
+        by `app/server/routes/rpc.py`, well after the proxy has already decided.
+        See `job/auth.py`, and the deployment-lessons table in the plan.
+
+        Fetched per attempt rather than once: `AppCredential` caches until
+        expiry itself, and a reconnect an hour into a run should not present a
+        token that expired forty minutes ago.
+
+        `asyncio.run` is safe here because this is called from the socket
+        THREAD, which owns no event loop — the same property that let the whole
+        harness stop working around serverless's ipykernel.
+        """
+        return asyncio.run(ingress_headers(cfg.app_token, credential))
 
     return RpcClient(
         url,
         cfg.run_id,
-        connect=lambda: connect(url, additional_headers=headers or None),
+        connect=lambda: connect(url, additional_headers=headers() or None),
         on_cancel=lambda who: harness.cancel(who),
         on_replay=lambda a, b: harness.replay(a, b),
         next_seq=lambda: harness.seq.issued,
@@ -106,15 +132,23 @@ def main(argv: list[str] | None = None) -> int:
     if client is not None:
         client.stop()
 
+    # `observed` is the CHANNEL's count of what it actually put on a socket,
+    # not the harness's count of what it handed over. Those differ whenever the
+    # app is unreachable — the queue accepts every record and delivers none —
+    # and reporting the offer count as "observed" would be a metric claiming
+    # success over something that never happened, which is the failure this
+    # platform's rules exist to prevent.
+    delivered = client.sent if client is not None else 0
     log.info(
-        "run %s finished: %s (seq=%d rows=%d unflushed=%d live_sent=%d observed=%s)",
+        "run %s finished: %s (seq=%d rows=%d unflushed=%d offered=%d delivered=%d observed=%s)",
         outcome.run_id,
         outcome.status,
         outcome.seq_issued,
         outcome.rows_written,
         outcome.unflushed,
-        outcome.live_sent,
-        outcome.observed_live,
+        outcome.live_offered,
+        delivered,
+        delivered > 0,
     )
     if outcome.detail:
         log.info("detail: %s", outcome.detail)

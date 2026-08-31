@@ -261,23 +261,35 @@ def test_an_unreachable_app_gives_up_without_touching_the_run():
 @pytest.mark.parametrize(
     "text",
     [
+        # What a REAL deployed run produced, 2026-08-31. `websockets.sync`
+        # refuses to follow the redirect and reports only the status.
+        "server rejected WebSocket connection: HTTP 302",
+        # What v3 saw, where the client followed it and complained about the
+        # scheme of the page it landed on.
         "https://x.cloud.databricks.com/oidc/oauth2/v2.0/authorize?client_id=a"
         " isn't a valid URI: scheme isn't ws or wss",
-        "redirected to /oidc/oauth2/v2.0/authorize",
     ],
 )
-def test_the_oauth_redirect_is_explained_rather_than_relayed(text):
-    """v3 lost an afternoon to this error, which names nothing.
+def test_an_ingress_redirect_is_explained_rather_than_relayed(text):
+    """Both forms of the same fault, and neither names it.
 
-    A job whose principal lacks CAN_USE on the app gets a 302 to the OAuth
-    login page; the client follows it and complains about the URL's scheme.
-    The v3 diagnosis died with job/channels.py, and the plan's
-    deployment-lessons table says the new client needs it — so this is that
-    lesson, kept.
+    The Apps proxy answers an unauthenticated upgrade with a 302 to the OAuth
+    login page — never a 401 — so "no Databricks identity" and "principal
+    lacks CAN_USE" both surface as a redirect. This function existed before
+    the first deploy and matched only the v3 wording, so it stayed silent
+    through six real attempts. That is why the bare status is tested first.
     """
     said = diagnose(ValueError(text))
     assert "CAN_USE" in said
     assert "unobserved" in said
+
+
+def test_a_refusal_is_distinguished_from_a_redirect():
+    """A 401/403 is the APP's own token check, which happens well after the
+    proxy has already decided — so it points somewhere different."""
+    said = diagnose(ValueError("server rejected WebSocket connection: HTTP 403"))
+    assert "DBX_APP_TOKEN" in said
+    assert "CAN_USE" not in said
 
 
 def test_an_ordinary_failure_is_not_editorialised():

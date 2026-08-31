@@ -54,7 +54,7 @@ def test_a_run_with_nothing_listening_is_fully_durable(tmp_path):
 
     assert outcome.status == "SUCCEEDED"
     assert outcome.terminal is True
-    assert outcome.observed_live is False
+    assert outcome.live_offered == 0, "something was offered to a channel that is not there"
     assert outcome.unflushed == 0
 
     records = _records(h.writer)
@@ -76,7 +76,7 @@ def test_a_listener_that_throws_on_every_message_changes_nothing_durable(tmp_pat
     outcome = h.run()
 
     assert outcome.status == "SUCCEEDED"
-    assert outcome.live_sent == 0, "a raising channel was counted as a successful send"
+    assert outcome.live_offered == 0, "a raising channel was counted as a successful offer"
     assert len(_records(h.writer)) == outcome.seq_issued
     assert seen, "the channel was never even offered a message"
 
@@ -215,3 +215,25 @@ def test_the_heartbeat_emits_progress_a_client_can_render_without_model_code(tmp
         assert record["primary_metric_label"] == "ticks"
         assert record["elapsed_seconds"] >= 0.0
     assert progress[-1]["percent_complete"] == pytest.approx(100.0)
+
+
+def test_offered_is_not_delivered(tmp_path):
+    """A metric must not claim success over something that did not happen.
+
+    The live channel queues and returns immediately — that is what keeps it off
+    the model's thread — so every record is "offered" whether or not the app
+    is reachable. A real deployed run on 2026-08-31 reported `observed=True`
+    after six failed connection attempts, because the harness was counting
+    queue puts and calling them sends.
+
+    So the harness reports `live_offered` and nothing else; whether anything
+    arrived is the channel's own count, and `job/main.py` logs that separately.
+    """
+    queued: list[dict] = []
+    h = _harness(tmp_path, on_message=queued.append)  # a queue that never delivers
+    outcome = h.run()
+
+    assert outcome.live_offered == outcome.seq_issued
+    assert not hasattr(outcome, "observed_live"), (
+        "observed_live is back; the harness cannot know what a channel delivered"
+    )
