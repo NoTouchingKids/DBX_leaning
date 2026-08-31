@@ -1,0 +1,34 @@
+# A DATABRICKS JOB TASK, as closely as a container can mirror one.
+#
+# `resources/model_heartbeat.job.yml` declares exactly three dependencies:
+#
+#   -r ${workspace.file_path}/job/requirements.txt
+#   ${workspace.file_path}
+#   ${workspace.file_path}/models/heartbeat
+#
+# The three RUN lines below are those, in order. If this image builds and runs
+# a heartbeat to SUCCEEDED, that dependency list is right; if the deploy then
+# fails, the fault is in the workspace and not in what was declared.
+#
+# The context is the repo root minus what `databricks.yml` excludes from the
+# sync — see .dockerignore, which is kept in agreement with it by
+# tests/container/test_job_container.py.
+ARG BASE=dbx-test-base
+FROM ${BASE}
+
+WORKDIR /src
+COPY . /src
+
+RUN pip install --no-cache-dir -r /src/job/requirements.txt
+RUN pip install --no-cache-dir /src
+
+# The model is a SEPARATE distribution, installed separately. This is the line
+# that would carry torch for a model that needed it, and the reason a heartbeat
+# job's environment stays as small as it is.
+RUN pip install --no-cache-dir /src/models/heartbeat
+
+# Deleting the source tree is the point of the test, not tidiness. What runs on
+# Databricks is the installed distribution; a container that kept /src could
+# pass on an accidental relative import and tell us nothing.
+RUN rm -rf /src
+WORKDIR /

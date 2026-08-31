@@ -1,0 +1,8 @@
+# `app/client/**` is excluded from the workspace sync wholesale: the React
+# source has no business in a workspace with no Node runtime, and the build
+# output is not in that directory anyway — vite writes `../dist`.
+#
+# node_modules is the harder half. The workspace export fails on the FIRST
+# symlink it meets, and node_modules carries bin shims whatever installs it.
+client
+**/__pycache__

@@ -1,0 +1,15 @@
+# THE BUG, ON PURPOSE. Identical to Dockerfile.app except that its
+# .dockerignore drops `shared/` — which is what deleting `app/shared/` as
+# apparent duplication did to the deployed app while 296 tests stayed green.
+#
+# An image that reproduces a fixed bug is worth keeping when the bug was
+# invisible to the test suite that was supposed to catch it. Without this,
+# `test_app_container.py` proves the app starts; it does not prove the test
+# would have NOTICED if it stopped.
+ARG BASE=dbx-test-base
+FROM ${BASE}
+
+WORKDIR /app
+COPY . /app
+RUN pip install --no-cache-dir -r /app/requirements.txt
+ENV DBX_FRONTEND_DIST=dist

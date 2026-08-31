@@ -1,0 +1,4 @@
+# Deliberately excluding the envelope. See Dockerfile.app-noshared.
+shared
+client
+**/__pycache__

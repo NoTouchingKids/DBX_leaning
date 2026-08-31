@@ -186,6 +186,11 @@ scripts/        Requirements/schema export, licence + sample probes
 resources/      One job definition per model, plus the app — see below
 deploy/         The deployment guide
 tests/          Offline; nothing here needs a Databricks connection
+  container/    EXCEPT these: real Docker images, one per deployable shape,
+                each seeing only what its Databricks counterpart would. Opt-in
+                (`DBX_CONTAINER_TESTS=1`), skipped otherwise. They exist because
+                a subprocess inherits sys.path and a container does not — see
+                tests/container/README.md
 docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
@@ -228,6 +233,12 @@ the first one it meets — the same rule that keeps `.venv` and
 stayed green, because pytest has the repo root on its path and the workspace
 does not. That test walks `server/`'s imports and fails if one resolves to
 something outside `app/`.
+
+`tests/container/` is the version of that check that cannot be fooled: it
+builds the app from `app/` as the Docker build context and starts it, so the
+repo is absent from the disk rather than merely unused. It also builds the
+app WITHOUT `shared/` and asserts that one fails — a green test that cannot go
+red would not have caught this either.
 
 **A model depends on nothing here.** `models/heartbeat/pyproject.toml` has an
 empty `dependencies` list, and that is the proof rather than an accident of a

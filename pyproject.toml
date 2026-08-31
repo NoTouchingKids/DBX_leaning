@@ -145,6 +145,7 @@ markers = [
     "requires_sklearn: needs scikit-learn installed",
     "requires_emcee: needs emcee installed",
     "slow: takes more than a couple of seconds",
+    "container: builds and runs real Docker images (needs DBX_CONTAINER_TESTS=1)",
 ]
 
 [tool.ruff]

@@ -1,0 +1,24 @@
+# A MODEL, ALONE. The build context is `models/<name>/` and nothing else, so
+# this file physically cannot copy the repo in — that is the enforcement, and
+# it is why this is a container test rather than a subprocess one.
+#
+# The claim under test is the one CLAUDE.md makes: "a model depends on nothing
+# here." `models/heartbeat/pyproject.toml` says `dependencies = []`, and this
+# image is what makes that a fact rather than a statement of intent. If a model
+# ever grows an import of `job` or `shared`, the build still succeeds and
+# `tests/container/test_model_isolation.py` fails on the import — which is the
+# right way round: the failure names the coupling.
+ARG BASE=dbx-test-base
+FROM ${BASE}
+
+WORKDIR /model
+COPY . /model
+
+# No -r requirements, no repo, no platform. Whatever the model's own
+# pyproject.toml asks for and not one thing more.
+RUN pip install --no-cache-dir /model
+
+# Out of the source directory, so an `import heartbeat` that succeeds is
+# resolving the INSTALLED distribution and not the adjacent folder. Getting
+# this wrong is how a packaging test passes while the package is broken.
+WORKDIR /
