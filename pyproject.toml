@@ -13,7 +13,6 @@ requires-python = ">=3.11"
 # artefact. Keep it to the envelope's own needs.
 dependencies = [
     "pydantic>=2.7,<3",
-    "msgpack>=1.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -142,7 +141,7 @@ unresolved-import = "warn"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # `class X(str, Enum)` rather than StrEnum, deliberately: the envelope's enums
-# are serialised by Pydantic, msgpack and JSON, and the explicit str mixin is
+# are serialised by Pydantic and JSON, and the explicit str mixin is
 # the form every one of those handles identically across versions.
 ignore = ["UP042"]
 

@@ -8,11 +8,7 @@ handed, and needs no import from the platform to run standalone.
 
 from .codec import (
     decode_json,
-    decode_msgpack,
-    decode_msgpack_many,
     encode_json,
-    encode_msgpack,
-    encode_msgpack_many,
     to_jsonable,
 )
 from .downsample import downsample_rows, lttb
@@ -60,10 +56,6 @@ __all__ = [
     "to_jsonable",
     "encode_json",
     "decode_json",
-    "encode_msgpack",
-    "decode_msgpack",
-    "encode_msgpack_many",
-    "decode_msgpack_many",
     "SeqCounter",
     "TableSet",
     "table_for",

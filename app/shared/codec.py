@@ -1,12 +1,17 @@
 """Encoding — a delivery detail, deliberately kept outside the envelope.
 
-msgpack job->app and in the Delta write buffer; JSON app->browser (native to
-the browser, readable in devtools, already compressed by the transport).
+**JSON, everywhere.** v3 used msgpack job->app and in the Delta write buffer,
+and JSON only to the browser. v4 has one codec, and it follows from two
+decisions rather than being a preference of its own: the wire is JSON-RPC, and
+the durable records are files that `replay` reads back — so an operator opening
+a telemetry part file and a `replay` parsing the same bytes are both worth more
+here than smaller frames. Telemetry records are small and the transport
+compresses.
 
-The contract both codecs owe: **identical logical content**. If a message
-round-trips through msgpack and through JSON and the two results differ, the
-boundary between "protocol" and "serialisation" has been drawn in the wrong
-place. ``tests/shared/test_codec.py`` asserts exactly that.
+The msgpack helpers that used to live here are gone with the dependency. What
+remains is `to_jsonable`, which is the part that was actually doing the work:
+turning a Pydantic message into plain data, once, so that whatever encodes it
+never has to know what a `Message` is.
 """
 
 from __future__ import annotations
@@ -14,18 +19,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import msgpack
-
 from .envelope import Message, MessageAdapter
 
 __all__ = [
     "to_jsonable",
     "encode_json",
     "decode_json",
-    "encode_msgpack",
-    "decode_msgpack",
-    "encode_msgpack_many",
-    "decode_msgpack_many",
 ]
 
 
@@ -43,20 +42,3 @@ def encode_json(msg: Message) -> bytes:
 
 def decode_json(raw: bytes | str) -> Message:
     return MessageAdapter.validate_python(json.loads(raw))
-
-
-def encode_msgpack(msg: Message) -> bytes:
-    return msgpack.packb(to_jsonable(msg), use_bin_type=True)
-
-
-def decode_msgpack(raw: bytes) -> Message:
-    return MessageAdapter.validate_python(msgpack.unpackb(raw, raw=False))
-
-
-def encode_msgpack_many(msgs: list[Message]) -> bytes:
-    """One frame holding many messages — how the Delta buffer holds a batch."""
-    return msgpack.packb([to_jsonable(m) for m in msgs], use_bin_type=True)
-
-
-def decode_msgpack_many(raw: bytes) -> list[Message]:
-    return [MessageAdapter.validate_python(d) for d in msgpack.unpackb(raw, raw=False)]
