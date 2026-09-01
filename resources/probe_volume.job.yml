@@ -53,7 +53,22 @@ resources:
       environments:
         - environment_key: probe
           spec:
-            client: "3"
+            # `environment_version`, NOT `client`. The bundle schema is blunt
+            # about it — the `client` field's entire description is "Use
+            # `environment_version` instead" — and the two are not spellings of
+            # the same thing: each environment version pins its own Python.
+            #
+            # 5, because that is what this repo is resolved against.
+            # `[tool.databricks.environment]` in pyproject.toml records it, and
+            # `databricks environments setup-local --serverless-version 5` is
+            # what wrote both that and the `constraint-dependencies` block.
+            #
+            # This was `client: "3"` — a Python 3.11 environment — while
+            # pyproject.toml asks for `requires-python = "==3.12.*"`. pip would
+            # have refused the whole install, so the task would have died before
+            # reaching the model, with an error about Python versions rather
+            # than about the mismatch that caused it.
+            environment_version: "5"
             dependencies:
               - -r ${workspace.file_path}/job/requirements.txt
 

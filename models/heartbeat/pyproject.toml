@@ -20,13 +20,23 @@ version = "0.1.0"
 description = "A tick a second. The model the transport is proven with."
 requires-python = ">=3.11"
 
-# Deliberately empty. A heartbeat needs nothing, and a model that needs
-# nothing should say so — it is the proof that the model contract costs a
-# model no dependencies at all.
+# Deliberately empty, and `modelkit` is NOT missing from it.
+#
+# The template this model subclasses is a SHARED SERVERLESS ENVIRONMENT
+# DEPENDENCY — installed once into the environment, not once per model. See
+# modelkit/pyproject.toml and the Databricks doc it cites. Declaring it here
+# would be wrong twice: it says nothing pip can resolve (the kit is not on an
+# index), and it misstates where the thing comes from.
+#
+# This is the same rule pyspark already follows in this repo: the environment
+# provides it, so no model declares it.
 dependencies = []
 
 [project.entry-points."dbx_leaning.models"]
-heartbeat = "heartbeat:build_model"
+# The CLASS, not a factory function. `modelkit.Model.__init__` already takes
+# both a config dict and keywords, so there is nothing left for a factory to
+# do. `build_model` still exists in the module for anyone who prefers it.
+heartbeat = "heartbeat:Heartbeat"
 
 [tool.setuptools]
 packages = ["heartbeat"]

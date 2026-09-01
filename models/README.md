@@ -1,17 +1,20 @@
 # Models
 
-A model is a **plain Python object in its own installable package**. It
-implements no base class, imports nothing from this platform, and does not know
-that WebSockets, Unity Catalog or FastAPI exist.
+A model is a **plain Python object in its own installable package**. It knows
+nothing about WebSockets, Unity Catalog or FastAPI, and reaches the platform
+only through the `emit` callback it is handed.
 
-That is the whole contract. Everything below is detail.
+The harness finds a model **structurally** — by looking for methods, never for
+a base class. `libs/modelkit` gives you those methods for free, and using it is
+optional in the strict sense: `job/loader.py` does not import it and never
+will.
 
 ```
 models/
   heartbeat/
     pyproject.toml          name, dependencies, and ONE entry point
     heartbeat/
-      __init__.py           exports the factory
+      __init__.py           exports the class
       model.py              the actual model
 ```
 
@@ -26,7 +29,7 @@ requires-python = ">=3.11"
 dependencies = ["scipy>=1.13"]        # yours alone; nothing else pays for them
 
 [project.entry-points."dbx_leaning.models"]
-yours = "yours:build_model"           # the name DBX_MODEL takes
+yours = "yours:Yours"                 # the name DBX_MODEL takes
 
 [tool.setuptools]
 packages = ["yours"]
@@ -34,24 +37,52 @@ packages = ["yours"]
 
 ```python
 # models/yours/yours/model.py
-class Yours:
-    def __init__(self, iterations: int = 100):
-        self.iterations = iterations
-
-    def attach(self, emit, should_cancel):
-        self._emit, self._should_cancel = emit, should_cancel
-
-    def run(self):
-        for i in range(self.iterations):
-            if self._should_cancel():
-                return "CANCELLED"
-            self._emit("progress", current=i, total=self.iterations, phase="solve")
-        return "SUCCEEDED"
+from modelkit import Model
 
 
-def build_model(config=None):
-    return Yours(**(config or {}))
+class Yours(Model):
+    unit = "iterations"
+
+    def configs(self):
+        return {"iterations": 100, "tolerance": 1e-6}
+
+    def prestep(self):
+        self.total = self.iterations
+        self.solver = build_something(self.tolerance)
+
+    def step(self, i):
+        gap = self.solver.advance()
+        return {"metric": gap, "label": "gap"}
 ```
+
+That is the whole model. **`modelkit` is deliberately absent from
+`dependencies`** — it is installed once into the serverless ENVIRONMENT, not
+once per model, exactly as `pyspark` is. See `libs/modelkit/pyproject.toml`.
+
+### What the template gives you
+
+Everything a model would otherwise write again, slightly differently:
+
+| | |
+|---|---|
+| `attach` | wiring `emit` and `should_cancel` |
+| the loop | with `total`-aware percentages, or none when the total is unknown |
+| cancel polling | between steps, and inside `self.sleep()` within ~100ms |
+| progress | one message per step, `metric`/`label` lifted out of your dict |
+| logs | a start line and a finish line, so a run is legible with no UI |
+| `poststep(status)` | runs on the cancelled and failed paths too, so results survive |
+
+Return `STOP` from `step` to finish early and successfully — a solver that
+converges is `SUCCEEDED`, not interrupted. Set `total = None` for work whose
+length you cannot know; progress then carries no percentage, because a made-up
+one is worse than an absent one.
+
+### When the template does not fit
+
+Override `run()` and you are still a model. Write the object by hand with an
+`attach` and a `run` and you are still a model — that is what "discovered
+structurally" buys, and `job/loader.py`'s error messages name every method
+name it tried.
 
 `uv sync` picks it up — `[tool.uv.workspace] members = ["models/*"]` in the
 repo root's `pyproject.toml` globs the directory, so nothing central lists your
@@ -68,9 +99,13 @@ outcome, messages = run_local("yours", iterations=20)
 Same two imports, after installing the repo and your model as packages:
 
 ```python
-%pip install .. ../models/yours     # relative to the notebook's own folder
-dbutils.library.restartPython()     # required, and the usual reason it "doesn't work"
+%pip install .. ../libs/modelkit ../models/yours   # relative to the notebook
+dbutils.library.restartPython()   # required, and the usual reason it "doesn't work"
 ```
+
+Three paths: the harness, the template, and your model. A deployed job gets the
+middle one from its serverless environment; a notebook is its own environment,
+so you add it by hand.
 
 `notebooks/heartbeat.py` is a worked example — model alone, then the full run,
 then the live WebSocket, then reading the part files back. Its code cells are
@@ -79,10 +114,13 @@ executed by `tests/test_notebook.py`, so it stays true.
 To watch a run arrive at the app while it happens, pass the app's URL:
 
 ```python
-run = run_local("yours", app_url="https://<app>.databricksapps.com",
-                app_token=dbutils.secrets.get("dbx-leaning", "app-token"))
-run.observed     # did anything ARRIVE — a green status says nothing about this
-run.last_error   # and if not, why
+run = run_local(
+    "yours",
+    app_url="https://<app>.databricksapps.com",
+    app_token=dbutils.secrets.get("dbx-leaning", "app-token"),
+)
+run.observed  # did anything ARRIVE — a green status says nothing about this
+run.last_error  # and if not, why
 ```
 
 That opens the same socket a deployed job opens, through the same function, so

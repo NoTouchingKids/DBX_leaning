@@ -116,20 +116,19 @@
           "description": "One sampled point on \"how is this run doing\". Sampled, not per-iteration.",
           "properties": {
             "elapsed_seconds": {
-              "minimum": 0,
+              "minimum": 0.0,
               "title": "Elapsed Seconds",
               "type": "number"
             },
             "payload": {
-              "additionalProperties": true,
               "title": "Payload",
               "type": "object"
             },
             "percent_complete": {
               "anyOf": [
                 {
-                  "maximum": 100,
-                  "minimum": 0,
+                  "maximum": 100.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 {
@@ -206,7 +205,6 @@
               "type": "integer"
             },
             "fetch_hint": {
-              "additionalProperties": true,
               "title": "Fetch Hint",
               "type": "object"
             },
@@ -217,7 +215,6 @@
             },
             "preview": {
               "items": {
-                "additionalProperties": true,
                 "type": "object"
               },
               "title": "Preview",

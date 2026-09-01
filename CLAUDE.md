@@ -143,11 +143,25 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   is not a durability guarantee.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string
   column if the environment doesn't support it cleanly.
-- **A model is a plain Python object, not a class implementing an ABC.**
-  Duck-typed discovery (look for a known set of method/attribute names) over
-  an inheritance hierarchy — see `docs/architecture.md` for why. A model
-  emits envelope-shaped messages to a callback it's handed; it does not know
-  about WebSockets, Delta, or FastAPI.
+- **A model is discovered structurally, never by its base class.** The
+  harness looks for a known set of method names — see `docs/architecture.md`
+  for why duck typing beat an inheritance hierarchy. A model emits
+  envelope-shaped messages to a callback it's handed; it does not know about
+  WebSockets, Delta, or FastAPI.
+- **`libs/modelkit` is a template, and templates are optional.** This rule
+  used to read "not a class implementing an ABC", and `modelkit.Model` IS an
+  ABC — so read the rule as it was meant: nothing about being a model depends
+  on inheriting anything. `job/loader.py` does not import `modelkit` and never
+  will. Subclassing gets you the run loop, cancel polling, progress arithmetic
+  and an interruptible sleep for free; overriding `run()` or ignoring the
+  template entirely leaves you just as much a model.
+- **The template ships as a serverless ENVIRONMENT dependency, not a model
+  dependency.** Every model environment installs `libs/modelkit`; no model
+  declares it. That is the pattern in
+  `docs/docs-databricks-com-aws-en-compute-serverless-dependencies.md`
+  ("Create common tools to share across your workspace") and the same rule
+  `pyspark` already follows here — which is why `models/heartbeat` still says
+  `dependencies = []`.
 
 ## Repo layout (target)
 
@@ -174,6 +188,12 @@ job/            THE HARNESS. Loads a model, drives it, gets its messages onto
   (harness)     WS/RPC client, telemetry part-file writer, model loader, auth
   requirements.txt  The harness floor, and the whole environment. A model's
                 libraries are the model's own business
+libs/           SHARED LIBRARIES INSTALLED INTO THE SERVERLESS ENVIRONMENT,
+                not into any one model
+  modelkit/     The model template: implement `step`, get a Databricks job.
+                Stdlib-only, so every environment carries it for nothing.
+                Nested one level because a top-level `modelkit/` would shadow
+                the installed package as an empty namespace package
 models/         ONE INSTALLABLE PACKAGE PER MODEL, each its own distribution
                 with its own dependency list and ONE entry point. Discovered
                 by `importlib.metadata`, not by a registry — so a model in
@@ -181,7 +201,7 @@ models/         ONE INSTALLABLE PACKAGE PER MODEL, each its own distribution
                 Only `heartbeat/` on this branch; the other eleven are on `dev`
 notebooks/      Databricks notebook source (`# COMMAND ----------` cells).
                 `heartbeat.py` is the answer to "how do I work on a model from
-                a notebook": %pip install two paths, then ordinary imports.
+                a notebook": %pip install three paths, then ordinary imports.
                 tests/test_notebook.py RUNS its code cells, so it cannot rot
 uc_ddl/         Unity Catalog DDL (telemetry volume + results tables)
 lakebase_ddl/   Postgres DDL (run_status), applied at app startup
@@ -189,12 +209,9 @@ schema/         Generated JSON Schema for the wire protocol
 scripts/        Requirements/schema export, licence + sample probes
 resources/      One job definition per model, plus the app — see below
 deploy/         The deployment guide
-tests/          Offline; nothing here needs a Databricks connection
-  container/    EXCEPT these: real Docker images, one per deployable shape,
-                each seeing only what its Databricks counterpart would. Opt-in
-                (`DBX_CONTAINER_TESTS=1`), skipped otherwise. They exist because
-                a subprocess inherits sys.path and a container does not — see
-                tests/container/README.md
+tests/          Offline; nothing here needs a Databricks connection. The
+                packaging claims that a container tier used to check are now
+                checked against the real workspace instead — see below
 docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
@@ -238,11 +255,16 @@ stayed green, because pytest has the repo root on its path and the workspace
 does not. That test walks `server/`'s imports and fails if one resolves to
 something outside `app/`.
 
-`tests/container/` is the version of that check that cannot be fooled: it
-builds the app from `app/` as the Docker build context and starts it, so the
-repo is absent from the disk rather than merely unused. It also builds the
-app WITHOUT `shared/` and asserts that one fails — a green test that cannot go
-red would not have caught this either.
+There was briefly a Docker tier that ran the same check for real — the app
+built from `app/` as the build context, so the repo was absent from the disk
+rather than merely unused. **It is gone, and what replaced it is better:** the
+Databricks CLI is available in this workspace, so the deployable shapes can be
+checked against a real workspace rather than against a local imitation of one.
+A container proved the app could start without the repo; a deploy proves it
+starts on the platform, which is the claim that actually matters.
+
+The static check stays because it is instant and catches the same class of
+thing before a deploy is worth attempting.
 
 **A model depends on nothing here.** `models/heartbeat/pyproject.toml` has an
 empty `dependencies` list, and that is the proof rather than an accident of a

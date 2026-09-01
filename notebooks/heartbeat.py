@@ -20,12 +20,24 @@
 # MAGIC ## 1. Install
 # MAGIC
 # MAGIC The paths are RELATIVE to this notebook, which works because Databricks
-# MAGIC sets the working directory to the notebook's own folder. `..` is the repo
-# MAGIC root (the harness and the envelope); the second is the model.
+# MAGIC sets the working directory to the notebook's own folder. Three of them,
+# MAGIC and they are three different things:
 # MAGIC
-# MAGIC Installing them SEPARATELY is the point, not a convenience — the model is
-# MAGIC its own distribution with its own dependency list. Working on a model that
-# MAGIC needs torch? Only its line pulls torch in.
+# MAGIC | Path | What it is |
+# MAGIC |---|---|
+# MAGIC | `..` | the harness and the envelope |
+# MAGIC | `../libs/modelkit` | the shared model template |
+# MAGIC | `../models/heartbeat` | the model itself |
+# MAGIC
+# MAGIC Installing them SEPARATELY is the point, not a convenience. The model is
+# MAGIC its own distribution with its own dependency list, so a model that needs
+# MAGIC torch pulls torch in on ITS line and no other environment pays for it.
+# MAGIC
+# MAGIC `libs/modelkit` is the line a real job gets from its serverless
+# MAGIC ENVIRONMENT rather than from the model — see the job YAML, and
+# MAGIC `docs/docs-databricks-com-aws-en-compute-serverless-dependencies.md`
+# MAGIC under "Create common tools to share across your workspace". Here you add
+# MAGIC it by hand because a notebook IS its own environment.
 # MAGIC
 # MAGIC If relative paths give you trouble (a notebook opened from somewhere
 # MAGIC unexpected, an older runtime), run the cell below this one to print the
@@ -33,7 +45,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install .. ../models/heartbeat
+# MAGIC %pip install .. ../libs/modelkit ../models/heartbeat
 
 # COMMAND ----------
 
@@ -49,7 +61,7 @@ import pathlib
 ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()  # noqa: F821
 here = pathlib.Path("/Workspace" + ctx.notebookPath().get()).parent
 root = here.parent
-print(f"%pip install {root} {root}/models/heartbeat")
+print(f"%pip install {root} {root}/libs/modelkit {root}/models/heartbeat")
 
 # COMMAND ----------
 

@@ -156,7 +156,6 @@ sync:
     - "**/__pycache__/**"
     - "**/.pytest_cache/**"
     - .ruff_cache/**
-    - .delta-local/**
     - app/client/**
     - tests/**
 

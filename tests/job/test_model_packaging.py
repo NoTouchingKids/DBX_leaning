@@ -52,7 +52,11 @@ def test_models_are_discovered_by_entry_point_not_by_a_registry():
     """`[tool.dbx-leaning.models]`, `scripts/_registry.py` and a dotted path in
     DBX_MODEL are all replaced by this. A model in another repository is
     discovered identically to one in this one."""
-    assert installed_models().get("heartbeat") == "heartbeat:build_model"
+    # The CLASS, not a factory. `modelkit.Model.__init__` takes both a config
+    # dict and keywords, so the factory function a model used to need has
+    # nothing left to do — `heartbeat.build_model` survives only because it is
+    # the first name `job/loader.py` looks for and should keep working.
+    assert installed_models().get("heartbeat") == "heartbeat:Heartbeat"
     assert ENTRY_POINT_GROUP == "dbx_leaning.models"
 
 
