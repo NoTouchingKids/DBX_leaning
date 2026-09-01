@@ -67,6 +67,27 @@ surfaces.
 something at run time would fail on Free Edition's restricted egress and
 nowhere else; this is the cheap place to find out.
 
+## The daemon, and a trap worth naming
+
+The tests do not start Docker. Starting a system daemon as a side effect of
+`pytest` is more than a test should help itself to, so it is an explicit step
+and the skip message says so:
+
+```bash
+uv run python -m tests.container.harness daemon   # start it, detached
+uv run python -m tests.container.harness stop     # images survive
+```
+
+**Start it detached, or not at all.** `dockerd` never exits, so a daemon
+launched as a *tracked* background command leaves the thing that launched it
+reporting a running task forever. One did exactly that here for seven hours and
+looked, convincingly, like a seven-hour test. It was not a long test; it was not
+a test. `start_daemon()` uses `start_new_session=True` for precisely this, and
+that argument should not be dropped.
+
+For scale: the suite is ~20s with images cached and ~2-3 minutes cold. Anything
+longer than that is not these tests running.
+
 ## Running them by hand
 
 ```bash

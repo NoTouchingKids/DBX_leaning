@@ -19,11 +19,13 @@ copy the repo in even if someone edits it to try.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HERE = pathlib.Path(__file__).resolve().parent
@@ -53,6 +55,11 @@ BASE_TAG = "dbx-test-base:latest"
 PROXY_CA = pathlib.Path("/root/.ccr/ca-bundle.crt")
 
 
+#: Where a detached daemon writes. Not a temp file: the log outlives the
+#: process that started it, which is the whole point.
+DAEMON_LOG = pathlib.Path("/tmp/dbx-dockerd.log")
+
+
 class DockerUnavailable(RuntimeError):
     """Raised when there is no daemon to talk to. Tests skip on this rather
     than failing: a machine without Docker is not a broken repo."""
@@ -74,6 +81,67 @@ def docker_available() -> bool:
 
 def _run(cmd: list[str], *, timeout: int = 900) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def start_daemon(*, wait_s: int = 30) -> bool:
+    """Start `dockerd` DETACHED, and wait for its socket. Returns success.
+
+    **Detached matters, and the reason is a mistake worth not repeating.** A
+    daemon started as a tracked background command never exits, so the harness
+    that started it goes on reporting a running task indefinitely — one such
+    daemon sat there for seven hours looking like a seven-hour test. `dockerd`
+    is not a long test; it is not a test at all. `start_new_session=True` is
+    what puts it outside the caller's process group so nothing waits on it.
+
+    Not called from a fixture. Starting a system daemon as a side effect of
+    `pytest` is more than a test should help itself to, so the tests skip with
+    a message pointing here and this stays an explicit step:
+
+        uv run python -m tests.container.harness daemon
+    """
+    if docker_available():
+        return True
+
+    # The daemon does its own registry pulls and reads none of this process's
+    # environment, so a proxied machine needs the proxy in ITS config or every
+    # pull dies on the first blob. Written only when absent, and only when
+    # there is in fact a proxy to point at.
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    config = pathlib.Path("/etc/docker/daemon.json")
+    if proxy and not config.exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps(
+                {
+                    "proxies": {
+                        "http-proxy": proxy,
+                        "https-proxy": proxy,
+                        "no-proxy": "localhost,127.0.0.1,::1",
+                    }
+                },
+                indent=2,
+            )
+        )
+        print(f"wrote {config} pointing at {proxy}")
+
+    log = DAEMON_LOG.open("a")
+    subprocess.Popen(
+        ["dockerd", "--iptables=false"],
+        stdout=log,
+        stderr=log,
+        start_new_session=True,  # see the docstring — do NOT drop this
+    )
+    for _ in range(wait_s):
+        if docker_available():
+            return True
+        time.sleep(1)
+    return False
+
+
+def stop_daemon() -> None:
+    """Stop a daemon `start_daemon` started. Images survive in /var/lib/docker."""
+    subprocess.run(["pkill", "-f", "^dockerd"], check=False)
+    subprocess.run(["pkill", "-f", "containerd --config"], check=False)
 
 
 def build_base(*, quiet: bool = True) -> str:
@@ -212,10 +280,21 @@ def importable(tag: str, names: list[str]) -> dict[str, object]:
 
 
 def _cli() -> int:
-    if not docker_available():
-        print("no docker daemon", file=sys.stderr)
-        return 1
     action = sys.argv[1] if len(sys.argv) > 1 else "build"
+    if action == "daemon":
+        ok = start_daemon()
+        print("daemon up" if ok else f"daemon did not start; see {DAEMON_LOG}")
+        return 0 if ok else 1
+    if action == "stop":
+        stop_daemon()
+        print("daemon stopped; images kept")
+        return 0
+    if not docker_available():
+        print(
+            "no docker daemon — start one with:\n  uv run python -m tests.container.harness daemon",
+            file=sys.stderr,
+        )
+        return 1
     build_base(quiet=False)
     contexts = {
         "model": ROOT / "models" / "heartbeat",

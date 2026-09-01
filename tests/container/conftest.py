@@ -30,7 +30,10 @@ def _requires_docker():
     if os.environ.get("DBX_CONTAINER_TESTS") != "1":
         pytest.skip("set DBX_CONTAINER_TESTS=1 to run the container tests", allow_module_level=True)
     if not docker_available():
-        pytest.skip("no Docker daemon", allow_module_level=True)
+        pytest.skip(
+            "no Docker daemon — start one with: uv run python -m tests.container.harness daemon",
+            allow_module_level=True,
+        )
 
 
 @pytest.fixture(scope="session")
