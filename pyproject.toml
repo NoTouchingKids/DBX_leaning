@@ -181,6 +181,14 @@ include = ["app/server", "app/shared", "job", "scripts"]
 # for exactly that reason (docs/free-edition-constraints.md).
 unresolved-import = "warn"
 
+[tool.ruff.lint.per-file-ignores]
+# Databricks notebook source files. They are valid Python — that is the format
+# the workspace syncs and how they stay diffable — but they are read top to
+# bottom by a person, so an import belongs beside the cell that needs it. E402
+# (imports not at top) and F821 (`dbutils`, injected by the runtime) are the
+# notebook format showing through, not defects.
+"notebooks/*.py" = ["E402", "F821"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # `class X(str, Enum)` rather than StrEnum, deliberately: the envelope's enums

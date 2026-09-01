@@ -179,6 +179,10 @@ models/         ONE INSTALLABLE PACKAGE PER MODEL, each its own distribution
                 by `importlib.metadata`, not by a registry — so a model in
                 another repository works identically. See models/README.md.
                 Only `heartbeat/` on this branch; the other eleven are on `dev`
+notebooks/      Databricks notebook source (`# COMMAND ----------` cells).
+                `heartbeat.py` is the answer to "how do I work on a model from
+                a notebook": %pip install two paths, then ordinary imports.
+                tests/test_notebook.py RUNS its code cells, so it cannot rot
 uc_ddl/         Unity Catalog DDL (telemetry volume + results tables)
 lakebase_ddl/   Postgres DDL (run_status), applied at app startup
 schema/         Generated JSON Schema for the wire protocol

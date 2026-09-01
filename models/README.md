@@ -63,6 +63,19 @@ from job.local import run_local
 outcome, messages = run_local("yours", iterations=20)
 ```
 
+### From a Databricks notebook
+
+Same two imports, after installing the repo and your model as packages:
+
+```python
+%pip install .. ../models/yours     # relative to the notebook's own folder
+dbutils.library.restartPython()     # required, and the usual reason it "doesn't work"
+```
+
+`notebooks/heartbeat.py` is a worked example — model alone, then the full run,
+then reading the part files back. Its code cells are executed by
+`tests/test_notebook.py`, so it stays true.
+
 ## What the harness looks for
 
 Duck-typed, by name, in preference order. `job/loader.py` holds the table
