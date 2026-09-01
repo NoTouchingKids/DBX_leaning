@@ -238,3 +238,4 @@ __marimo__/
 # one tracked, because each deployable unit was synced as loose files and had
 # to carry a copy of everything it imported. Both units now install this repo
 # as a package, so there is one `shared/` and nothing to ignore.
+.vscode/settings.json
