@@ -24,7 +24,7 @@ from shared.envelope import RunStatus
 from .config import JobConfig
 from .harness import Harness
 from .telemetry import PartFileWriter
-from .ws import RpcClient
+from .ws import RpcClient, app_client
 
 log = logging.getLogger("job")
 
@@ -47,31 +47,14 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         log.info("no DBX_APP_URL — running unobserved, durable path only")
         return None
 
-    from websockets.sync.client import connect
-
-    from .auth import ingress_headers
-
-    url = cfg.ws_url
-
-    def headers() -> dict[str, str]:
-        """Both credentials, fetched fresh per connection attempt.
-
-        Two of them, on two different headers, and both are required — see
-        `job/auth.py` for why `Authorization` cannot carry the shared secret.
-
-        Fresh per attempt rather than once: the SDK caches and refreshes
-        internally, and a reconnect an hour into a run must not present a token
-        that expired forty minutes ago.
-        """
-        return ingress_headers(cfg.app_token, cfg.workspace_host)
-
-    return RpcClient(
-        url,
+    return app_client(
+        cfg.app_url,
         cfg.run_id,
-        connect=lambda: connect(url, additional_headers=headers() or None),
         on_cancel=lambda who: harness.cancel(who),
         on_replay=lambda a, b: harness.replay(a, b),
         next_seq=lambda: harness.seq.issued,
+        app_token=cfg.app_token,
+        workspace_host=cfg.workspace_host,
     )
 
 

@@ -73,8 +73,22 @@ dbutils.library.restartPython()     # required, and the usual reason it "doesn't
 ```
 
 `notebooks/heartbeat.py` is a worked example — model alone, then the full run,
-then reading the part files back. Its code cells are executed by
-`tests/test_notebook.py`, so it stays true.
+then the live WebSocket, then reading the part files back. Its code cells are
+executed by `tests/test_notebook.py`, so it stays true.
+
+To watch a run arrive at the app while it happens, pass the app's URL:
+
+```python
+run = run_local("yours", app_url="https://<app>.databricksapps.com",
+                app_token=dbutils.secrets.get("dbx-leaning", "app-token"))
+run.observed     # did anything ARRIVE — a green status says nothing about this
+run.last_error   # and if not, why
+```
+
+That opens the same socket a deployed job opens, through the same function, so
+what it proves is true of the job too. A notebook authenticates as you and a
+job as its own principal, which is what makes this the fastest way to tell
+"the app's ingress is broken" from "the job's principal lacks `CAN_USE`".
 
 ## What the harness looks for
 

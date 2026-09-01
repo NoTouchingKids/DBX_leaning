@@ -148,5 +148,8 @@ class JobConfig:
     def ws_url(self) -> str | None:
         if not self.app_url:
             return None
-        base = self.app_url.replace("https://", "wss://").replace("http://", "ws://")
-        return f"{base}/ws/job/{self.run_id}"
+        # Delegated, so a notebook driving `run_local` and a deployed job
+        # cannot derive different URLs from the same app.
+        from .ws import ws_url_for
+
+        return ws_url_for(self.app_url, self.run_id)

@@ -159,7 +159,98 @@ for part in sorted(part_dir.glob("part-*.jsonl")):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Working on a model that is not installed yet
+# MAGIC ## 4. Watching it live — the WebSocket
+# MAGIC
+# MAGIC Same call, one more argument. `app_url` opens the SAME WebSocket a
+# MAGIC deployed job opens, with the same credentials, through the same function
+# MAGIC (`job.ws.app_client`) — so what you prove here is true of the job, not
+# MAGIC just of this notebook.
+# MAGIC
+# MAGIC **This is worth doing before blaming the job.** A notebook authenticates
+# MAGIC as YOU; a job authenticates as its own principal. So this separates two
+# MAGIC questions that a `302` cannot tell apart on its own:
+# MAGIC
+# MAGIC | Here | In the job | Means |
+# MAGIC |---|---|---|
+# MAGIC | delivered > 0 | 302 | the app is fine; the JOB's principal lacks `CAN_USE` |
+# MAGIC | 302 | 302 | the app's ingress rejects everyone — check the app is running |
+# MAGIC
+# MAGIC **A live channel cannot fail a run.** Unreachable app, missing grant,
+# MAGIC expired token — all of them leave the run `SUCCEEDED` with nothing
+# MAGIC delivered, because a run nobody watched is the normal case. So a green
+# MAGIC status says nothing about the socket: check `observed`.
+
+# COMMAND ----------
+
+# Paste your app's URL to enable this section. Empty means skip, so the
+# notebook stays runnable end to end without one.
+APP_URL = ""  # e.g. "https://dbx-leaning-1234567890.aws.databricksapps.com"
+APP_TOKEN = None
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The app's own shared secret, from the workspace secret scope. It is NOT
+# MAGIC your Databricks identity and does not replace it — the two travel on
+# MAGIC different headers and the ingress needs both. `job/auth.py` has the why.
+# MAGIC
+# MAGIC The scope is a WORKSPACE scope, which is a flat namespace: `dbx-leaning`
+# MAGIC the scope, not `dbx_leaning` the schema. One character apart, and a
+# MAGIC secret created in Unity Catalog cannot be read from here.
+
+# COMMAND ----------
+
+APP_TOKEN = dbutils.secrets.get(scope="dbx-leaning", key="app-token")  # noqa: F821
+
+# COMMAND ----------
+
+if not APP_URL:
+    print("APP_URL is empty — skipping the live section")
+else:
+    run = run_local(
+        "heartbeat",
+        run_id="notebook-live-1",
+        seconds=30,
+        hz=1,
+        app_url=APP_URL,
+        app_token=APP_TOKEN,
+        on_message=lambda m: print(m["seq"], m["type"]),
+    )
+    print()
+    print("status   :", run.outcome.status)
+    print("observed :", run.observed)
+    print("delivered:", run.delivered, "of", run.outcome.live_offered, "offered")
+    print("connects :", run.connects)
+    print("error    :", run.last_error)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Reading the result
+# MAGIC
+# MAGIC Three numbers, and together they say WHICH way it failed:
+# MAGIC
+# MAGIC | | Meaning |
+# MAGIC |---|---|
+# MAGIC | `connects: 0` | never got a socket open — see `error` |
+# MAGIC | `connects: 1`, `delivered: 0` | connected, sent nothing — suspect the app's token check |
+# MAGIC | `delivered > 0` | it works. Open the app in a browser and watch the run |
+# MAGIC
+# MAGIC `error` containing **`HTTP 302`** is the one worth recognising, because it
+# MAGIC is not what it looks like. The Apps proxy answers an unauthenticated
+# MAGIC upgrade with a redirect to the OAuth login page rather than a `401`, so a
+# MAGIC credentials problem arrives dressed as a routing one. It means either no
+# MAGIC Databricks identity was presented, or the principal that was presented
+# MAGIC lacks `CAN_USE` on the app. `job/ws.py::diagnose` says this in the log.
+# MAGIC
+# MAGIC While it runs, the same messages are landing on the volume. That is not a
+# MAGIC fallback tier — the durable path runs regardless of whether anyone is
+# MAGIC watching, and section 3 above reads it back.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. Working on a model that is not installed yet
 # MAGIC
 # MAGIC `run_local` takes a NAME if the model is installed, or an import path if
 # MAGIC it is not — so a model you are still writing works before it has a

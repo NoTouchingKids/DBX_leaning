@@ -47,7 +47,7 @@ from shared.rpc import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RpcClient", "diagnose"]
+__all__ = ["RpcClient", "app_client", "diagnose", "ws_url_for"]
 
 #: Outbound records waiting to be batched. Bounded on purpose: if the app
 #: cannot keep up, the right thing is to drop live commentary, not to grow
@@ -101,6 +101,69 @@ def diagnose(exc: BaseException) -> str:
             "redirects rather than refusing."
         )
     return ""
+
+
+def ws_url_for(app_url: str, run_id: str) -> str:
+    """The app's WS endpoint for one run.
+
+    One function, because a job and a notebook that derive this differently
+    fail in the least useful way available: the notebook proves the ingress
+    works, the job connects somewhere else, and the two disagree with no error
+    anywhere. `JobConfig.ws_url` delegates here.
+    """
+    base = app_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
+    return f"{base}/ws/job/{run_id}"
+
+
+def app_client(
+    app_url: str,
+    run_id: str,
+    *,
+    on_cancel: Callable[[str | None], dict[str, Any]],
+    on_replay: Callable[[int, int | None], list[dict[str, Any]]],
+    next_seq: Callable[[], int] = lambda: 0,
+    app_token: str | None = None,
+    workspace_host: str | None = None,
+    **kwargs: Any,
+) -> RpcClient:
+    """An `RpcClient` wired to a real app, with real credentials.
+
+    Split out of `job/main.py` so a notebook gets the SAME channel a deployed
+    job gets — `job/local.py` calls this. A second wiring that merely looked
+    equivalent would make a notebook a test of itself rather than of the job.
+
+    The imports are deliberately lazy. `websockets` and `databricks-sdk` are in
+    the job's dependency set but nothing here should need them to be installed
+    in order to be imported — the unobserved path must not depend on the
+    machinery for the observed one.
+    """
+    from websockets.sync.client import connect
+
+    from .auth import ingress_headers
+
+    url = ws_url_for(app_url, run_id)
+
+    def headers() -> dict[str, str]:
+        """Both credentials, fetched fresh per connection attempt.
+
+        Two of them, on two different headers, and both are required — see
+        `job/auth.py` for why `Authorization` cannot carry the shared secret.
+
+        Fresh per attempt rather than once: the SDK caches and refreshes
+        internally, and a reconnect an hour into a run must not present a token
+        that expired forty minutes ago.
+        """
+        return ingress_headers(app_token, workspace_host)
+
+    return RpcClient(
+        url,
+        run_id,
+        connect=lambda: connect(url, additional_headers=headers() or None),
+        on_cancel=on_cancel,
+        on_replay=on_replay,
+        next_seq=next_seq,
+        **kwargs,
+    )
 
 
 class RpcClient:
