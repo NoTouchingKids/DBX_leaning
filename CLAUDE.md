@@ -141,6 +141,16 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   vending; see `job/delta.py`. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
   end-of-run** — the age bound is what caps data loss on a crash; size alone
   is not a durability guarantee.
+- **Secrets are read with `dbutils.secrets.get`, in the job.** Never a job
+  parameter — those come back from `databricks jobs get-run` and are shown in
+  the run UI — and never an environment variable, which a serverless task has
+  no field for anyway (`spark_python_task` takes only `parameters`,
+  `python_file`, `source`). A job parameter may carry the scope and key NAMES,
+  which are not credentials. `job/auth.py::read_secret` is the one place that
+  does this; its Secrets-API fallback exists solely because `run_local` runs
+  off-platform, where there is no `dbutils`. **The app is the exception and
+  cannot follow the rule:** an Apps container is not a Databricks runtime, so
+  its only route is a declared secret resource surfaced as an env var.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string
   column if the environment doesn't support it cleanly.
 - **A model is discovered structurally, never by its base class.** The

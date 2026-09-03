@@ -85,6 +85,8 @@ def run_local(
     on_message: Any = None,
     app_url: str | None = None,
     workspace_host: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
     **config: Any,
 ) -> LocalRun:
     """Drive `model` through the harness, with or without a live channel.
@@ -116,9 +118,11 @@ def run_local(
     because a run nobody watched is the normal case rather than a broken one.
     So check `observed` — a green status says nothing about the socket.
 
-    There is no credential to pass. The Databricks identity comes from the
-    SDK's default chain — in a notebook, that is you — and it is the only one
-    the ingress wants; the app's own shared secret is gone. See `job/auth.py`.
+    There is usually no credential to pass: the Databricks identity comes from
+    the SDK's default chain, which in a notebook is you. Pass `client_id` and
+    `client_secret` to authenticate as the shared ingress service principal
+    instead — the same identity a deployed job uses, which is the point of
+    being able to pass it here. See `job/auth.py`.
     """
     root = Path(telemetry_dir) if telemetry_dir else Path(tempfile.mkdtemp(prefix="dbx-local-"))
     writer = PartFileWriter(root, run_id)
@@ -143,6 +147,8 @@ def run_local(
             on_replay=harness.replay,
             next_seq=lambda: harness.seq.issued,
             workspace_host=workspace_host,
+            client_id=client_id,
+            client_secret=client_secret,
         )
         # Both, when a caller asked for both: `on_message` stays a local view
         # and the socket gets everything too. Silently replacing the callback

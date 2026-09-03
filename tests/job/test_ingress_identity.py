@@ -1,0 +1,175 @@
+"""The shared ingress identity: one principal, one grant, any number of jobs.
+
+A job's own runtime identity works and does not scale — every principal any
+job runs as would need `CAN_USE` on the app. So a job may instead authenticate
+as one shared service principal, named by `DBX_OAUTH_CLIENT_ID` with its secret
+read at run time.
+
+The rule these tests exist to hold is that **the secret is never a job
+parameter**. Parameters come back from `databricks jobs get-run` and are shown
+in the run UI, and a serverless task has no environment-variable field to use
+instead — `databricks bundle schema` gives a `spark_python_task` exactly
+`parameters`, `python_file` and `source`.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import yaml
+
+from job.auth import auth_headers, read_secret
+from job.config import JobConfig
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+class FakeConfig:
+    """Stands in for `databricks.sdk.core.Config`, recording how it was built."""
+
+    seen: dict = {}
+
+    def __init__(self, **kwargs):
+        FakeConfig.seen = kwargs
+        self.auth_type = "oauth-m2m" if kwargs.get("client_id") else "runtime"
+
+    def authenticate(self):
+        return {"Authorization": "Bearer token-for-" + str(FakeConfig.seen.get("client_id"))}
+
+
+# --- choosing an identity ---------------------------------------------------
+
+
+def test_client_credentials_are_used_when_both_are_present():
+    headers = auth_headers(
+        "https://example.cloud.databricks.com",
+        config=FakeConfig(client_id="sp-123", client_secret="shhh"),
+    )
+    assert headers["Authorization"] == "Bearer token-for-sp-123"
+
+
+def test_half_a_credential_is_not_a_credential(monkeypatch):
+    """A client id with no secret must fall back, not fail.
+
+    Handing the id alone to the SDK makes it raise, which would take down a run
+    that could perfectly well have presented the identity it already has. This
+    is not hypothetical: `read_secret` returns None when the secret cannot be
+    read, so "id present, secret missing" is the expected shape of a
+    misconfigured scope.
+    """
+    built: list[dict] = []
+
+    class Recording:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            self.auth_type = "runtime"
+
+        def authenticate(self):
+            return {"Authorization": "Bearer runtime"}
+
+    monkeypatch.setattr("databricks.sdk.core.Config", Recording)
+
+    headers = auth_headers("https://x", client_id="sp-123", client_secret=None)
+
+    assert headers == {"Authorization": "Bearer runtime"}
+    assert "client_id" not in built[0], (
+        "the id was passed without its secret; the SDK would raise instead of "
+        "using the identity this job already has"
+    )
+
+
+def test_no_credentials_at_all_is_the_runtime_identity():
+    headers = auth_headers("https://x", config=FakeConfig())
+    assert headers == {"Authorization": "Bearer token-for-None"}
+
+
+def test_a_secret_that_cannot_be_read_is_not_an_error(monkeypatch):
+    """A job then presents its runtime identity, and if that is not enough the
+    run goes unobserved — a normal state, not a failure.
+
+    Both routes are stubbed to raise rather than left to fail for real: the
+    fallback path builds a `WorkspaceClient`, and an offline test must not make
+    an API call to prove it handles one failing.
+    """
+
+    class Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("no workspace here")
+
+    monkeypatch.setattr("databricks.sdk.WorkspaceClient", Boom)
+    monkeypatch.delitem(__import__("sys").modules, "databricks.sdk.runtime", raising=False)
+
+    assert read_secret("no-such-scope", "no-such-key") is None
+
+
+# --- the config contract ----------------------------------------------------
+
+
+def test_the_job_reads_names_not_a_secret():
+    cfg = JobConfig.from_env(
+        {
+            "DBX_RUN_ID": "r1",
+            "DBX_MODEL": "heartbeat",
+            "DBX_OAUTH_CLIENT_ID": "sp-123",
+            "DBX_OAUTH_SECRET_SCOPE": "dbx-leaning",
+            "DBX_OAUTH_SECRET_KEY": "oauth-client-secret",
+        }
+    )
+    assert cfg.oauth_client_id == "sp-123"
+    assert cfg.oauth_secret_scope == "dbx-leaning"
+    assert cfg.oauth_secret_key == "oauth-client-secret"
+    assert not hasattr(cfg, "oauth_client_secret"), (
+        "the secret must not live on the config; it is read at run time"
+    )
+
+
+def test_all_three_absent_is_a_supported_deploy():
+    cfg = JobConfig.from_env({"DBX_RUN_ID": "r1", "DBX_MODEL": "heartbeat"})
+    assert cfg.oauth_client_id is None
+    assert cfg.oauth_secret_scope is None
+
+
+# --- the job definition -----------------------------------------------------
+
+
+def _heartbeat_job() -> dict:
+    doc = yaml.safe_load((ROOT / "resources" / "model_heartbeat.job.yml").read_text())
+    return doc["resources"]["jobs"]["model_heartbeat"]
+
+
+def test_no_job_parameter_carries_a_secret_value():
+    """The rule this whole file exists for.
+
+    A job parameter is readable by anyone who can see a run. Names are fine —
+    a client id identifies, a scope and key locate — but a value that IS the
+    credential must never appear here, and neither must a `{{secrets/...}}`
+    reference, which would resolve into exactly that place.
+    """
+    params = {p["name"]: str(p.get("default", "")) for p in _heartbeat_job()["parameters"]}
+
+    assert "DBX_OAUTH_CLIENT_ID" in params
+    assert "DBX_OAUTH_SECRET_SCOPE" in params
+    assert "DBX_OAUTH_SECRET_KEY" in params
+    assert "DBX_OAUTH_CLIENT_SECRET" not in params, (
+        "the secret itself must never be a job parameter"
+    )
+
+    for name, default in params.items():
+        assert "{{secrets/" not in default, (
+            f"{name} resolves a secret into a job parameter, which is visible "
+            f"in `jobs get-run` and the run UI"
+        )
+
+
+def test_every_parameter_reaches_the_task():
+    """A parameter the task is not handed is a parameter that does nothing.
+
+    Serverless tasks have no env vars, so each one has to be forwarded
+    explicitly as a `KEY={{job.parameters.KEY}}` positional. Adding a
+    parameter and forgetting this line fails silently: the job accepts it, the
+    harness never sees it.
+    """
+    job = _heartbeat_job()
+    declared = {p["name"] for p in job["parameters"]}
+    forwarded = {arg.split("=", 1)[0] for arg in job["tasks"][0]["spark_python_task"]["parameters"]}
+    assert declared == forwarded, f"declared but not forwarded: {declared - forwarded}"

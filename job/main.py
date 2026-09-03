@@ -47,6 +47,15 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         log.info("no DBX_APP_URL — running unobserved, durable path only")
         return None
 
+    # Read once per run, not per connection attempt: the secret does not
+    # rotate mid-run, and a reconnect loop should not hammer the Secrets API.
+    # The TOKEN it buys is refreshed by the SDK on every attempt.
+    client_secret = None
+    if cfg.oauth_client_id and cfg.oauth_secret_scope and cfg.oauth_secret_key:
+        from .auth import read_secret
+
+        client_secret = read_secret(cfg.oauth_secret_scope, cfg.oauth_secret_key)
+
     return app_client(
         cfg.app_url,
         cfg.run_id,
@@ -54,6 +63,8 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         on_replay=lambda a, b: harness.replay(a, b),
         next_seq=lambda: harness.seq.issued,
         workspace_host=cfg.workspace_host,
+        client_id=cfg.oauth_client_id,
+        client_secret=client_secret,
     )
 
 

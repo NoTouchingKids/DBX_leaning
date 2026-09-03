@@ -51,8 +51,33 @@ variables:
       principal Databricks Apps injects for the app itself.
     default: ""
   app_secret_scope:
-    description: Secret scope holding the token a job presents to the app.
+    description: >-
+      Workspace secret scope holding the ingress service principal's OAuth
+      secret. A WORKSPACE scope — a flat namespace, not Unity Catalog — so
+      `dbx-leaning` here is not the `dbx_leaning` schema, and the one-character
+      difference is the whole trap.
     default: dbx-leaning
+  job_ingress_client_id:
+    description: >-
+      The service principal EVERY job authenticates to the app's ingress as.
+      One principal, one CAN_USE grant on the app, any number of models —
+      including ones defined in another bundle or repository.
+
+      The alternative is each job's own runtime identity, which needs a grant
+      per principal and does not scale. `run_as` is the third option and needs
+      no secret at all, but changes the identity a job uses for everything,
+      data access included.
+
+      An id, not a credential. Empty is normal: the job falls back to its
+      runtime identity, and a job that cannot authenticate runs unobserved.
+    default: ""
+  job_ingress_secret_key:
+    description: >-
+      Key within `app_secret_scope` holding that principal's OAuth secret. The
+      job reads it at run time with `dbutils.secrets.get`; it is never a job
+      parameter, because parameters are visible in `jobs get-run` and the run
+      UI. The job's own principal therefore needs READ on the scope.
+    default: oauth-client-secret
   app_public_url:
     description: >-
       The app's externally reachable URL, handed to each job so it knows where

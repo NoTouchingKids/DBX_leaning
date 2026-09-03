@@ -144,6 +144,8 @@ def app_client(
     on_replay: Callable[[int, int | None], list[dict[str, Any]]],
     next_seq: Callable[[], int] = lambda: 0,
     workspace_host: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
     **kwargs: Any,
 ) -> RpcClient:
     """An `RpcClient` wired to a real app, with real credentials.
@@ -171,7 +173,7 @@ def app_client(
         forty minutes ago. One credential now — see `job/auth.py` for why the
         app's own shared secret is gone.
         """
-        return auth_headers(workspace_host)
+        return auth_headers(workspace_host, client_id=client_id, client_secret=client_secret)
 
     return RpcClient(
         url,

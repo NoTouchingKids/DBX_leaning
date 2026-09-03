@@ -308,12 +308,19 @@ def test_no_variable_holds_a_credential(bundle):
     """Belt and braces over the test above: nothing declared in `variables:`
     may look like a secret, whatever it is called.
 
-    `app_secret_scope` is exempt and is the reason this reads by suffix rather
-    than by substring — the NAME of a secret scope is not itself a secret, and
-    has to be a variable so a target can point at a different one.
+    The exemptions read by SUFFIX rather than by substring, and the line they
+    draw is between naming WHERE a credential lives and holding one:
+
+        *_scope        the name of a secret scope
+        *_secret_key   the key within it
+
+    Neither is a credential — both have to be variables so a target can point
+    at a different scope — while `..._secret` or `..._token` would be the value
+    itself, which belongs under `resources:` as a declared secret because
+    variables land in the deployment state.
     """
     for name in bundle["variables"]:
-        if name.endswith("_scope"):
+        if name.endswith("_scope") or name.endswith("_secret_key"):
             continue
         assert not any(word in name for word in ("secret", "password", "token", "credential")), (
             f"variable {name!r} looks like a credential; variables land in the "
