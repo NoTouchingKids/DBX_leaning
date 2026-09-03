@@ -120,12 +120,25 @@ def main() -> int:
 
     for path, content in targets().items():
         rel = path.relative_to(ROOT)
+        # `encoding="utf-8"` on BOTH, explicitly, and it is not a style choice.
+        #
+        # `Path.write_text` with no encoding uses the LOCALE encoding, which on
+        # Windows is cp1252. The generated header contains an em dash, so the
+        # file written here was cp1252 and not valid UTF-8:
+        #
+        #   b'# GENERATED \x97 do not edit'
+        #
+        # uv then refuses it outright — "failed to decode file ...: stream did
+        # not contain valid UTF-8" — and pip's behaviour on a deploy is no
+        # better for being quieter. The file had been written on Linux, where
+        # the default is already UTF-8, so this only appeared once someone
+        # regenerated it on Windows.
         if args.check:
-            current = path.read_text() if path.exists() else ""
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
             if current != content:
                 stale.append(str(rel))
             continue
-        path.write_text(content)
+        path.write_text(content, encoding="utf-8")
         print(f"wrote {rel} ({len(content.splitlines())} lines)")
 
     if args.check:

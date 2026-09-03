@@ -1,4 +1,4 @@
-# GENERATED — do not edit.
+# GENERATED â€” do not edit.
 #
 # Exported from uv.lock by scripts/export_requirements.py, so what deploys is
 # exactly what the tests ran against. To change it, edit pyproject.toml, run

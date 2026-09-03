@@ -6,7 +6,26 @@ build-backend = "setuptools.build_meta"
 name = "dbx-leaning"
 version = "0.1.0"
 description = "Modelling application platform on Databricks Free Edition"
-requires-python = "==3.12.*"
+# >=3.11, NOT ==3.12.*, because this repo deploys to TWO runtimes on two
+# different Python versions:
+#
+#   serverless jobs   3.12   environment_version 5, per
+#                            [tool.databricks.environment] below
+#   Databricks Apps   3.11   FIXED, and not by choice — an app with a
+#                            `requirements.txt` is installed with pip, and a
+#                            pip-based app is Python 3.11. Only a uv-based app
+#                            (pyproject.toml + uv.lock, and NO
+#                            requirements.txt) can pick its own version.
+#
+# `databricks environments setup-local --serverless-version 5` writes
+# `==3.12.*` here, which is right for the jobs and wrong for the app: one
+# lockfile feeds both, and a resolution valid only on 3.12 produces an
+# `app/requirements.txt` that pip may not be able to install on 3.11.
+#
+# So the floor is 3.11 and the constraint block below still pins the versions
+# serverless actually ships. If a future `setup-local` run resets this line,
+# `tests/deploy/test_bundle.py` fails and says why.
+requires-python = ">=3.11"
 
 # Core = what shared/ needs, and nothing else. shared/ is imported by both
 # app/ and job/, so anything added here is paid for by every deployment
@@ -86,7 +105,20 @@ dev = [
     "pyyaml>=6.0.3",
     "ruff>=0.4",
     "ty>=0.0.1a1",
-    "databricks-connect~=18.0.0",
+    # Added by `databricks environments setup-local`, and MARKED because it
+    # requires Python >=3.12,<3.13 — which makes the whole workspace
+    # unresolvable once `requires-python` drops to >=3.11 for the app:
+    #
+    #   Because the requested Python version (>=3.11) does not satisfy
+    #   Python>=3.12,<3.13 and databricks-connect depends on
+    #   Python>=3.12,<3.13, we can conclude that ... cannot be used.
+    #
+    # The marker confines it to the version local dev and the jobs actually
+    # run on, so the 3.11 split resolves without it. Nothing in this repo
+    # imports it: SQL goes through the Statement Execution REST API over httpx,
+    # and the job writes JSONL part files rather than using Spark. Pass
+    # `--constraints-only` to setup-local to skip adding it at all.
+    "databricks-connect~=18.0.0 ; python_version >= '3.12'",
 ]
 
 [tool.uv.workspace]

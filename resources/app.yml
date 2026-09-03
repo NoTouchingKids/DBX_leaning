@@ -246,14 +246,30 @@ resources:
           # with a matching entry under `resources:` above. That block is
           # empty of secrets now that the ingress token is gone, so this would
           # be the first one back.
-          - name: DBX_LAKEBASE_HOST
-            value: ${var.lakebase_host}
+          # THE NEXT TWO ARE COMMENTED OUT, and not because Lakebase is
+          # optional. AN EMPTY BUNDLE VARIABLE DROPS THE `value` KEY ENTIRELY.
+          # It does not resolve to `value: ""` — the resolved config is
+          # `{"name": "DBX_LAKEBASE_HOST"}` with no source at all, and
+          # `databricks bundle run` then fails the deployment with:
+          #
+          #   Error: Must specify environment variable source using either
+          #   `value` or `valueFrom`.
+          #
+          # which names neither the variable nor the file. `lakebase_host` and
+          # `lakebase_user` both default to empty, so both do this.
+          #
+          # Absent and empty mean the same thing to `server/config.py`, which
+          # reads every one of these as `e.get(...) or ""`. So nothing is lost
+          # by leaving them out — uncomment when you set the variables.
+          #
+          # - name: DBX_LAKEBASE_HOST
+          #   value: ${var.lakebase_host}
+          # - name: DBX_LAKEBASE_USER
+          #   value: ${var.lakebase_user}
           - name: DBX_LAKEBASE_DATABASE
             value: ${var.lakebase_database}
           - name: DBX_LAKEBASE_PORT
             value: ${var.lakebase_port}
-          - name: DBX_LAKEBASE_USER
-            value: ${var.lakebase_user}
           # Not `public` — see the variable's description in databricks.yml.
           - name: DBX_LAKEBASE_SCHEMA
             value: ${var.lakebase_schema}
@@ -275,8 +291,13 @@ resources:
           # The id alone does nothing — `has_client_credentials` needs both —
           # and setting it without uncommenting the secret below is reported
           # on `/healthz` rather than silently ignored.
-          - name: DBX_OAUTH_CLIENT_ID
-            value: ${var.oauth_client_id}
+          # Commented out for the same reason as the two Lakebase variables
+          # above, not only because it is opt-in: `oauth_client_id` defaults to
+          # empty, and an empty variable leaves the entry with no source at all,
+          # which fails the deployment. Uncomment BOTH lines together with the
+          # secret below.
+          # - name: DBX_OAUTH_CLIENT_ID
+          #   value: ${var.oauth_client_id}
           # - name: DBX_OAUTH_CLIENT_SECRET
           #   value_from: oauth-client-secret
 

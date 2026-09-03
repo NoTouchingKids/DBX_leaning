@@ -183,14 +183,21 @@ def test_the_bundle_declares_the_variables_the_resources_use(bundle):
     assert used <= declared, f"undeclared variables used: {sorted(used - declared)}"
 
 
-#: The parts `app/server/config.py::_lakebase_dsn` assembles a connection string from.
-#: `DBX_LAKEBASE_DSN` is the alternative whole-string form and is not used here.
+#: The parts `app/server/config.py::_lakebase_dsn` assembles a connection string
+#: from that are DECLARED in resources/app.yml. `DBX_LAKEBASE_DSN` is the
+#: alternative whole-string form and is not used here.
+#:
+#: `DBX_LAKEBASE_HOST` and `DBX_LAKEBASE_USER` are deliberately absent, and not
+#: because Lakebase is optional — see
+#: `test_no_env_entry_depends_on_a_variable_that_defaults_to_empty`.
 LAKEBASE_ENV = (
-    "DBX_LAKEBASE_HOST",
     "DBX_LAKEBASE_DATABASE",
     "DBX_LAKEBASE_PORT",
-    "DBX_LAKEBASE_USER",
 )
+
+#: Declared, and empty. Every one of these must stay commented out in
+#: resources/app.yml until its variable gets a real default.
+EMPTY_BY_DEFAULT = ("lakebase_host", "lakebase_user", "oauth_client_id")
 
 
 def bundle_app_spec() -> dict:
@@ -220,6 +227,48 @@ def test_the_app_is_wired_for_lakebase(bundle):
     env = _app_env(app)
     missing = [name for name in LAKEBASE_ENV if name not in env]
     assert not missing, f"app.yml sets no {missing} — the app cannot find Lakebase"
+
+
+def test_no_env_entry_depends_on_a_variable_that_defaults_to_empty(bundle):
+    """AN EMPTY BUNDLE VARIABLE DROPS THE `value` KEY ENTIRELY.
+
+    It does not resolve to `value: ""`. The resolved config is
+    `{"name": "DBX_LAKEBASE_HOST"}` with no source at all, and `databricks
+    bundle run` then refuses to create the app deployment:
+
+        Error: Must specify environment variable source using either
+        `value` or `valueFrom`.
+
+    which names neither the variable nor the file, and comes only from `bundle
+    run` — `bundle validate` and `bundle deploy` both pass. That is what makes
+    it worth a test: the failure is three commands downstream of its cause.
+
+    Absent and empty are the same thing to `server/config.py`, which reads all
+    of these as `e.get(...) or ""`, so commenting the entry out costs nothing.
+    """
+    declared = bundle["variables"]
+    for name, value in _app_env(bundle_app_spec()).items():
+        if not value.startswith("${var."):
+            continue
+        var = value.removeprefix("${var.").removesuffix("}")
+        assert declared.get(var, {}).get("default", "") != "", (
+            f"{name} is set from ${{var.{var}}}, which defaults to empty. The "
+            f"`value` key vanishes and `bundle run` fails — comment the entry "
+            f"out until the variable has a real default."
+        )
+
+
+def test_the_variables_known_to_be_empty_are_still_empty(bundle):
+    """Guards the test above from passing vacuously.
+
+    If one of these ever gains a real default, the entry it belongs to should
+    be uncommented — and this failing is the reminder to do it.
+    """
+    for var in EMPTY_BY_DEFAULT:
+        assert bundle["variables"][var]["default"] == "", (
+            f"{var} now has a default; uncomment its env entry in "
+            f"resources/app.yml and drop it from EMPTY_BY_DEFAULT"
+        )
 
 
 def test_every_lakebase_setting_comes_from_a_declared_variable(bundle):
@@ -287,10 +336,21 @@ def test_the_optional_service_principal_secret_is_not_declared_by_default(bundle
         "a value_from pointing at an undeclared resource fails the same way"
     )
 
-    # The id stays: it is an identifier, not a credential, and on its own it
-    # is inert — `has_client_credentials` needs both, and services.py reports
-    # the half-configured case on /healthz rather than silently falling back.
-    assert env["DBX_OAUTH_CLIENT_ID"]["value"] == "${var.oauth_client_id}"
+    # The ID GOES TOO, and for a different reason than the secret. It is an
+    # identifier rather than a credential and would be harmless to declare —
+    # but `oauth_client_id` defaults to empty, and an empty bundle variable
+    # drops the `value` key entirely, leaving an entry with no source that
+    # `bundle run` refuses. See
+    # `test_no_env_entry_depends_on_a_variable_that_defaults_to_empty`.
+    #
+    # So both halves are commented out and are uncommented together, which is
+    # what the app.yml note says to do anyway: an empty client id beside a real
+    # secret is worse than neither, because the app falls back to its injected
+    # principal while looking configured.
+    assert "DBX_OAUTH_CLIENT_ID" not in env, (
+        "declared while its variable defaults to empty — the resolved entry has "
+        "no `value`, and `bundle run` fails on it"
+    )
 
 
 def test_the_commented_secret_block_still_says_value_from(bundle):
