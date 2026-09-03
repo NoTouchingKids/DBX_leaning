@@ -1,4 +1,4 @@
-# GENERATED â€” do not edit.
+# GENERATED — do not edit.
 #
 # Exported from uv.lock by scripts/export_requirements.py, so what deploys is
 # exactly what the tests ran against. To change it, edit pyproject.toml, run
@@ -9,22 +9,24 @@
 
 annotated-doc==0.0.5
     # via fastapi
-annotated-types==0.8.0
+annotated-types==0.7.0
     # via pydantic
-anyio==4.14.2
+anyio==4.7.0
     # via
     #   httpx
     #   starlette
     #   watchfiles
-certifi==2026.7.22
+certifi==2025.4.26
     # via
     #   httpcore
     #   httpx
-click==8.4.2
+click==8.1.8
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
-    # via click
-fastapi==0.141.1
+    # via
+    #   click
+    #   uvicorn
+fastapi==0.128.8
     # via dbx-leaning
 h11==0.16.0
     # via
@@ -44,19 +46,21 @@ psycopg==3.3.4
     # via dbx-leaning
 psycopg-binary==3.3.4 ; implementation_name != 'pypy'
     # via psycopg
-pydantic==2.13.4
+pydantic==2.10.6
     # via
     #   dbx-leaning
     #   fastapi
-pydantic-core==2.46.4
+pydantic-core==2.27.2
     # via pydantic
 python-dotenv==1.2.3
     # via uvicorn
 pyyaml==6.0.3
     # via uvicorn
-starlette==1.6.0
+sniffio==1.3.1
+    # via anyio
+starlette==0.50.0
     # via fastapi
-typing-extensions==4.16.0
+typing-extensions==4.12.2
     # via
     #   anyio
     #   fastapi
@@ -65,13 +69,11 @@ typing-extensions==4.16.0
     #   pydantic-core
     #   starlette
     #   typing-inspection
-typing-inspection==0.4.4
-    # via
-    #   fastapi
-    #   pydantic
-tzdata==2026.3 ; sys_platform == 'win32'
+typing-inspection==0.4.2
+    # via fastapi
+tzdata==2024.2 ; sys_platform == 'win32'
     # via psycopg
-uvicorn==0.52.4
+uvicorn==0.40.0
     # via dbx-leaning
 uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
     # via uvicorn
