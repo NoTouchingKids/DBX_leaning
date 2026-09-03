@@ -40,12 +40,54 @@ class FakeConfig:
 # --- choosing an identity ---------------------------------------------------
 
 
+class FakeM2M:
+    """Stands in for `M2MTokenProvider` — no network, no clock."""
+
+    def __init__(self, token="tok-from-m2m"):
+        self._token = token
+        self.calls = 0
+
+    def token(self):
+        self.calls += 1
+        return self._token
+
+
 def test_client_credentials_are_used_when_both_are_present():
+    """The real branch: `client_id`/`client_secret` as KEYWORDS, the shape
+    `job/ws.py::app_client` actually calls this with. A `config=` object is
+    irrelevant here — the M2M path never looks at it, which is what
+    distinguishes it from the SDK path below."""
+    m2m = FakeM2M("tok-123")
     headers = auth_headers(
         "https://example.cloud.databricks.com",
-        config=FakeConfig(client_id="sp-123", client_secret="shhh"),
+        client_id="sp-123",
+        client_secret="shhh",
+        m2m=m2m,
     )
-    assert headers["Authorization"] == "Bearer token-for-sp-123"
+    assert headers == {"Authorization": "Bearer tok-123"}
+    assert m2m.calls == 1
+
+
+def test_a_provided_m2m_provider_is_reused_not_rebuilt():
+    """The whole point of `job/ws.py` constructing one provider per run: this
+    is what lets a reconnect a minute later reuse the cached token instead of
+    exchanging a new one."""
+    m2m = FakeM2M("tok-1")
+    for _ in range(3):
+        auth_headers("https://x", client_id="id", client_secret="secret", m2m=m2m)
+    assert m2m.calls == 3, "auth_headers must ask the provider every time"
+    # calls == 3 because FakeM2M does not cache; M2MTokenProvider's OWN cache
+    # is covered in tests/job/test_m2m.py. What this test pins is narrower:
+    # auth_headers must not construct a SECOND provider behind the caller's
+    # back when one is supplied.
+
+
+def test_no_workspace_host_means_no_exchange_is_attempted():
+    """The token endpoint is built from the workspace host; without one there
+    is nowhere to send the request, and this must not try anyway."""
+    m2m = FakeM2M()
+    assert auth_headers(None, client_id="id", client_secret="secret", m2m=m2m) == {}
+    assert m2m.calls == 0
 
 
 def test_half_a_credential_is_not_a_credential(monkeypatch):

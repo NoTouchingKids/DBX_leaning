@@ -1,28 +1,36 @@
-"""The credential for the app's ingress. One of them, and the SDK gets it.
+"""The credential for the app's ingress: the job's own identity, or a shared one.
 
-**The SDK does the OAuth.** This module used to be 193 lines that tried four
-token sources in order, cached the result, and tracked its own expiry. All of
-that is `databricks-sdk`'s job and it does it better — `Config.authenticate()`
-returns fresh headers and handles refresh, and `Config()` with no arguments
-walks the same default chain (env vars, a job's runtime identity, a PAT,
-client credentials) that the hand-rolled version was reimplementing.
+## Two paths, two mechanisms, on purpose
 
-`docs/v4-rewrite-plan.md` said to adopt the SDK for exactly this and gave the
-reason: hand-rolling it cost 343 lines and two deploy bugs. What is left here
-is the part the SDK does not decide: WHICH identity a job presents, and where
-its credential comes from.
+**No client credentials → the SDK's default chain.** `Config(host=host).authenticate()`
+resolves the job's own runtime identity — the deployed log line reads
+`auth_type=runtime`, verified against a real run. That is a broad "figure out
+who I am from wherever I am running" problem, which is exactly what the SDK is
+for; hand-rolling it cost 343 lines and two deploy bugs before it was dropped
+in favour of `Config()`. See `docs/v4-rewrite-plan.md`, "Auth: the SDK, for
+credentials only".
+
+**Client credentials present → one plain `httpx` POST, not the SDK.**
+`M2MTokenProvider` below exchanges a service principal's id and secret for a
+token at `/oidc/v1/token` itself. That is a single, fully-specified REST call —
+`grant_type=client_credentials`, HTTP Basic auth, a JSON body with
+`access_token` and `expires_in` — not a multi-source resolution problem, so
+routing it through the SDK's `Config(client_id=..., client_secret=...)` buys
+nothing but another way for the same exchange to fail. `app/server/oauth.py`
+already does the identical exchange for the app's own Lakebase credential, one
+line for one line except sync instead of async; `M2MTokenProvider` mirrors it
+rather than inventing a second shape for the same problem.
 
 ## One identity for every job
 
-By default the SDK resolves the job's own runtime identity — the deployed log
-line reads `auth_type=runtime`. That works, and it does not scale: every
-principal any job runs as needs `CAN_USE` on the app, which is per-job admin
-toil that grows with the number of models.
+By default a job's runtime identity works and does not scale: every principal
+any job runs as needs `CAN_USE` on the app, which is per-job admin toil that
+grows with the number of models.
 
-So a job may instead present a **shared ingress service principal**, named by
-`DBX_OAUTH_CLIENT_ID` with its secret read at run time. One principal, one
-`CAN_USE` grant, any number of jobs — including jobs in other bundles or other
-repositories, which is the case the tag-based discovery was already built for.
+So a job may instead present a **shared ingress service principal**. One
+principal, one `CAN_USE` grant, any number of jobs — including jobs in other
+bundles or other repositories, which is the case the tag-based discovery was
+already built for.
 
 `run_as` on the job is the other way to get one identity, and needs no secret
 at all. It is not equivalent: it changes the identity the job uses for
@@ -41,11 +49,12 @@ And job parameters are **visible**: they come back in `jobs get-run`, and they
 are shown in the run UI. A client secret passed that way is readable by anyone
 who can see a run.
 
-So the parameters carry only NAMES — a client id, a scope, a key, none of them
-secret — and the value is read at run time with `dbutils.secrets.get`. The
-secret appears in no job definition, no run history and no log.
+So the parameters carry only NAMES — a secret scope and two key names, none of
+them secret — and both halves of the identity are read at run time with
+`dbutils.secrets.get`. Neither appears in a job definition, a run parameter or
+a log.
 
-## Why one
+## Why one credential, not two
 
 There used to be two: an OAuth identity for the proxy, and `X-DBX-App-Token`,
 a shared secret the app checked itself. The second is gone, and its absence is
@@ -65,18 +74,137 @@ EVERYONE, so a typo opened the ingress rather than closing it.
 
 A job with no Databricks identity runs **unobserved**, which is the same state
 as the app being down: normal, not degraded.
-
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Any
 
 log = logging.getLogger(__name__)
 
-__all__ = ["auth_headers", "read_secret"]
+__all__ = [
+    "DEFAULT_TTL_S",
+    "REFRESH_SKEW_S",
+    "M2MTokenProvider",
+    "TokenUnavailable",
+    "auth_headers",
+    "read_secret",
+]
+
+#: Refresh this long before the token actually expires. A request that starts
+#: with four minutes left and reaches the app after it has expired is the kind
+#: of failure that shows up as an occasional, unreproducible 302.
+#:
+#: Duplicated from `app/server/oauth.py` rather than imported from it —
+#: deliberately. The job installs this repo as ONE distribution, so `server`
+#: is technically importable from here, but the job and the app are two
+#: services and the job should not come to depend on the app's module simply
+#: because setuptools happens to make it reachable. Two constants in
+#: agreement is a smaller cost than that coupling.
+REFRESH_SKEW_S = 300.0
+
+#: What a token is assumed to last when the response does not say. Short on
+#: purpose: guessing low costs an extra round trip, guessing high costs failed
+#: connections.
+DEFAULT_TTL_S = 600.0
+
+
+class TokenUnavailable(RuntimeError):
+    """The M2M exchange failed. Raised rather than returning an empty string,
+    so `auth_headers` can log a real reason instead of a silent 302."""
+
+
+class M2MTokenProvider:
+    """OAuth `client_credentials` against the workspace's own OIDC endpoint —
+    a plain form POST over `httpx`, exactly the shape in Databricks' own M2M
+    example: `POST /oidc/v1/token`, `Authorization: Basic base64(id:secret)`,
+    body `grant_type=client_credentials&scope=all-apis`.
+
+    Synchronous, unlike `app/server/oauth.py::OAuthTokenProvider` which this
+    otherwise mirrors: the job's socket thread owns no event loop (see
+    `job/ws.py`), so there is nothing here to await.
+
+    Caches a token until shortly before it expires. `job/ws.py::app_client`
+    constructs ONE of these per run and closes over it, so a reconnect an hour
+    in gets a fresh token and a reconnect a minute in gets the same one — the
+    property the SDK's own caching used to provide, before the M2M path
+    stopped going through the SDK.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        client_id: str,
+        client_secret: str,
+        *,
+        scope: str = "all-apis",
+        http: Any = None,
+        now: Any = time.monotonic,
+    ) -> None:
+        self._host = host.removeprefix("https://").removeprefix("http://").rstrip("/")
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._scope = scope
+        self._http = http
+        self._now = now
+        self._token: str | None = None
+        self._expires_at: float = 0.0
+
+    @property
+    def url(self) -> str:
+        return f"https://{self._host}/oidc/v1/token"
+
+    def token(self) -> str:
+        """A valid token, cached until it is nearly expired."""
+        if self._token is not None and self._now() < self._expires_at:
+            return self._token
+
+        access, ttl = self._fetch()
+        self._token = access
+        # max(): a TTL shorter than the skew would otherwise cache a token for
+        # a negative duration, refetching on every single connection attempt.
+        self._expires_at = self._now() + max(ttl - REFRESH_SKEW_S, ttl / 2)
+        return access
+
+    def _fetch(self) -> tuple[str, float]:
+        import httpx
+
+        client = self._http or httpx.Client(timeout=10.0)
+        try:
+            response = client.post(
+                self.url,
+                data={"grant_type": "client_credentials", "scope": self._scope},
+                auth=(self._client_id, self._client_secret),
+            )
+        except httpx.HTTPError as exc:
+            raise TokenUnavailable(f"could not reach {self.url}: {exc}") from exc
+        finally:
+            if self._http is None:
+                client.close()
+
+        if response.status_code != httpx.codes.OK:
+            # The body carries OAuth's own error code — `invalid_client` for a
+            # wrong secret, `invalid_scope` for a scope the principal does not
+            # have. Worth more than the status alone, and it contains no
+            # credential.
+            raise TokenUnavailable(
+                f"{self.url} answered {response.status_code}: {response.text[:200]}"
+            )
+
+        payload = response.json()
+        access = payload.get("access_token")
+        if not access:
+            raise TokenUnavailable(f"{self.url} returned no access_token: {sorted(payload)}")
+
+        try:
+            ttl = float(payload.get("expires_in", DEFAULT_TTL_S))
+        except (TypeError, ValueError):
+            ttl = DEFAULT_TTL_S
+        log.debug("obtained an M2M token from %s, expires_in=%s", self.url, ttl)
+        return access, ttl
 
 
 def read_secret(scope: str, key: str) -> str | None:
@@ -142,37 +270,54 @@ def auth_headers(
     *,
     client_id: str | None = None,
     client_secret: str | None = None,
+    m2m: M2MTokenProvider | None = None,
 ) -> dict[str, str]:
-    """`{"Authorization": "Bearer ..."}` from the SDK, or `{}` if there is no
-    identity to be had.
+    """`{"Authorization": "Bearer ..."}`, or `{}` if there is no identity to
+    present.
 
-    With `client_id` and `client_secret` the SDK does OAuth M2M as that
-    service principal — the shared ingress identity described above. Without
-    them it walks its default chain, which in a job resolves the job's own
-    runtime identity.
+    With `client_id` and `client_secret` this exchanges them for a token
+    itself, via `M2MTokenProvider` — the shared ingress identity. `m2m` is that
+    provider, injected so the caller controls its lifetime (one per run, so its
+    cache is worth having) and so tests need no network. Built on the fly if
+    omitted, which works but caches nothing across calls.
+
+    Without credentials it falls back to the SDK's default chain, which in a
+    job resolves the job's own runtime identity.
 
     Never raises. A job that cannot authenticate should run unobserved rather
     than fail — the durable path does not care, and a run that died because
     nobody was watching would be the tail wagging the dog.
 
-    `config` is injectable so tests need no Databricks anything.
+    `config` is injectable so the SDK path needs no Databricks anything either.
     """
+    if client_id and client_secret:
+        if not host:
+            log.info(
+                "client credentials are configured but no workspace host was given; "
+                "this run will go unobserved"
+            )
+            return {}
+        try:
+            token = (m2m or M2MTokenProvider(host, client_id, client_secret)).token()
+        except Exception as exc:  # noqa: BLE001 - no identity is a normal state
+            log.info(
+                "M2M token exchange failed (%s); this run will go unobserved if the "
+                "app is behind the Apps proxy. The durable path is unaffected.",
+                exc,
+            )
+            return {}
+        log.info("presenting a Databricks identity to the app ingress (auth_type=oauth-m2m)")
+        return {"Authorization": f"Bearer {token}"}
+
     try:
         if config is None:
             from databricks.sdk.core import Config
 
-            if client_id and client_secret:
-                # Explicit, and only when BOTH are present. A client id alone
-                # is not a credential, and passing it without the secret would
-                # make the SDK fail rather than fall through to the identity
-                # this job already has.
-                config = Config(host=host, client_id=client_id, client_secret=client_secret)
-            else:
-                # The SDK's default chain already covers a job's runtime
-                # identity, DATABRICKS_TOKEN, a PAT and client credentials from
-                # the environment. Naming sources here would be reimplementing
-                # it, which is what the 193 lines this replaced were doing.
-                config = Config(host=host) if host else Config()
+            # The SDK's default chain already covers a job's runtime identity,
+            # DATABRICKS_TOKEN, a PAT and client credentials from the
+            # environment. Naming sources here would be reimplementing it,
+            # which is what the 193 lines this module used to be were doing.
+            config = Config(host=host) if host else Config()
 
         headers = config.authenticate()
     except Exception as exc:  # noqa: BLE001 - no identity is a normal state

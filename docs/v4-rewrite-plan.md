@@ -664,6 +664,29 @@ fixes.
   REST calls, and the SDK's weight would otherwise be paid by every model
   environment.
 
+**Amendment, 2026-09-03: the SDK does the OAuth for ONE of the two identities,
+not both.** A job's own runtime identity still resolves through
+`Config().authenticate()` exactly as above — that part of this section stands,
+unchanged, verified against a real run (`auth_type=runtime`). But once a
+shared ingress service principal was introduced (one `CAN_USE` grant for every
+job, instead of one per principal), the client-credentials exchange for THAT
+identity moved off the SDK and onto a plain `httpx` POST to `/oidc/v1/token` —
+`job/auth.py::M2MTokenProvider`, sync twin of `app/server/oauth.py`'s
+`OAuthTokenProvider`, which was already doing the identical exchange for the
+app's Lakebase credential.
+
+The reasoning is the same reasoning as the Jobs API bullet just above, applied
+to a case this section had not yet met: `Config.authenticate()` earns its
+weight solving a broad, multi-source "who am I" problem — env vars, runtime
+identity, a PAT, client credentials from the environment, tried in order. A
+client-credentials exchange with both halves already in hand is not that
+problem. It is one fully-specified REST call, and routing a known call through
+a general-purpose resolver bought nothing but a second way for the same
+exchange to fail. `databricks-sdk` stays a job dependency regardless — the
+default path still needs it — so this is not a weight argument like the Jobs
+API one; it is the same "do not hand-roll OAuth" principle correctly applied
+to which OAuth was actually being asked to hand-roll.
+
 ## Scope: heartbeat, and stop there
 
 The ordering principle, and the one most different from v3: **prove comms with

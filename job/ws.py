@@ -161,19 +161,36 @@ def app_client(
     """
     from websockets.sync.client import connect
 
-    from .auth import auth_headers
+    from .auth import M2MTokenProvider, auth_headers
 
     url = ws_url_for(app_url, run_id)
 
-    def headers() -> dict[str, str]:
-        """The Databricks identity, fetched fresh per connection attempt.
+    # ONE provider for the run, not one per attempt — this is what makes its
+    # cache worth having. `M2MTokenProvider.token()` returns the same token
+    # for a reconnect a minute in and a fresh one for a reconnect an hour in;
+    # a provider rebuilt inside `headers()` would cache nothing and exchange a
+    # new token on every single attempt. `None` when there are no client
+    # credentials, in which case `auth_headers` never looks at it.
+    m2m = (
+        M2MTokenProvider(workspace_host, client_id, client_secret)
+        if (workspace_host and client_id and client_secret)
+        else None
+    )
 
-        Fresh rather than once: the SDK caches and refreshes internally, and a
-        reconnect an hour into a run must not present a token that expired
-        forty minutes ago. One credential now — see `job/auth.py` for why the
-        app's own shared secret is gone.
+    def headers() -> dict[str, str]:
+        """The Databricks identity, resolved fresh per connection attempt.
+
+        "Fresh" does not mean "refetched" — `auth_headers` calls back into
+        `m2m`'s own cache for the M2M path, and into the SDK's for the
+        default path. What matters is that a reconnect asks again rather than
+        replaying whatever it captured at the start of the run, so a token
+        that expired forty minutes ago is never the one presented forty
+        minutes later. See `job/auth.py` for why the app's own shared secret
+        is gone and one credential is all there is now.
         """
-        return auth_headers(workspace_host, client_id=client_id, client_secret=client_secret)
+        return auth_headers(
+            workspace_host, client_id=client_id, client_secret=client_secret, m2m=m2m
+        )
 
     return RpcClient(
         url,

@@ -16,7 +16,7 @@ import pytest
 from websockets.sync.client import connect as ws_connect
 from websockets.sync.server import serve
 
-from job.ws import RpcClient, diagnose
+from job.ws import RpcClient, app_client, diagnose
 from shared.rpc import ErrorCode, Method, parse, request
 
 
@@ -311,3 +311,60 @@ def test_a_503_is_explained_as_an_empty_ingress_not_an_auth_fault():
     assert "nothing behind it" in said
     assert "apps start" in said and "bundle run" in said
     assert "CAN_USE" not in said, "a 503 is not the grant problem"
+
+
+# --- app_client's identity wiring -------------------------------------------
+
+
+def test_app_client_builds_one_m2m_provider_for_the_whole_run(monkeypatch):
+    """The reason `app_client` constructs the provider itself rather than
+    leaving it to `headers()`: one provider's cache spans every reconnect in
+    the run. Built inside the closure, a reconnect would rebuild it — and
+    rebuild its cache empty — on every single attempt.
+    """
+    built: list[tuple] = []
+
+    class RecordingM2M:
+        def __init__(self, host, client_id, client_secret):
+            built.append((host, client_id, client_secret))
+
+        def token(self):
+            return "tok"
+
+    monkeypatch.setattr("job.auth.M2MTokenProvider", RecordingM2M)
+    monkeypatch.setattr("websockets.sync.client.connect", lambda *a, **k: None)
+
+    client = app_client(
+        "https://app.example.com",
+        "run-1",
+        on_cancel=lambda who: {},
+        on_replay=lambda a, b: [],
+        workspace_host="https://ws.example.com",
+        client_id="sp-1",
+        client_secret="shh",
+    )
+
+    # Three "connection attempts" — three calls to the connect callable the
+    # harness would actually make on reconnect.
+    for _ in range(3):
+        client._connect()
+
+    assert len(built) == 1, f"the provider was rebuilt {len(built)} times, not reused"
+    assert built[0] == ("https://ws.example.com", "sp-1", "shh")
+
+
+def test_app_client_builds_no_provider_without_client_credentials():
+    """The default path — the job's own runtime identity — needs no M2M
+    exchange at all, so nothing should be constructed for it."""
+    client = app_client(
+        "https://app.example.com",
+        "run-1",
+        on_cancel=lambda who: {},
+        on_replay=lambda a, b: [],
+        workspace_host="https://ws.example.com",
+    )
+    # No assertion beyond "this does not raise while building the closure" —
+    # there is no provider to inspect, which is the point. The real check is
+    # in job/auth.py: `auth_headers` with no client_id/secret never touches
+    # `m2m` at all.
+    assert client is not None

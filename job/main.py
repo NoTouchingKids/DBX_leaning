@@ -50,13 +50,23 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
     # BOTH halves come out of the secret scope, and both are read once per run
     # rather than per connection attempt: neither rotates mid-run, and a
     # reconnect loop should not hammer the Secrets API. The TOKEN they buy is
-    # refreshed by the SDK on every attempt, which is the part that expires.
+    # a separate concern — `app_client` builds one `M2MTokenProvider` for the
+    # whole run and it refreshes itself on whichever attempt needs it.
     client_id = client_secret = None
-    if cfg.has_ingress_identity:
+    # Read through locals rather than `cfg.has_ingress_identity` and back into
+    # the same three attributes: a type checker can narrow `scope is not None`
+    # for a local it just checked, but not for a property call three lines
+    # away that happens to check the same three fields.
+    scope, id_key, secret_key = (
+        cfg.oauth_secret_scope,
+        cfg.oauth_client_id_key,
+        cfg.oauth_secret_key,
+    )
+    if scope and id_key and secret_key:
         from .auth import read_secret
 
-        client_id = read_secret(cfg.oauth_secret_scope, cfg.oauth_client_id_key)
-        client_secret = read_secret(cfg.oauth_secret_scope, cfg.oauth_secret_key)
+        client_id = read_secret(scope, id_key)
+        client_secret = read_secret(scope, secret_key)
 
     return app_client(
         cfg.app_url,
