@@ -55,14 +55,9 @@ class JobConfig:
     #: Absent = no live channel at all. That is a normal case, not an error:
     #: apps run ~8h/day and jobs do not share that schedule.
     app_url: str | None = None
-    app_token: str | None = None
 
     #: The workspace, for the OAuth exchange in `job/auth.py`.
     #:
-    #: `app_token` is the app's OWN check and is not a Databricks identity;
-    #: the Apps proxy in front of the app rejects anything that is not an OAuth
-    #: token, so the two travel on different headers. Absent, the job falls
-    #: back to whatever identity the runtime already gives it.
     workspace_host: str | None = None
 
     catalog: str = "main"
@@ -127,7 +122,6 @@ class JobConfig:
             model_config=model_config,
             job_run_id=(e.get("DATABRICKS_JOB_RUN_ID") or "").strip() or None,
             app_url=app_url.rstrip("/") if app_url else None,
-            app_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             workspace_host=(e.get("DATABRICKS_HOST") or e.get("DBX_WORKSPACE_HOST") or "").strip()
             or None,
             catalog=e.get("DBX_CATALOG", "main"),

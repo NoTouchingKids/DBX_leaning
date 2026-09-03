@@ -51,26 +51,19 @@ resources:
       # once — deploy/README.md has the command.
       source_code_path: ../app
 
-      # The token a job presents on the WS/HTTP ingress. Held as a secret and
-      # injected here; the *job* never stores it — the app passes it per run
-      # as a job parameter at trigger time (app/server/routes/runs.py).
-      # `scope` here is a WORKSPACE secret scope — a flat namespace with no
-      # catalog and no schema. It is not Unity Catalog, and a secret created
-      # in UC (which appears in the catalog tree under `main.dbx_leaning`)
-      # cannot be read from here. The names differing by one character is the
-      # trap: `dbx-leaning` the scope, `dbx_leaning` the schema.
+      # THERE IS NO INGRESS SECRET, and its absence is deliberate.
       #
-      # Wrong store fails the DEPLOY, not the app:
-      #   Invalid secret resource app-token: Secret with scope dbx-leaning
-      #   and key app-token does not exist. (404 NOT_FOUND)
-      resources:
-        - name: app-token
-          description: Shared secret authenticating a job's ingress connection.
-          secret:
-            scope: ${var.app_secret_scope}
-            key: app-token
-            permission: READ
+      # A job authenticates with a Databricks OAuth token and nothing else.
+      # The Apps proxy in front of this app refuses anything without one from a
+      # principal holding CAN_USE, so the app's own shared secret was a second
+      # check on top of a platform-enforced one — see the long note in
+      # app/server/routes/rpc.py for what it cost and what its removal means.
+      #
+      # `app-token` used to be declared here as a secret resource. A declared
+      # secret is validated at DEPLOY time, so it also 404'd the whole deploy
+      # whenever the key was missing from the scope.
 
+      resources:
         # The app's durable filesystem — `uc_ddl/003_app_volume.sql`.
         #
         # A Databricks App's own disk is not storage: the app runs up to 24
@@ -250,8 +243,9 @@ resources:
           #   - name: DBX_LAKEBASE_PASSWORD
           #     value_from: lakebase-password
           #
-          # with a matching entry under `resources:` above, alongside
-          # `app-token`.
+          # with a matching entry under `resources:` above. That block is
+          # empty of secrets now that the ingress token is gone, so this would
+          # be the first one back.
           - name: DBX_LAKEBASE_HOST
             value: ${var.lakebase_host}
           - name: DBX_LAKEBASE_DATABASE
@@ -300,27 +294,3 @@ resources:
           - name: DBX_APP_PUBLIC_URL
             value: ${var.app_public_url}
 
-          # `value_from`, snake_case. BOTH SPELLINGS ARE REAL, in different
-          # files, which is why this keeps getting flipped:
-          #
-          #   app.yaml         (what the Apps runtime reads)  ->  valueFrom
-          #   resources/*.yml  (what the bundle declares)     ->  value_from
-          #
-          # This is a bundle file. `databricks bundle schema` defines only
-          # `value_from` under `resources.apps.*.config.env`, and the CLI
-          # translates it into `valueFrom` in the app.yaml it generates. CLI
-          # v1.13.0 says so out loud rather than failing:
-          #
-          #   Warning: Use 'value_from' instead of 'valueFrom'
-          #   The field 'valueFrom' should be 'value_from' (snake_case).
-          #   The 'valueFrom' field will be ignored.
-          #
-          # "Ignored" is the whole problem. An ignored token means the app
-          # starts with DBX_APP_TOKEN empty, and per
-          # `app/server/routes/ingest.py::_authorised` an empty token is the
-          # development posture that accepts EVERYONE — an open job ingress.
-          # A warning is cheap to scroll past; the failure is silent.
-          #
-          # `tests/deploy/test_bundle.py` asserts the spelling.
-          - name: DBX_APP_TOKEN
-            value_from: app-token

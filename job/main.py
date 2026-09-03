@@ -53,7 +53,6 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         on_cancel=lambda who: harness.cancel(who),
         on_replay=lambda a, b: harness.replay(a, b),
         next_seq=lambda: harness.seq.issued,
-        app_token=cfg.app_token,
         workspace_host=cfg.workspace_host,
     )
 

@@ -68,18 +68,39 @@ def test_the_command_binds_the_port_the_platform_assigns():
     assert not any(part.isdigit() for part in command), f"hardcoded port in {command}"
 
 
-def test_the_ingress_token_comes_from_the_secret_in_both():
-    """And in each file's own spelling. `app.yaml` — the file the RUNTIME
-    reads — takes `valueFrom`; a bundle resource takes `value_from`. Getting
-    either wrong is silent: the app starts with DBX_APP_TOKEN empty, which
-    `server/routes/ingest.py::_authorised` treats as accept-everyone.
+def test_a_secret_backed_env_uses_each_file_s_own_spelling():
+    """BOTH SPELLINGS ARE REAL, in different files, and getting it wrong is
+    silent:
+
+        app.yaml         (what the Apps runtime reads)  ->  valueFrom
+        resources/*.yml  (what the bundle declares)     ->  value_from
+
+    `databricks bundle schema` defines only `value_from` under
+    `resources.apps.*.config.env`, and the CLI translates it. Spelling it
+    `valueFrom` there does not fail the deploy — CLI v1.13.0 warns that "The
+    'valueFrom' field will be ignored" and carries on, leaving the variable
+    empty at runtime.
+
+    This used to pin one key, `DBX_APP_TOKEN`. That env is gone with the
+    ingress secret, so the test is generalised rather than deleted: it holds
+    for whatever secret comes next (a Lakebase password is the likely one) and
+    passes vacuously until then. The trap outlived the token.
     """
     runtime = {e["name"]: e for e in _app_yaml()["env"]}
     bundle = {e["name"]: e for e in _resource_config()["env"]}
 
-    assert runtime["DBX_APP_TOKEN"]["valueFrom"] == "app-token"
-    assert "value" not in runtime["DBX_APP_TOKEN"], "the token must never be a literal"
-    assert bundle["DBX_APP_TOKEN"]["value_from"] == "app-token"
+    for name, entry in runtime.items():
+        assert "value_from" not in entry, (
+            f"{name} in app.yaml uses the BUNDLE spelling; the runtime reads "
+            f"valueFrom and would see nothing"
+        )
+    for name, entry in bundle.items():
+        assert "valueFrom" not in entry, (
+            f"{name} in resources/app.yml uses the app.yaml spelling; the CLI "
+            f"ignores it with a warning and the app starts without it"
+        )
+        if "value_from" in entry:
+            assert "value" not in entry, f"{name} is both a secret and a literal"
 
 
 #: `app.yaml` cannot interpolate, so these are literals that must match the

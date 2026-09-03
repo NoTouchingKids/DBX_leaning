@@ -44,7 +44,6 @@ JOB_PARAMETER_NAMES = frozenset(
         "DBX_CATALOG",
         "DBX_SCHEMA",
         "DBX_APP_URL",
-        "DBX_APP_TOKEN",
     }
 )
 
@@ -67,8 +66,6 @@ def build_job_parameters(
     if app_config.public_url:
         # Where to attach. Absent is fine — the run proceeds unobserved.
         parameters["DBX_APP_URL"] = app_config.public_url
-    if app_config.job_token:
-        parameters["DBX_APP_TOKEN"] = app_config.job_token
     return parameters
 
 

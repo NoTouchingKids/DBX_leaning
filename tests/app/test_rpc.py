@@ -246,19 +246,20 @@ def test_a_job_that_disconnects_mid_call_fails_the_caller_immediately(app_and_hu
     asyncio.run(scenario())
 
 
-def test_an_unauthorised_job_is_closed_rather_than_ingested(app_and_hub):
-    client, _ = _client(app_and_hub, job_token="s3cret")
-    with pytest.raises(Exception):  # noqa: B017 - starlette raises on a rejected upgrade
-        with client.websocket_connect("/ws/job/r1") as ws:
-            ws.receive_text()
+def test_a_job_socket_needs_no_credential_from_the_app(app_and_hub):
+    """The app authenticates nothing; the Databricks Apps proxy does.
 
+    This replaces two tests that asserted the opposite — a shared secret on
+    `X-DBX-App-Token`, rejected when absent or wrong. The proxy in front of a
+    deployed app refuses anything without a Databricks OAuth token from a
+    principal holding CAN_USE, so that check sat on top of a platform-enforced
+    one and failed OPEN when unset: no token configured meant accept everyone.
 
-def test_the_right_token_on_the_right_header_is_accepted(app_and_hub):
-    """Two credentials, two headers. `Authorization` belongs to the Apps proxy;
-    a job that puts the shared secret there is rejected before this code runs,
-    and the run goes unobserved with nothing in the app's log to say so."""
-    client, hub = _client(app_and_hub, job_token="s3cret")
-    with client.websocket_connect("/ws/job/r1", headers={"x-dbx-app-token": "s3cret"}) as ws:
+    What this test pins is therefore a deliberate property, not an oversight —
+    and `app/server/routes/rpc.py` carries the note about what it means.
+    """
+    client, hub = _client(app_and_hub)
+    with client.websocket_connect("/ws/job/r1") as ws:
         ws.send_text(request(Method.PING, {}, id=1).decode())
         assert json.loads(ws.receive_text())["result"]["pong"] is True
         assert hub.job_sockets.is_connected("r1")

@@ -82,11 +82,6 @@ class AppConfig:
     #: cannot drift.
     lakebase_schema: str = DEFAULT_LAKEBASE_SCHEMA
 
-    #: Shared secret a job presents on the WS/push ingress. Distinct from any
-    #: user auth: the platform proxy authenticates humans, this authenticates
-    #: the job process.
-    job_token: str | None = None
-
     reconcile_on_startup: bool = True
 
     #: Where the built React bundle lives. Databricks Apps has no Node
@@ -175,7 +170,6 @@ class AppConfig:
             lakebase_dsn=lakebase_dsn,
             lakebase_schema=(e.get("DBX_LAKEBASE_SCHEMA") or "").strip() or DEFAULT_LAKEBASE_SCHEMA,
             max_concurrent_runs=int(e.get("DBX_MAX_CONCURRENT_RUNS", "5")),
-            job_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
             reconcile_on_startup=_flag("DBX_RECONCILE_ON_STARTUP", True),
             frontend_dist=(e.get("DBX_FRONTEND_DIST") or "").strip() or "dist",
             app_volume=(e.get("DBX_APP_VOLUME") or "").strip() or None,

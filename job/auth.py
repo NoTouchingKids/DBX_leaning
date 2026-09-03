@@ -1,4 +1,4 @@
-"""Credentials for the app's ingress. Two of them, on two headers.
+"""The credential for the app's ingress. One of them, and the SDK gets it.
 
 **The SDK does the OAuth.** This module used to be 193 lines that tried four
 token sources in order, cached the result, and tracked its own expiry. All of
@@ -12,20 +12,27 @@ reason: hand-rolling it cost 343 lines and two deploy bugs. What is left here
 is the part the SDK does not know about — that this platform needs *two*
 credentials, on *two* headers, and why.
 
-## Why two
+## Why one
+
+There used to be two: an OAuth identity for the proxy, and `X-DBX-App-Token`,
+a shared secret the app checked itself. The second is gone, and its absence is
+the point.
 
 `Authorization` belongs to the Databricks Apps **proxy**, which sits in front
-of the app. It answers an unauthenticated upgrade with a **302 to the OAuth
-login page** — never a 401 — so a job with no identity does not get a clean
-refusal, it gets a redirect that names nothing. See `job/ws.py::diagnose`.
+of the app and lets nothing through without a Databricks OAuth token from a
+principal holding `CAN_USE`. That is platform-enforced, and the 302 it answers
+an unauthenticated upgrade with — never a 401 — is the proof; see
+`job/ws.py::diagnose`.
 
-`X-DBX-App-Token` is the **app's own** shared secret, checked in
-`app/server/routes/rpc.py` long after the proxy has already decided. Putting
-the shared secret in `Authorization` is not a fallback — it is a rejected
-handshake, because the proxy will not accept a non-OAuth value there.
+So by the time a request reaches the app, the platform has already
+authenticated it. A second shared secret added a secret to create and rotate, a
+job parameter to carry it, a deploy-time resource that 404s the deploy when
+absent, and — worst — a silent failure: an unset token made the app accept
+EVERYONE, so a typo opened the ingress rather than closing it.
 
 A job with no Databricks identity runs **unobserved**, which is the same state
 as the app being down: normal, not degraded.
+
 """
 
 from __future__ import annotations
@@ -35,10 +42,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-__all__ = ["APP_TOKEN_HEADER", "ingress_headers", "auth_headers"]
-
-#: Where the app's own shared secret travels. NOT `Authorization` — see above.
-APP_TOKEN_HEADER = "X-DBX-App-Token"
+__all__ = ["auth_headers"]
 
 
 def auth_headers(host: str | None = None, config: Any = None) -> dict[str, str]:
@@ -83,19 +87,3 @@ def auth_headers(host: str | None = None, config: Any = None) -> dict[str, str]:
     auth_type = getattr(config, "auth_type", None) or "unknown"
     log.info("presenting a Databricks identity to the app ingress (auth_type=%s)", auth_type)
     return dict(headers)
-
-
-def ingress_headers(
-    app_token: str | None, host: str | None = None, config: Any = None
-) -> dict[str, str]:
-    """Both halves, on their own headers.
-
-    Synchronous, unlike the version this replaces. That was `async` because v3's
-    harness was asyncio; the socket thread now owns no event loop, and making
-    the caller bridge one to fetch a token was a cost with nothing on the other
-    side of it.
-    """
-    headers = auth_headers(host, config)
-    if app_token:
-        headers[APP_TOKEN_HEADER] = app_token
-    return headers

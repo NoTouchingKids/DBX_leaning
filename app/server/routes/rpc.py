@@ -43,33 +43,32 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["rpc"])
 
 
-#: Where a job presents the app's own shared secret.
-#:
-#: NOT `Authorization`. That header belongs to the Databricks Apps proxy, which
-#: sits in front of this app and lets nothing through without a Databricks
-#: OAuth token — so a job that put the shared secret there had its handshake
-#: rejected before this code ran, and the run went unobserved with nothing in
-#: the app's log to say so. Two credentials, two headers; see `job/auth.py`.
-APP_TOKEN_HEADER = "x-dbx-app-token"
-
-
-def _presented(headers: Any) -> str | None:
-    """The shared secret, from its own header or the legacy one.
-
-    `Authorization` is still read so a local dev stack — no proxy in front, no
-    OAuth to present — keeps working unchanged.
-    """
-    return headers.get(APP_TOKEN_HEADER) or headers.get("authorization")
-
-
-def _authorised(hub: ServiceHub, presented: str | None) -> bool:
-    expected = hub.config.job_token
-    if not expected:
-        return True  # nothing configured: development posture
-    if not presented:
-        return False
-    scheme, _, token = presented.partition(" ")
-    return token.strip() == expected if scheme.lower() == "bearer" else presented == expected
+# THE PROXY IS THE GATE, and this app authenticates nothing itself.
+#
+# Databricks Apps sits a proxy in front of this process that lets nothing
+# through without a Databricks OAuth token from a principal holding `CAN_USE`
+# on the app. It is platform-enforced, and the proof is the shape of its
+# refusal: an unauthenticated upgrade gets a **302 to the OAuth login page**,
+# never a 401, so nothing unauthenticated has ever reached this function.
+#
+# There used to be a second check here — `X-DBX-App-Token`, a shared secret
+# from the workspace secret scope, carried to the job as a job parameter at
+# trigger time. It is gone, and what it cost was out of all proportion to what
+# it added on top of the proxy:
+#
+#   * a secret to create, grant and rotate;
+#   * a declared app resource, which is validated at DEPLOY time and 404s the
+#     whole deploy when the key is absent;
+#   * a `DBX_APP_TOKEN` job parameter, declared on both sides of
+#     JOB_PARAMETER_NAMES because Databricks rejects an undeclared one;
+#   * and a silent failure mode that pointed the wrong way — an unset token
+#     meant `return True`, so a typo opened the ingress instead of closing it.
+#
+# **The consequence, stated plainly:** anything that can reach this app can
+# open a job socket. On Databricks that set is exactly the principals granted
+# `CAN_USE`, which is the same set the proxy already trusts. If this app is
+# ever run somewhere WITHOUT a proxy in front of it, it is unauthenticated —
+# so do not.
 
 
 @router.websocket("/ws/job/{run_id}")
@@ -78,10 +77,6 @@ async def job_socket(websocket: WebSocket, run_id: str) -> None:
     if hub is None:
         await websocket.close(code=1011, reason="services not initialised")
         return
-    if not _authorised(hub, _presented(websocket.headers)):
-        await websocket.close(code=1008, reason="unauthorised")
-        return
-
     await websocket.accept()
     hub.job_sockets.register(run_id, websocket)
     log.info("job attached for run %s", run_id)

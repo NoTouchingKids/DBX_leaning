@@ -84,7 +84,6 @@ def run_local(
     roll_every: float = 1.0,
     on_message: Any = None,
     app_url: str | None = None,
-    app_token: str | None = None,
     workspace_host: str | None = None,
     **config: Any,
 ) -> LocalRun:
@@ -117,10 +116,9 @@ def run_local(
     because a run nobody watched is the normal case rather than a broken one.
     So check `observed` — a green status says nothing about the socket.
 
-    Both credentials are optional and both are usually needed against a
-    deployed app: `app_token` is the app's own shared secret, and the
-    Databricks identity comes from the SDK's default chain (in a notebook, you).
-    See `job/auth.py` for why they travel on different headers.
+    There is no credential to pass. The Databricks identity comes from the
+    SDK's default chain — in a notebook, that is you — and it is the only one
+    the ingress wants; the app's own shared secret is gone. See `job/auth.py`.
     """
     root = Path(telemetry_dir) if telemetry_dir else Path(tempfile.mkdtemp(prefix="dbx-local-"))
     writer = PartFileWriter(root, run_id)
@@ -144,7 +142,6 @@ def run_local(
             on_cancel=harness.cancel,
             on_replay=harness.replay,
             next_seq=lambda: harness.seq.issued,
-            app_token=app_token,
             workspace_host=workspace_host,
         )
         # Both, when a caller asked for both: `on_message` stays a local view

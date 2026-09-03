@@ -44,7 +44,7 @@ that work rather than tuned values.
 
 **Answered: it needs both, on different headers.**
 
-`app/server/routes/ingest.py` checks a shared `DBX_APP_TOKEN`, which authenticates the
+`app/server/routes/rpc.py` used to check a shared `DBX_APP_TOKEN`, which authenticated the
 job *process* and skips entirely when none is configured (development
 posture). That is not a Databricks identity, and the Apps proxy in front of
 the app lets nothing through without one — so a job presenting the shared

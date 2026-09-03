@@ -1,13 +1,18 @@
-"""The two credentials, and what happens when there is only one.
+"""One credential, and what happens when there is none.
 
-Short, because the OAuth is the SDK's now. What is worth testing is the part
-the SDK does not know about: that this platform needs two credentials on two
-different headers, and that a job with neither still runs.
+Short, because the OAuth is the SDK's now. What is left worth testing is the
+part the SDK does not decide: that a job which cannot authenticate still runs.
+
+This file used to assert the opposite shape — two credentials on two headers,
+`Authorization` for the proxy and `X-DBX-App-Token` for the app's own check.
+The second is gone. The Apps proxy refuses anything without a Databricks OAuth
+token from a principal holding CAN_USE, so the app's own secret was a second
+check on top of a platform-enforced one, and it failed open when unset.
 """
 
 from __future__ import annotations
 
-from job.auth import APP_TOKEN_HEADER, auth_headers, ingress_headers
+from job.auth import auth_headers
 
 
 class FakeConfig:
@@ -21,70 +26,28 @@ class FakeConfig:
         return self._headers
 
 
-def test_both_credentials_travel_on_their_own_headers():
-    """`Authorization` is the Apps proxy's; the shared secret is the app's own.
-
-    Putting the secret in `Authorization` is not a fallback — the proxy will
-    not accept a non-OAuth value there, so the handshake is rejected before
-    the app ever sees it.
-    """
-    headers = ingress_headers("s3cret", config=FakeConfig({"Authorization": "Bearer abc"}))
-    assert headers["Authorization"] == "Bearer abc"
-    assert headers[APP_TOKEN_HEADER] == "s3cret"
+def test_the_identity_travels_on_authorization():
+    """`Authorization` belongs to the Apps proxy, and is the only header the
+    ingress wants. Nothing of ours is added beside it."""
+    headers = auth_headers(config=FakeConfig({"Authorization": "Bearer abc"}))
+    assert headers == {"Authorization": "Bearer abc"}
 
 
 def test_no_databricks_identity_is_a_normal_state_not_a_failure():
     """A job that cannot authenticate runs unobserved, which is the same state
     as the app being down. Raising here would let "nobody was watching" kill a
     run whose durable path is entirely fine."""
-    headers = ingress_headers("s3cret", config=FakeConfig(raises=RuntimeError("no creds")))
-
-    assert "Authorization" not in headers
-    assert headers[APP_TOKEN_HEADER] == "s3cret", "the app's own secret still travels"
+    assert auth_headers(config=FakeConfig(raises=RuntimeError("no creds"))) == {}
 
 
-def test_no_app_token_still_sends_the_identity():
-    """An empty DBX_APP_TOKEN is the development posture — the app accepts
-    everyone — but the proxy in front of it does not, so the identity is still
-    required."""
-    headers = ingress_headers(None, config=FakeConfig({"Authorization": "Bearer abc"}))
-    assert headers == {"Authorization": "Bearer abc"}
-
-
-def test_a_job_with_nothing_at_all_gets_an_empty_dict_rather_than_an_error():
-    assert ingress_headers(None, config=FakeConfig(raises=RuntimeError("nope"))) == {}
+def test_an_sdk_that_returns_nothing_is_treated_as_no_identity():
+    """Not an empty `Authorization` header. A blank credential presented to the
+    proxy is refused the same as none, but reads in a log as though one was
+    sent."""
+    assert auth_headers(config=FakeConfig(None)) == {}
+    assert auth_headers(config=FakeConfig({})) == {}
 
 
 def test_auth_headers_never_raises_whatever_the_sdk_does():
     for boom in (RuntimeError("x"), ValueError("y"), OSError("z")):
         assert auth_headers(config=FakeConfig(raises=boom)) == {}
-
-
-def test_a_successful_auth_says_so_rather_than_being_silent(caplog):
-    """The absence of a failure line is not evidence of success.
-
-    A real run on 2026-08-31 got six 302s with no "no credential" line, and
-    the only way to tell "no identity" from "an identity the app rejects" was
-    to notice which log line was MISSING. Both present as a 302, and they have
-    different fixes, so the successful path has to speak.
-    """
-    import logging
-
-    with caplog.at_level(logging.INFO, logger="job.auth"):
-        auth_headers(config=FakeConfig({"Authorization": "Bearer abc"}))
-
-    assert any("presenting a Databricks identity" in r.message for r in caplog.records)
-
-
-def test_the_auth_type_is_named_so_the_source_is_not_a_guess(caplog):
-    """Which of the SDK's chain answered decides where to look next — a job's
-    runtime identity and a stray PAT fail differently."""
-    import logging
-
-    config = FakeConfig({"Authorization": "Bearer abc"})
-    config.auth_type = "oauth-m2m"
-
-    with caplog.at_level(logging.INFO, logger="job.auth"):
-        auth_headers(config=config)
-
-    assert any("auth_type=oauth-m2m" in r.getMessage() for r in caplog.records)

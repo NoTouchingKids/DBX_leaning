@@ -116,9 +116,10 @@ def diagnose(exc: BaseException) -> str:
         )
     if "401" in text or "403" in text:
         return (
-            "the app refused the handshake outright. A 401/403 here is the "
-            "APP's own check (DBX_APP_TOKEN), not the proxy's — the proxy "
-            "redirects rather than refusing."
+            "the app refused the handshake outright. The proxy redirects "
+            "rather than refusing, so a 401/403 came from the app itself — "
+            "which no longer authenticates anything, so suspect a route that "
+            "does not exist rather than a credential."
         )
     return ""
 
@@ -142,7 +143,6 @@ def app_client(
     on_cancel: Callable[[str | None], dict[str, Any]],
     on_replay: Callable[[int, int | None], list[dict[str, Any]]],
     next_seq: Callable[[], int] = lambda: 0,
-    app_token: str | None = None,
     workspace_host: str | None = None,
     **kwargs: Any,
 ) -> RpcClient:
@@ -159,21 +159,19 @@ def app_client(
     """
     from websockets.sync.client import connect
 
-    from .auth import ingress_headers
+    from .auth import auth_headers
 
     url = ws_url_for(app_url, run_id)
 
     def headers() -> dict[str, str]:
-        """Both credentials, fetched fresh per connection attempt.
+        """The Databricks identity, fetched fresh per connection attempt.
 
-        Two of them, on two different headers, and both are required — see
-        `job/auth.py` for why `Authorization` cannot carry the shared secret.
-
-        Fresh per attempt rather than once: the SDK caches and refreshes
-        internally, and a reconnect an hour into a run must not present a token
-        that expired forty minutes ago.
+        Fresh rather than once: the SDK caches and refreshes internally, and a
+        reconnect an hour into a run must not present a token that expired
+        forty minutes ago. One credential now — see `job/auth.py` for why the
+        app's own shared secret is gone.
         """
-        return ingress_headers(app_token, workspace_host)
+        return auth_headers(workspace_host)
 
     return RpcClient(
         url,

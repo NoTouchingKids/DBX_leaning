@@ -58,12 +58,6 @@ env:
   - name: DBX_APP_VOLUME
     value: /Volumes/main/dbx_leaning/app_store
 
-  # The token a job presents on the WS/HTTP ingress, from the secret declared
-  # under `resources:` in resources/app.yml. An EMPTY token is the development
-  # posture that accepts everyone (server/routes/ingest.py::_authorised), so a
-  # typo here is an open ingress rather than a failure.
-  - name: DBX_APP_TOKEN
-    valueFrom: app-token
 
   # Who the app authenticates AS — one service principal for the Postgres
   # password (an OAuth token; Lakebase takes nothing else unless

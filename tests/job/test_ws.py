@@ -285,11 +285,12 @@ def test_an_ingress_redirect_is_explained_rather_than_relayed(text):
 
 
 def test_a_refusal_is_distinguished_from_a_redirect():
-    """A 401/403 is the APP's own token check, which happens well after the
-    proxy has already decided — so it points somewhere different."""
+    """The proxy redirects rather than refusing, so a 401/403 came from the app
+    itself — which now authenticates nothing, so it is not a credential."""
     said = diagnose(ValueError("server rejected WebSocket connection: HTTP 403"))
-    assert "DBX_APP_TOKEN" in said
-    assert "CAN_USE" not in said
+    assert said
+    assert "CAN_USE" not in said, "that is the 302, and sending someone there wastes the trip"
+    assert "credential" in said
 
 
 def test_an_ordinary_failure_is_not_editorialised():

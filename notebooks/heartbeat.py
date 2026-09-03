@@ -197,22 +197,18 @@ for part in sorted(part_dir.glob("part-*.jsonl")):
 # Paste your app's URL to enable this section. Empty means skip, so the
 # notebook stays runnable end to end without one.
 APP_URL = ""  # e.g. "https://dbx-leaning-1234567890.aws.databricksapps.com"
-APP_TOKEN = None
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC The app's own shared secret, from the workspace secret scope. It is NOT
-# MAGIC your Databricks identity and does not replace it — the two travel on
-# MAGIC different headers and the ingress needs both. `job/auth.py` has the why.
+# MAGIC There is no token to fetch, and that is the change. A job — or this
+# MAGIC notebook — authenticates to the app's ingress with a Databricks OAuth
+# MAGIC token and nothing else, and the SDK produces it from whoever you are.
 # MAGIC
-# MAGIC The scope is a WORKSPACE scope, which is a flat namespace: `dbx-leaning`
-# MAGIC the scope, not `dbx_leaning` the schema. One character apart, and a
-# MAGIC secret created in Unity Catalog cannot be read from here.
-
-# COMMAND ----------
-
-APP_TOKEN = dbutils.secrets.get(scope="dbx-leaning", key="app-token")  # noqa: F821
+# MAGIC The app used to check a second, shared secret of its own. It sat on top
+# MAGIC of a check the platform already enforces (the Apps proxy refuses anything
+# MAGIC without an OAuth token from a `CAN_USE` principal) and it failed the
+# MAGIC wrong way when unset — an empty secret meant "accept everyone".
 
 # COMMAND ----------
 
@@ -225,7 +221,6 @@ else:
         seconds=30,
         hz=1,
         app_url=APP_URL,
-        app_token=APP_TOKEN,
         on_message=lambda m: print(m["seq"], m["type"]),
     )
     print()

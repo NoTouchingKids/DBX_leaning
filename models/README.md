@@ -114,11 +114,7 @@ executed by `tests/test_notebook.py`, so it stays true.
 To watch a run arrive at the app while it happens, pass the app's URL:
 
 ```python
-run = run_local(
-    "yours",
-    app_url="https://<app>.databricksapps.com",
-    app_token=dbutils.secrets.get("dbx-leaning", "app-token"),
-)
+run = run_local("yours", app_url="https://<app>.databricksapps.com")
 run.observed  # did anything ARRIVE — a green status says nothing about this
 run.last_error  # and if not, why
 ```

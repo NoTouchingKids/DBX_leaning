@@ -42,30 +42,30 @@ does not add a column to a table that already exists.
 > appears in the catalog tree under a catalog and schema — `main.dbx_leaning`
 > — and the app cannot read it: `resources/app.yml` resolves
 > `secret: { scope, key }` against the **workspace** secret namespace, which
-> is FLAT. `app_secret_scope: dbx-leaning` means a workspace scope literally
-> named `dbx-leaning`, not the `dbx_leaning` schema, and the resemblance
-> between those two names is the whole trap.
+> is FLAT — a workspace scope literally named `dbx-leaning` is not the
+> `dbx_leaning` schema, and the resemblance between those two names is the
+> whole trap. The Secrets API says so itself: `create-scope
+> --scope-backend-type` takes only `DATABRICKS` or `AZURE_KEYVAULT`. There is
+> no UC backend, and `databricks secrets list-scopes` is the check.
 >
-> The Secrets API says so itself — `create-scope --scope-backend-type` takes
-> only `DATABRICKS` or `AZURE_KEYVAULT`. There is no UC backend.
->
-> Putting it in the wrong store fails the deploy, not the app:
+> **You do not need a scope for this deploy.** There are no declared secrets
+> left: the ingress token is gone (below), and the optional service-principal
+> secret ships commented out. Keep the note because a declared secret is
+> validated at DEPLOY time, so the first one you add fails the whole deploy if
+> it is in the wrong store:
 >
 > ```
-> Invalid secret resource app-token: Secret with scope dbx-leaning and key
-> app-token does not exist. (404 NOT_FOUND)
+> Invalid secret resource <name>: Secret with scope dbx-leaning and key
+> <name> does not exist. (404 NOT_FOUND)
 > ```
->
-> `databricks secrets list-scopes` is the check.
 
-The token a job presents to the app. The app reads it from a secret; the job
-never stores it at all — the app passes it per run as a job parameter at
-trigger time.
-
-```bash
-databricks secrets create-scope dbx-leaning
-databricks secrets put-secret dbx-leaning app-token --string-value "$(openssl rand -hex 32)"
-```
+**2. Nothing.** There used to be an ingress token here — a shared secret the
+app checked and handed to each run as a job parameter. It is gone. A job
+authenticates with a Databricks OAuth token and nothing else, which the SDK
+produces from the job's own runtime identity, and the Apps proxy already
+refuses anything without one from a principal holding `CAN_USE`. The app's own
+check sat on top of that and failed open when unset. See
+`app/server/routes/rpc.py`.
 
 **3. A warehouse id**, for the app's read path only (backfill and startup
 reconciliation). Nothing writes through it — see `docs/architecture.md` on why
@@ -282,14 +282,18 @@ Two different authentications happen on one request, and there is only one
 | What | Authenticates | Header |
 | --- | --- | --- |
 | Databricks Apps proxy | *who is calling* — a service principal | `Authorization: Bearer <OAuth>` |
-| The app's own ingress check | *the job process* | `X-DBX-App-Token: <shared secret>` |
 
-The app sits behind the Apps proxy, which lets nothing through without a
-Databricks OAuth token. The shared `DBX_APP_TOKEN` the app hands each run at
-trigger time is **not** a Databricks identity, so a job presenting it in
-`Authorization` has its handshake rejected before the app sees anything — a run
-that goes unobserved with nothing in the app's log to say why. `job/auth.py`
-supplies the OAuth half and the shared secret moved to its own header.
+**One credential, on one header, and the platform checks it.** The app sits
+behind the Apps proxy, which lets nothing through without a Databricks OAuth
+token from a principal holding `CAN_USE` on the app. `job/auth.py` gets that
+token from the SDK — no secret to create, rotate, or hand to a run.
+
+There was a second: `X-DBX-App-Token`, the app's own shared secret. It checked
+what the proxy had already checked, cost a secret and a job parameter, and
+failed the wrong way — an unset value meant the app accepted everyone. The
+consequence of removing it, stated plainly: anything that can reach the app can
+open a job socket, which on Databricks is exactly the set of principals granted
+`CAN_USE`. Do not run this app without a proxy in front of it.
 `app/server/routes/ingest.py` still reads `Authorization` as well, so the local dev
 stack (no proxy, no OAuth) works unchanged.
 
@@ -749,7 +753,6 @@ arguments and the entrypoint exports them before the harness reads them.
 | `DBX_MODEL_CONFIG` | JSON, handed to the model's factory verbatim |
 | `DBX_CATALOG` / `DBX_SCHEMA` | Where the tables live |
 | `DBX_APP_URL` | Where to attach. Empty = run unobserved |
-| `DBX_APP_TOKEN` | Ingress credential, supplied per run by the app |
 
 A Databricks job **rejects a `run-now` parameter it has not declared**, so
 every job declares exactly the set the trigger endpoint sends.

@@ -64,8 +64,6 @@ resources:
         # rather than a degraded one — apps run ~8h/day and jobs do not.
         - name: DBX_APP_URL
           default: ${var.app_public_url}
-        - name: DBX_APP_TOKEN
-          default: ""
 
       environments:
         - environment_key: heartbeat
@@ -123,4 +121,3 @@ resources:
               - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
               - DBX_TELEMETRY_VOLUME={{job.parameters.DBX_TELEMETRY_VOLUME}}
               - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
-              - DBX_APP_TOKEN={{job.parameters.DBX_APP_TOKEN}}

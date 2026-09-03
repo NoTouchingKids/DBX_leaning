@@ -93,25 +93,31 @@ def test_no_resource_is_declared_that_a_deploy_cannot_validate(bundle):
     )
 
 
-def test_the_app_takes_its_token_from_a_secret_not_a_plain_value(bundle):
+def test_every_declared_secret_is_read_only_and_never_a_literal(bundle):
+    """A credential travels by reference or not at all.
+
+    There are no secret resources at all right now — `app-token` went with the
+    app's own ingress check, since the Apps proxy already refuses anything
+    without a Databricks OAuth token from a CAN_USE principal. So this passes
+    vacuously, deliberately: it is the rule the next secret has to meet, and
+    the reason it is worth keeping is that a declared secret is validated at
+    DEPLOY time, so naming a key that is not in the scope 404s the whole
+    deploy before anything is uploaded.
+    """
     app = load(RESOURCES / "app.yml")["resources"]["apps"]["dbx_leaning"]
     env = {e["name"]: e for e in app["config"]["env"]}
+    declared = {r["name"]: r for r in app.get("resources", []) if "secret" in r}
 
-    assert "value" not in env["DBX_APP_TOKEN"], "the ingress token must not be a literal"
-    # Both spellings are real, in different files. `app.yaml` — the file the
-    # Apps runtime reads — takes `valueFrom`; a BUNDLE resource takes
-    # `value_from`, and the CLI generates the former from the latter.
-    # `databricks bundle schema` defines only `value_from` here, and getting
-    # it wrong does not fail the deploy: CLI v1.13.0 warns that "The
-    # 'valueFrom' field will be ignored" and carries on, so the app starts
-    # with no token — which `_authorised` treats as "accept everyone".
-    assert env["DBX_APP_TOKEN"]["value_from"] == "app-token", (
-        "a bundle resource takes value_from; valueFrom is the app.yaml "
-        "spelling, is ignored here, and leaves the ingress open"
-    )
-    assert "valueFrom" not in env["DBX_APP_TOKEN"], "ignored here, and silently"
-    secret = next(r for r in app["resources"] if r["name"] == "app-token")["secret"]
-    assert secret["permission"] == "READ"
+    for name, entry in env.items():
+        if "value_from" in entry:
+            assert entry["value_from"] in declared, (
+                f"{name} reads secret {entry['value_from']!r}, which is not "
+                f"declared under `resources:` — the deploy fails at validation"
+            )
+    for name, resource in declared.items():
+        assert resource["secret"]["permission"] == "READ", (
+            f"{name} asks for more than it needs; an app reads its secrets"
+        )
 
 
 def test_the_app_is_deployed_from_the_app_folder(bundle):
