@@ -56,13 +56,20 @@ class JobConfig:
     #: apps run ~8h/day and jobs do not share that schedule.
     app_url: str | None = None
 
-    #: The SHARED INGRESS IDENTITY, if one is configured. Names only — a client
-    #: id is an identifier, and the scope/key say where the secret lives. The
-    #: secret itself is never a job parameter: parameters come back in
+    #: The SHARED INGRESS IDENTITY, if one is configured. LOCATIONS ONLY — a
+    #: scope and two key names. Both halves of the credential live in the
+    #: secret scope and are read at run time with `dbutils.secrets.get`;
+    #: neither ever becomes a job parameter, because parameters come back from
     #: `jobs get-run` and are shown in the run UI. See job/auth.py.
-    oauth_client_id: str | None = None
     oauth_secret_scope: str | None = None
+    oauth_client_id_key: str | None = None
     oauth_secret_key: str | None = None
+
+    @property
+    def has_ingress_identity(self) -> bool:
+        """All three names present. Fewer is not a partial identity, it is a
+        misconfiguration, and the job falls back to its runtime identity."""
+        return bool(self.oauth_secret_scope and self.oauth_client_id_key and self.oauth_secret_key)
 
     #: The workspace, for the OAuth exchange in `job/auth.py`.
     #:
@@ -130,8 +137,8 @@ class JobConfig:
             model_config=model_config,
             job_run_id=(e.get("DATABRICKS_JOB_RUN_ID") or "").strip() or None,
             app_url=app_url.rstrip("/") if app_url else None,
-            oauth_client_id=(e.get("DBX_OAUTH_CLIENT_ID") or "").strip() or None,
             oauth_secret_scope=(e.get("DBX_OAUTH_SECRET_SCOPE") or "").strip() or None,
+            oauth_client_id_key=(e.get("DBX_OAUTH_CLIENT_ID_KEY") or "").strip() or None,
             oauth_secret_key=(e.get("DBX_OAUTH_SECRET_KEY") or "").strip() or None,
             workspace_host=(e.get("DATABRICKS_HOST") or e.get("DBX_WORKSPACE_HOST") or "").strip()
             or None,

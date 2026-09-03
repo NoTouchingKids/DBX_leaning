@@ -2,8 +2,8 @@
 
 A job's own runtime identity works and does not scale — every principal any
 job runs as would need `CAN_USE` on the app. So a job may instead authenticate
-as one shared service principal, named by `DBX_OAUTH_CLIENT_ID` with its secret
-read at run time.
+as one shared service principal, BOTH halves of which live in a secret scope
+and are read at run time with `dbutils.secrets.get`.
 
 The rule these tests exist to hold is that **the secret is never a job
 parameter**. Parameters come back from `databricks jobs get-run` and are shown
@@ -105,27 +105,44 @@ def test_a_secret_that_cannot_be_read_is_not_an_error(monkeypatch):
 # --- the config contract ----------------------------------------------------
 
 
-def test_the_job_reads_names_not_a_secret():
+def test_the_job_reads_locations_not_credentials():
+    """Neither half of the identity is in the config — only where to find it."""
     cfg = JobConfig.from_env(
         {
             "DBX_RUN_ID": "r1",
             "DBX_MODEL": "heartbeat",
-            "DBX_OAUTH_CLIENT_ID": "sp-123",
             "DBX_OAUTH_SECRET_SCOPE": "dbx-leaning",
+            "DBX_OAUTH_CLIENT_ID_KEY": "oauth-client-id",
             "DBX_OAUTH_SECRET_KEY": "oauth-client-secret",
         }
     )
-    assert cfg.oauth_client_id == "sp-123"
     assert cfg.oauth_secret_scope == "dbx-leaning"
+    assert cfg.oauth_client_id_key == "oauth-client-id"
     assert cfg.oauth_secret_key == "oauth-client-secret"
-    assert not hasattr(cfg, "oauth_client_secret"), (
-        "the secret must not live on the config; it is read at run time"
+    assert cfg.has_ingress_identity
+
+    for attr in ("oauth_client_id", "oauth_client_secret"):
+        assert not hasattr(cfg, attr), (
+            f"{attr} holds a credential value; the config carries locations only"
+        )
+
+
+def test_a_partial_configuration_is_not_a_partial_identity():
+    """Two names out of three cannot authenticate anything, so it falls back to
+    the runtime identity rather than half-trying and failing."""
+    cfg = JobConfig.from_env(
+        {
+            "DBX_RUN_ID": "r1",
+            "DBX_MODEL": "heartbeat",
+            "DBX_OAUTH_SECRET_SCOPE": "dbx-leaning",
+        }
     )
+    assert not cfg.has_ingress_identity
 
 
 def test_all_three_absent_is_a_supported_deploy():
     cfg = JobConfig.from_env({"DBX_RUN_ID": "r1", "DBX_MODEL": "heartbeat"})
-    assert cfg.oauth_client_id is None
+    assert not cfg.has_ingress_identity
     assert cfg.oauth_secret_scope is None
 
 
@@ -147,12 +164,13 @@ def test_no_job_parameter_carries_a_secret_value():
     """
     params = {p["name"]: str(p.get("default", "")) for p in _heartbeat_job()["parameters"]}
 
-    assert "DBX_OAUTH_CLIENT_ID" in params
     assert "DBX_OAUTH_SECRET_SCOPE" in params
+    assert "DBX_OAUTH_CLIENT_ID_KEY" in params
     assert "DBX_OAUTH_SECRET_KEY" in params
-    assert "DBX_OAUTH_CLIENT_SECRET" not in params, (
-        "the secret itself must never be a job parameter"
-    )
+    for forbidden in ("DBX_OAUTH_CLIENT_SECRET", "DBX_OAUTH_CLIENT_ID"):
+        assert forbidden not in params, (
+            f"{forbidden} is a credential VALUE; job parameters carry locations only"
+        )
 
     for name, default in params.items():
         assert "{{secrets/" not in default, (

@@ -67,14 +67,15 @@ resources:
 
         # --- the shared ingress identity -------------------------------
         #
-        # NAMES ONLY. A client id is an identifier and a scope/key say where a
-        # secret lives; none of the three is itself a credential. That matters
-        # because job parameters are VISIBLE — they come back from
-        # `databricks jobs get-run` and are shown in the run UI — so the secret
-        # is read at run time with `dbutils.secrets.get` instead. There is
-        # nowhere else to put it: `databricks bundle schema` gives a
-        # spark_python_task only `parameters`, `python_file` and `source`, and
-        # serverless has no `spark_env_vars`.
+        # LOCATIONS ONLY — a scope and two key names, none of them a
+        # credential. BOTH halves of the identity live in the secret scope and
+        # are read at run time with `dbutils.secrets.get`.
+        #
+        # That matters because job parameters are VISIBLE: they come back from
+        # `databricks jobs get-run` and are shown in the run UI. And there is
+        # nowhere else to put a secret anyway — `databricks bundle schema`
+        # gives a spark_python_task only `parameters`, `python_file` and
+        # `source`, and serverless has no `spark_env_vars`.
         #
         # Why a shared principal at all: the alternative is the job's own
         # runtime identity, which means every principal any job runs as needs
@@ -84,10 +85,10 @@ resources:
         # All three empty is a supported, normal deploy: the job falls back to
         # its runtime identity, and if that lacks CAN_USE the run goes
         # unobserved, which is not a failure. See job/auth.py.
-        - name: DBX_OAUTH_CLIENT_ID
-          default: ${var.job_ingress_client_id}
         - name: DBX_OAUTH_SECRET_SCOPE
-          default: ${var.app_secret_scope}
+          default: ${var.job_ingress_scope}
+        - name: DBX_OAUTH_CLIENT_ID_KEY
+          default: ${var.job_ingress_client_id_key}
         - name: DBX_OAUTH_SECRET_KEY
           default: ${var.job_ingress_secret_key}
 
@@ -147,6 +148,6 @@ resources:
               - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
               - DBX_TELEMETRY_VOLUME={{job.parameters.DBX_TELEMETRY_VOLUME}}
               - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
-              - DBX_OAUTH_CLIENT_ID={{job.parameters.DBX_OAUTH_CLIENT_ID}}
               - DBX_OAUTH_SECRET_SCOPE={{job.parameters.DBX_OAUTH_SECRET_SCOPE}}
+              - DBX_OAUTH_CLIENT_ID_KEY={{job.parameters.DBX_OAUTH_CLIENT_ID_KEY}}
               - DBX_OAUTH_SECRET_KEY={{job.parameters.DBX_OAUTH_SECRET_KEY}}

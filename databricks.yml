@@ -57,26 +57,29 @@ variables:
       `dbx-leaning` here is not the `dbx_leaning` schema, and the one-character
       difference is the whole trap.
     default: dbx-leaning
-  job_ingress_client_id:
+  job_ingress_scope:
     description: >-
-      The service principal EVERY job authenticates to the app's ingress as.
-      One principal, one CAN_USE grant on the app, any number of models —
-      including ones defined in another bundle or repository.
+      Workspace secret scope holding the shared ingress identity. Defaults to
+      the same scope as the app's, because there is one to manage; a target may
+      point at another.
+    default: dbx-leaning
+  job_ingress_client_id_key:
+    description: >-
+      Key within `job_ingress_scope` holding the ingress service principal's
+      application id.
 
-      The alternative is each job's own runtime identity, which needs a grant
-      per principal and does not scale. `run_as` is the third option and needs
-      no secret at all, but changes the identity a job uses for everything,
-      data access included.
-
-      An id, not a credential. Empty is normal: the job falls back to its
-      runtime identity, and a job that cannot authenticate runs unobserved.
-    default: ""
+      A client id is an identifier rather than a credential, so it COULD be a
+      plain variable. It is a secret here because both halves of one identity
+      belong in one place: rotating the principal then means editing the scope
+      and nothing else, with no bundle change and no redeploy.
+    default: oauth-client-id
   job_ingress_secret_key:
     description: >-
-      Key within `app_secret_scope` holding that principal's OAuth secret. The
-      job reads it at run time with `dbutils.secrets.get`; it is never a job
-      parameter, because parameters are visible in `jobs get-run` and the run
-      UI. The job's own principal therefore needs READ on the scope.
+      Key within `job_ingress_scope` holding that principal's OAuth secret.
+
+      Read at run time with `dbutils.secrets.get`, never a job parameter —
+      parameters come back from `jobs get-run` and are shown in the run UI. The
+      job's own principal therefore needs READ on the scope.
     default: oauth-client-secret
   app_public_url:
     description: >-
