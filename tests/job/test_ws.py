@@ -294,3 +294,19 @@ def test_a_refusal_is_distinguished_from_a_redirect():
 
 def test_an_ordinary_failure_is_not_editorialised():
     assert diagnose(ConnectionRefusedError("connection refused")) == ""
+
+
+def test_a_503_is_explained_as_an_empty_ingress_not_an_auth_fault():
+    """A real run logged nine of these and got no explanation at all.
+
+    The proxy is up and the app is not behind it: compute stopped, or no
+    active deployment. Reading it as an auth problem sends you to the grant,
+    which is where the previous failure lived and is exactly the wrong place —
+    a 503 never reached the app's own token check.
+    """
+    said = diagnose(ValueError("server rejected WebSocket connection: HTTP 503"))
+
+    assert said, "a 503 must not be silent; that is what this function is for"
+    assert "nothing behind it" in said
+    assert "apps start" in said and "bundle run" in said
+    assert "CAN_USE" not in said, "a 503 is not the grant problem"

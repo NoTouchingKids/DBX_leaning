@@ -24,6 +24,21 @@ from shared.rpc import Method
 
 websockets = pytest.importorskip("websockets")
 
+#: Long enough that the socket thread certainly gets to run.
+#:
+#: `RpcClient.start()` spawns a thread whose loop begins `while not
+#: self._stop.is_set()`, and `run_local` calls `stop()` as soon as the model
+#: finishes. A 0.3s run can therefore end before that thread is first
+#: scheduled, leaving `connects=0` and `last_error=None` — nothing attempted,
+#: nothing to report. It passed on Linux and failed every time on Windows,
+#: which is the shape of a race rather than a flake.
+#:
+#: Two seconds is not a tuned sleep; a loopback connect is sub-millisecond, so
+#: this is several orders of magnitude of headroom. Real runs last minutes and
+#: never come near this.
+RUN_SECONDS = 2.0
+RUN_HZ = 5
+
 
 class Collector:
     """A stand-in app: accepts a socket, records every frame it is sent."""
@@ -73,8 +88,8 @@ def test_telemetry_reaches_the_app_over_a_real_socket(tmp_path):
         run = run_local(
             "heartbeat",
             run_id="live-1",
-            seconds=0.4,
-            hz=10,
+            seconds=RUN_SECONDS,
+            hz=RUN_HZ,
             telemetry_dir=tmp_path,
             app_url=app.url,
             roll_every=0.05,
@@ -102,8 +117,8 @@ def test_the_session_opens_with_hello_carrying_the_resume_point(tmp_path):
         run_local(
             "heartbeat",
             run_id="live-2",
-            seconds=0.3,
-            hz=10,
+            seconds=RUN_SECONDS,
+            hz=RUN_HZ,
             telemetry_dir=tmp_path,
             app_url=app.url,
         )
@@ -126,8 +141,8 @@ def test_a_dead_app_does_not_fail_the_run(tmp_path):
     run = run_local(
         "heartbeat",
         run_id="live-3",
-        seconds=0.3,
-        hz=10,
+        seconds=RUN_SECONDS,
+        hz=RUN_HZ,
         telemetry_dir=tmp_path,
         # Nothing is listening here.
         app_url="http://127.0.0.1:9",
@@ -150,8 +165,8 @@ def test_a_local_callback_and_a_socket_can_both_be_used(tmp_path):
         run = run_local(
             "heartbeat",
             run_id="live-4",
-            seconds=0.3,
-            hz=10,
+            seconds=RUN_SECONDS,
+            hz=RUN_HZ,
             telemetry_dir=tmp_path,
             app_url=app.url,
             on_message=seen.append,

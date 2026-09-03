@@ -82,6 +82,16 @@ def diagnose(exc: BaseException) -> str:
     Both are the same fault, and the fix is one of two things: the job has no
     Databricks identity to present (no `Authorization` header at all), or it
     has one whose principal lacks `CAN_USE` on the app.
+
+    A **503** is a different fault wearing similar clothes, and this function
+    stayed silent through nine of them on 2026-09-03 — the same way it once
+    stayed silent through six 302s for matching only one of that error's two
+    forms. The proxy is up; there is simply nothing behind it. Either the app
+    compute is stopped (Free Edition apps stop after ~24h, and the workspace
+    stops them on account status) or the app has no active deployment, which
+    is its own trap: `bundle deploy` uploads the app's files WITHOUT creating
+    a deployment from them, so an app can exist, be started, and still serve
+    nothing until `bundle run` is issued.
     """
     text = str(exc)
     redirected = "302" in text or "oidc" in text or "authorize" in text
@@ -93,6 +103,16 @@ def diagnose(exc: BaseException) -> str:
             "set-permissions`, see 'The grant that makes it work' in "
             "deploy/README.md. If no identity was presented, that is the fault "
             "instead. The run continues unobserved either way."
+        )
+    if "503" in text or "502" in text or "504" in text:
+        return (
+            "the app's ingress is up but has nothing behind it. Check both: "
+            "`databricks apps get <app>` for compute STOPPED (start it with "
+            "`databricks apps start <app>`), and for active_deployment None — "
+            "`bundle deploy` uploads the app's files but does not create a "
+            "deployment, so `databricks bundle run <app-resource> -t <target>` "
+            "is the second half. Not an auth fault: a 503 never reached the "
+            "app's own token check. The run continues unobserved."
         )
     if "401" in text or "403" in text:
         return (
