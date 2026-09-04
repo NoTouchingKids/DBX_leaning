@@ -325,14 +325,68 @@ Full procedure: `deploy/README.md`.
    fan-out comes up, freeze its shared contract before starting it; the
    frontend did this again for its per-model views.
 4. Frontend was explicitly low-priority until `app/`, `job/` and one model
-   worked end to end. That gate is met and the track has started — see
-   `app/client/README.md`.
-5. **Not done:** `databricks bundle deploy` has never been run against a
-   workspace, `scripts/probe_sample_data.py` has never been run end to end on
-   one, and there is no CI. Do not read "built and tested" as "deployed".
-   What *is* confirmed against a real workspace: WebSocket and SSE both
-   survive the Apps ingress, the `samples` catalog's table list, and column
-   listings for seven of its tables (`docs/sample-data-inventory.md`).
+   worked end to end. That gate is met. The client is now `app/dist/index.html`
+   — hand-written, committed, served as-is, no build step and no framework.
+   `app/client/` holds only the README explaining why that is a decision
+   rather than a placeholder: v3's SPA was 36,700 lines, 20,117 of them
+   per-model views, against an envelope spec whose stated thesis was zero
+   model-specific frontend code.
+5. **Confirmed against a real workspace, 2026-09-04 — Slice 1 is done.** A
+   tick reaches a browser from a deployed run: model → harness → part files on
+   the telemetry volume → WebSocket → app → SSE → UI. Also confirmed on the
+   way there, each the hard way:
+
+   - `bundle deploy` and `bundle run` both work. **They are two commands, and
+     that is a trap:** `deploy` uploads the app's files but creates no
+     deployment, so an app can exist, be started, and still serve 503 until
+     `bundle run` is issued.
+   - `environment_version: "5"` (Python 3.12), NOT `client: "3"`. The bundle
+     schema's whole description of `client` is "Use `environment_version`
+     instead", and they are not spellings of the same thing — each version
+     pins its own Python.
+   - The heartbeat runs as a `modelkit.Model` subclass with `libs/modelkit`
+     installed as a shared serverless environment dependency, and the entry
+     point resolving `DBX_MODEL=heartbeat` to a class.
+   - Telemetry lands as rolling part files and reads back complete, in order,
+     with one terminal status.
+   - The M2M ingress identity: `dbutils.secrets.get` for both halves, a plain
+     `httpx` POST to `/oidc/v1/token`, and the app's proxy accepting the
+     result.
+
+   **Still not done:** there is no CI. `scripts/probe_sample_data.py` has never
+   been run end to end. **Slices 2 (cancel) and 3 (replay) are built and
+   unit-tested but have never been exercised against a real run** — the RPC
+   methods, the routes and the job-side handlers all exist, which is not the
+   same as knowing they work. Slice 4 (the volume → SQL ingestion job) does not
+   exist at all.
+
+   The earlier confirmations still stand: WebSocket and SSE each survive the
+   Apps ingress (2026-08-23, `docs/spike-results.md`), the `samples` catalog's
+   table list, and column listings for seven of its tables
+   (`docs/sample-data-inventory.md`).
+
+6. **Four failures that only a deploy could have found**, kept here because
+   each was invisible locally and each cost a round trip. The pattern is worth
+   more than the list: *nothing raised in any of them.*
+
+   - `sys.exit(0)` FAILS a serverless task. It runs inside an ipykernel, which
+     treats `SystemExit` as an exception — so a run that emitted all 65
+     messages, wrote its part files and recorded SUCCEEDED was reported
+     RUN_EXECUTION_ERROR, with `SystemExit: 0` the only clue.
+   - The job sent BINARY WebSocket frames because `shared/rpc.py`'s builders
+     returned `bytes`. The app reads `receive_text()`, so it died on
+     `KeyError: 'text'` on its first read of every run. Neither test suite
+     caught it: each side was tested against a stand-in more lenient than the
+     real counterpart.
+   - A serverless task is not told which workspace it is in. Without
+     `DATABRICKS_HOST` the M2M exchange had nowhere to send its request, so
+     every run went unobserved with a perfectly healthy durable path — the
+     hardest failure to see. It arrives as
+     `DATABRICKS_HOST={{workspace.url}}`, a task positional.
+   - An EMPTY bundle variable drops the `value` key entirely rather than
+     resolving to `""`, so the entry reaches the Apps API with no source and
+     `bundle run` refuses it. `validate` and `deploy` both pass; only `run`
+     fails, three commands downstream of the cause.
 
 ## Docs index
 

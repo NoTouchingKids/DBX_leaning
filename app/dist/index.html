@@ -3,9 +3,13 @@
   The Slice 1 client. Hand-written, committed, served as-is — see
   app/client/README.md for why there is no build step.
 
-  One job: show that a tick left a deployed job and arrived here. If something
-  breaks during Slice 1 it is the transport, because there is nothing else in
-  this file to break.
+  Slice 1's job was to show that a tick left a deployed job and arrived here.
+  Slices 2 and 3 add the two things that can only be done to a job that is
+  still running: ask it to stop and report what it said back (cancel), and ask
+  it to resend records that never reached this page (replay). Both go to the
+  job over its RPC socket, both are triggered by a click, and neither has a
+  timer behind it. If something breaks in the transport it is still visible
+  here, because there is still nothing else in this file to break.
 -->
 <html lang="en">
 <head>
@@ -23,6 +27,11 @@
     :root { --bg:#16161a; --fg:#e8e8e4; --dim:#95958d; --line:#2c2c32; --accent:#7aa2ff; }
   }
   * { box-sizing: border-box; }
+  /* The `hidden` attribute is a UA rule of the lowest specificity, so any id or
+     class rule below that sets `display` silently outranks it — `#ack` and
+     `#cancelBox .row` both do. Without this the confirm step and the ack panel
+     are permanently on screen and the two-step cancel is one step. */
+  [hidden] { display: none !important; }
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
   header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:12px;
            align-items:center; flex-wrap:wrap; }
@@ -31,6 +40,7 @@
                   border-radius:6px; background:var(--bg); color:var(--fg); }
   button { cursor:pointer; }
   button:disabled { opacity:.45; cursor:default; }
+  button.bad { border-color:var(--bad); color:var(--bad); }
   .pill { font:600 11px var(--mono); padding:3px 8px; border-radius:99px;
           border:1px solid var(--line); color:var(--dim); text-transform:uppercase; }
   .pill.live { color:var(--ok); border-color:var(--ok); }
@@ -41,9 +51,16 @@
              transition:width .3s ease; }
   .stats { display:flex; gap:24px; flex-wrap:wrap; color:var(--dim); font:12px var(--mono); }
   .stats b { color:var(--fg); font-weight:600; }
-  #gap { display:none; padding:10px 12px; border:1px solid var(--bad); border-radius:6px;
-         color:var(--bad); gap:12px; align-items:center; }
-  #gap.show { display:flex; }
+  .note { color:var(--dim); font-size:12px; }
+  .ok { color:var(--ok); }
+  .bad { color:var(--bad); }
+  /* Deliberately NOT the error colour. A gap is routinely not a fault — see
+     the note inside the box — and painting "you joined this run late" in red
+     trains people to ignore the one colour that should mean something. */
+  #gap { display:none; padding:10px 12px; border:1px solid var(--line); border-radius:6px;
+         grid-template-columns:1fr auto; gap:12px; align-items:start; }
+  #gap.show { display:grid; }
+  #gapText { font-weight:600; }
   #feed { border:1px solid var(--line); border-radius:8px; overflow:auto; max-height:56vh; }
   table { border-collapse:collapse; width:100%; font:12px/1.6 var(--mono); }
   td { padding:3px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
@@ -51,7 +68,14 @@
   td.kind { width:1%; color:var(--dim); }
   tr.status td.kind { color:var(--accent); font-weight:600; }
   tr.WARNING td, tr.ERROR td { color:var(--bad); }
+  tr.gaprow td { color:var(--dim); border-top:1px dashed var(--dim); text-align:center; }
   .empty { padding:24px; color:var(--dim); text-align:center; }
+  #cancelBox { border-top:1px solid var(--line); padding-top:16px; display:grid; gap:8px; }
+  #cancelBox .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #ack { border:1px solid var(--line); border-radius:6px; padding:10px 12px;
+         display:grid; gap:6px; }
+  #ackJson { margin:0; font:12px/1.5 var(--mono); color:var(--dim);
+             white-space:pre-wrap; word-break:break-word; }
 </style>
 </head>
 <body>
@@ -69,6 +93,7 @@
   <div class="stats">
     <span>seq <b id="seq">—</b></span>
     <span>messages <b id="count">0</b></span>
+    <span>missing <b id="missing">0</b></span>
     <span>metric <b id="metric">—</b></span>
     <span>reconnects <b id="reconnects">0</b></span>
   </div>
@@ -77,41 +102,128 @@
        gaps are permanent by design — client_visible=false records never travel
        live — so a client that loops "backfill until contiguous" spins forever. -->
   <div id="gap">
-    <span id="gapText"></span>
+    <div>
+      <div id="gapText"></div>
+      <div class="note">A gap is not necessarily a fault. Logs may be dropped on
+        the live path under pressure, records marked <code>client_visible=false</code>
+        never travel live at all, and a page that attached mid-run was never sent
+        what came before it. Everything durable is on the volume regardless.</div>
+      <div id="fillNote" class="note"></div>
+    </div>
     <button id="fill">Ask the job to resend</button>
   </div>
 
   <div id="feed"><div class="empty">Enter a run id and press Watch.</div></div>
+
+  <!-- Last on the page and nowhere near Watch, deliberately. A mis-click here
+       ends a run that may have been solving for an hour and there is no undo:
+       the job stops where it is and keeps whatever it had already written. The
+       two-step confirm is the other half of that — one stray click cannot do
+       it, and the run id is spelled out before the second one. -->
+  <section id="cancelBox">
+    <div class="row">
+      <button id="cancel" disabled>Cancel this run…</button>
+      <span id="cancelHint" class="note">Watch a run first.</span>
+    </div>
+    <div class="row" id="confirm" hidden>
+      <span class="note">Stop <b id="confirmRun"></b>? Results already written are kept.</span>
+      <button id="cancelYes" class="bad">Yes, cancel it</button>
+      <button id="cancelNo">Keep running</button>
+    </div>
+    <div id="ack" hidden>
+      <div id="ackText"></div>
+      <pre id="ackJson"></pre>
+    </div>
+  </section>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let es = null, runId = null, seen = new Set(), lastSeq = -1, failures = 0, count = 0;
+
+// Every `event:` name the SSE endpoint can write, which is the envelope's
+// MessageType — app/server/routes/stream.py sets `event:` to msg.type. They are
+// registered natively rather than sniffed out of a parsed body, which keeps the
+// type dispatch off the per-message path. The cost, stated so the next person
+// adding a message type sees it: a type added to the envelope and NOT added
+// here is dropped in silence.
+const MESSAGE_TYPES = ["log", "progress", "status", "result"];
+
+let es = null;          // the one EventSource for the run being watched
+let runId = null;
+let seen = new Set();   // every seq rendered. Dedupe AND the gap list come from here
+let lastSeq = -1;       // the HIGHEST seq seen, not the last one applied
+let gaps = [];          // [{from, to}] — derived, never maintained; see missingRanges()
+let failures = 0;
+let count = 0;
+let finished = false;   // a terminal status arrived: nothing more is coming
+let busy = false;       // a cancel or a replay is in flight
 
 function conn(text, cls) {
   $("conn").textContent = text;
   $("conn").className = "pill" + (cls ? " " + cls : "");
 }
 
-function row(msg) {
+/* FastAPI wraps an HTTPException's message in {"detail": ...}. Handing the raw
+   body to a person puts JSON punctuation in front of text that was written to
+   be read — and on a 409 that text is the only thing telling them what to do
+   instead, so it has to arrive intact. */
+async function problem(res) {
+  const raw = await res.text();
+  try {
+    const detail = JSON.parse(raw).detail;
+    if (typeof detail === "string") return detail;
+    if (detail != null) return JSON.stringify(detail);
+  } catch (err) { /* not JSON: the body itself is the message */ }
+  return raw;
+}
+
+// --- the feed ---------------------------------------------------------------
+
+function feedBody() {
   const feed = $("feed");
-  if (feed.firstElementChild && feed.firstElementChild.className === "empty") feed.textContent = "";
+  const placeholder = feed.querySelector(".empty");
+  if (placeholder) placeholder.remove();
   let table = feed.querySelector("table");
   if (!table) { table = document.createElement("table"); feed.append(table); }
+  return table.tBodies[0] || table.createTBody();
+}
 
-  const tr = table.insertRow();
+/* Insert in SEQ order, not arrival order.
+
+   Walking back from the end means a live message — which belongs after
+   everything already there — stops on the first comparison, while a replayed
+   one walks back to where it actually happened. Appending it instead would put
+   the contents of a gap at the bottom of the feed, a screen or more away from
+   the messages it belongs between, which is exactly what "merge in seq order"
+   is asking not to do. */
+function place(tr, seq) {
+  const body = feedBody();
+  const feed = $("feed");
+  tr.dataset.seq = seq;
+
+  let before = null;
+  for (let i = body.rows.length - 1; i >= 0; i--) {
+    if (Number(body.rows[i].dataset.seq) < seq) break;
+    before = body.rows[i];
+  }
+  // Measured before the insert, because inserting changes scrollHeight. Follow
+  // the tail only if the reader was already at it: yanking the view to the
+  // bottom while someone is reading a just-filled gap is the wrong moment.
+  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+  body.insertBefore(tr, before);
+  if (before === null && atBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+function row(msg) {
+  const tr = document.createElement("tr");
   tr.className = msg.type + " " + (msg.level || "");
-  const cells = [
-    [msg.seq, "seq"],
-    [msg.type, "kind"],
-    [describe(msg), "body"],
-  ];
-  for (const [text, cls] of cells) {
-    const td = tr.insertCell();
+  for (const [text, cls] of [[msg.seq, "seq"], [msg.type, "kind"], [describe(msg), "body"]]) {
+    const td = document.createElement("td");
     td.className = cls;
     td.textContent = text;
+    tr.append(td);
   }
-  feed.scrollTop = feed.scrollHeight;
+  place(tr, msg.seq);
 }
 
 function describe(m) {
@@ -128,53 +240,153 @@ function describe(m) {
   return JSON.stringify(m);
 }
 
+// --- gaps -------------------------------------------------------------------
+
+/* The missing ranges, DERIVED from `seen` on every call rather than maintained
+   incrementally.
+
+   `seen` is the same set that makes dedupe work, so a list computed from it
+   cannot disagree with what is on screen. A hand-maintained list of ranges
+   can, and does the first time a replay comes back with only part of what was
+   asked for — which is a normal outcome here, not an odd one.
+
+   The walk starts at 0, not at the first seq seen, and that is what reports
+   history to a page which attached mid-run: the app's snapshot is the latest
+   status and the latest progress point and nothing else (see
+   app/server/broadcaster.py), so a viewer joining at seq 812 has genuinely
+   never been sent the 812 before it. Those records exist and are not here,
+   which is the definition of a gap the envelope spec uses.
+
+   Cost is O(highest seq), and it runs when a jump is detected or a fill
+   returns — not per message. */
+function missingRanges() {
+  const out = [];
+  let open = null;
+  for (let s = 0; s <= lastSeq; s++) {
+    if (seen.has(s)) {
+      if (open !== null) { out.push({ from: open, to: s - 1 }); open = null; }
+    } else if (open === null) {
+      open = s;
+    }
+  }
+  return out;   // `open` cannot survive the loop: lastSeq is always in `seen`
+}
+
+function range(g) { return g.from === g.to ? `${g.from}` : `${g.from}–${g.to}`; }
+
+function gapMarker(g) {
+  const tr = document.createElement("tr");
+  tr.className = "gaprow";
+  const td = document.createElement("td");
+  td.colSpan = 3;
+  const n = g.to - g.from + 1;
+  td.textContent = `— ${n} message${n === 1 ? "" : "s"} missing here (seq ${range(g)}) —`;
+  tr.append(td);
+  place(tr, g.from);
+}
+
+/* Say plainly what is missing: in the banner, in the stats, and in the feed at
+   the point where the hole is. A jump in a seq column is something a reader has
+   to notice by arithmetic; a dashed line saying "9 missing here" is not.
+
+   Returns how many messages are missing, which is what `fill` reports on. */
+function surveyGaps() {
+  gaps = missingRanges();
+  const missing = gaps.reduce((n, g) => n + g.to - g.from + 1, 0);
+  $("missing").textContent = missing;
+
+  // Markers are re-rendered wholesale rather than patched, for the same reason
+  // the ranges are recomputed: there is then only one description of the holes.
+  for (const marker of $("feed").querySelectorAll("tr.gaprow")) marker.remove();
+
+  if (!gaps.length) { $("gap").classList.remove("show"); return 0; }
+
+  const shown = gaps.slice(0, 4).map(range);
+  if (gaps.length > shown.length) shown.push(`+${gaps.length - shown.length} more`);
+  $("gapText").textContent =
+    `${missing} message${missing === 1 ? "" : "s"} never reached this page ` +
+    `(seq ${shown.join(", ")})`;
+  // The button says what it is about to ask for. Replay is served by the job
+  // itself, alongside the model it is running, so "resend 4" and "resend
+  // 40,000" are not the same request and should not read as though they were.
+  $("fill").textContent = `Ask the job to resend ${missing}`;
+  $("gap").classList.add("show");
+  gaps.forEach(gapMarker);
+  return missing;
+}
+
+// --- the stream -------------------------------------------------------------
+
 function apply(msg) {
   if (seen.has(msg.seq)) return;   // live and replayed records meet here
   seen.add(msg.seq);
   count += 1;
+
+  // Older than something already applied, so it can only have come from a
+  // replay. It belongs in the feed, but it must not touch the vitals: walking
+  // the progress bar backwards makes a filled gap look like a regression, and
+  // the status pill would show a state the run has already left.
+  const newest = msg.seq > lastSeq;
+  // A jump on the very first message counts too — the run had already reached
+  // that seq before this page attached, and those records are as missing as
+  // any other. The old `lastSeq >= 0` guard suppressed exactly that case, which
+  // is the common one now that the app's snapshot is two messages deep.
+  const jumped = newest && msg.seq > lastSeq + 1;
+  if (newest) lastSeq = msg.seq;
+
   $("count").textContent = count;
-  $("seq").textContent = msg.seq;
+  $("seq").textContent = lastSeq;
 
-  // A gap means records exist that have not arrived. It is reported, never
-  // acted on automatically — see the note by #gap.
-  if (msg.seq > lastSeq + 1 && lastSeq >= 0) {
-    const missing = msg.seq - lastSeq - 1;
-    $("gapText").textContent = `${missing} message${missing === 1 ? "" : "s"} missing ` +
-      `(seq ${lastSeq + 1}–${msg.seq - 1})`;
-    $("gap").classList.add("show");
-    $("fill").dataset.from = lastSeq + 1;
-    $("fill").dataset.to = msg.seq - 1;
-  }
-  lastSeq = Math.max(lastSeq, msg.seq);
-
-  if (msg.type === "progress") {
+  if (newest && msg.type === "progress") {
     if (msg.percent_complete != null) $("progress").style.width = msg.percent_complete + "%";
     if (msg.primary_metric != null) {
       $("metric").textContent = `${msg.primary_metric_label || "metric"} ${msg.primary_metric}`;
     }
   }
-  if (msg.type === "status") {
+  if (newest && msg.type === "status") {
     $("status").textContent = msg.status;
     // `terminal` is stated by the producer, never inferred from the status
     // string — which is what lets a model send a status of its own.
-    if (msg.terminal) { conn("finished", ""); if (es) es.close(); }
+    if (msg.terminal) {
+      finished = true;
+      conn("finished", "");
+      if (es) es.close();
+      refreshCancel();
+    }
   }
   row(msg);
+  if (jumped) surveyGaps();
 }
 
 function watch() {
   if (es) es.close();
   runId = $("run").value.trim();
   if (!runId) return;
-  seen = new Set(); lastSeq = -1; count = 0; failures = 0;
+  seen = new Set(); lastSeq = -1; count = 0; failures = 0; gaps = [];
+  finished = false; busy = false;
   $("feed").innerHTML = '<div class="empty">Waiting for the first message…</div>';
   $("gap").classList.remove("show");
+  $("fillNote").textContent = "";
+  $("missing").textContent = "0";
+  $("seq").textContent = "—";
+  $("count").textContent = "0";
+  $("metric").textContent = "—";
+  $("status").textContent = "—";
+  $("reconnects").textContent = "0";
+  $("progress").style.width = "0";
+  $("ack").hidden = true;
+  $("confirm").hidden = true;
+  refreshCancel();
   open();
 }
 
 function open() {
   conn("connecting", "");
   es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
+
+  const receive = (e) => {
+    try { apply(JSON.parse(e.data)); } catch (err) { console.error(err, e.data); }
+  };
 
   es.onopen = () => {
     // CONSECUTIVE failures, reset on every success. A naive "give up after N"
@@ -183,7 +395,14 @@ function open() {
     failures = 0;
     conn("live", "live");
   };
-  es.onmessage = (e) => { try { apply(JSON.parse(e.data)); } catch (err) { console.error(err, e.data); } };
+  // The server names every event after the message's type, so `onmessage` —
+  // which fires only for events named "message" — never fires against it at
+  // all. These four listeners are how anything arrives.
+  for (const type of MESSAGE_TYPES) es.addEventListener(type, receive);
+  // Defensive only, and cheap: an untyped event from some other sender still
+  // lands. It cannot double-deliver, because one event dispatches to exactly
+  // one type — and `seen` would absorb it if it somehow did.
+  es.onmessage = receive;
   es.onerror = () => {
     failures += 1;
     $("reconnects").textContent = failures;
@@ -194,30 +413,164 @@ function open() {
   };
 }
 
+// --- replay: client-triggered, always ---------------------------------------
+
 async function fill() {
-  const from = $("fill").dataset.from, to = $("fill").dataset.to;
+  if (!runId || busy || !gaps.length) return;
+  busy = true;
   $("fill").disabled = true;
+  $("fillNote").textContent = "asking the job…";
+  const before = count;
+  let trouble = null;
+
   try {
-    const res = await fetch(
-      `/api/runs/${encodeURIComponent(runId)}/replay?from_seq=${from}&to_seq=${to}`);
+    // One request per range, not one request spanning all of them. A span from
+    // the first hole to the last is frequently the whole run, and making the
+    // job re-read and re-serialise every record it ever wrote to recover four
+    // of them is real work taken from the thing the job is there to do.
+    //
+    // Sequential, and it stops at the first failure: after a 409 there is no
+    // job to ask, and firing the remaining ranges at it only multiplies the
+    // same answer.
+    // A snapshot of the ranges, because `apply()` can resurvey and rebind
+    // `gaps` from under this loop.
+    for (const g of gaps.slice()) {
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/replay` +
+        `?from_seq=${g.from}&to_seq=${g.to}`);
+      if (!res.ok) { trouble = `seq ${range(g)}: ${await problem(res)}`; break; }
+      const body = await res.json();
+      // The job answers from its closed part files AND its in-flight buffer, so
+      // the newest records come back too — the ones a files-only implementation
+      // would silently omit. Sorted before applying so the merge is in seq
+      // order even if some future writer hands them back in another one.
+      for (const m of body.messages.slice().sort((a, b) => a.seq - b.seq)) {
+        try { apply(m); } catch (err) { console.error("unrenderable record", m, err); }
+      }
+    }
+  } catch (err) {
+    trouble = `the replay request never completed: ${err}`;
+  } finally {
+    busy = false;
+    $("fill").disabled = false;
+    const still = surveyGaps();   // what is missing NOW, recomputed from `seen`
+    const merged = count - before;
+    if (trouble) {
+      $("fillNote").textContent = trouble;
+    } else if (still > 0) {
+      // The anti-loop sentence. The job answered and did not have them, so
+      // clicking again returns the same nothing — which is why this is a button
+      // and not a retry policy, and why the button does not disable itself
+      // afterwards either: the person decides, not a rule in here.
+      $("fillNote").textContent =
+        `merged ${merged}; ${still} still missing. The job answered, so those ` +
+        `records are not in its telemetry and asking again returns the same. ` +
+        `The volume holds the gap-free copy.`;
+    } else {
+      $("fillNote").textContent = `merged ${merged}; nothing missing.`;
+    }
+  }
+}
+
+// --- cancel -----------------------------------------------------------------
+
+/* The button is meaningful only while a job is there to hear it. This page
+   cannot see the job's WebSocket — only the app knows about that — so "a run is
+   being watched and has not finished" is the strongest claim available here,
+   and the 409 covers the rest. Disabling it on a finished run keeps the obvious
+   mistake from producing an error message about a subtler one. */
+function refreshCancel() {
+  const why = !runId ? "Watch a run first."
+    : finished ? "This run has finished — there is nothing to cancel."
+    : busy ? "Waiting for the job to answer…"
+    : "Asks the job to stop. It keeps whatever results it has already written.";
+  $("cancel").disabled = !runId || finished || busy || !$("confirm").hidden;
+  $("cancelHint").textContent = why;
+}
+
+function arm() {
+  $("confirmRun").textContent = runId;
+  $("confirm").hidden = false;
+  refreshCancel();
+}
+
+function disarm() {
+  $("confirm").hidden = true;
+  refreshCancel();
+}
+
+function showAck(text, verbatim, cls) {
+  $("ack").hidden = false;
+  $("ackText").textContent = text;
+  $("ackText").className = cls || "";
+  $("ackJson").hidden = verbatim == null;
+  $("ackJson").textContent = verbatim == null ? "" : verbatim;
+}
+
+/* What the JOB said, not what we hoped.
+
+   The status pill is deliberately NOT written here, and the run is not marked
+   finished: a run is CANCELLED when its own terminal status message says so and
+   arrives over the stream. Setting it from an ack would be the optimism the
+   whole RPC round trip exists to replace — v3 could not tell "the job accepted"
+   from "the job never heard", and answered as though it had. */
+function ackHeadline(body) {
+  const ack = body.acknowledged;
+  if (ack && ack.accepted === true) {
+    return `the job accepted the cancel at seq ${ack.at_seq}` +
+      (ack.already_cancelling ? " — it was already cancelling" : "") +
+      ` (requested by ${body.requested_by})`;
+  }
+  // Anything else is reported as-is rather than smoothed over. `acknowledged`
+  // is passed through the app verbatim, so an unexpected shape is the job
+  // saying something this page has not been taught to read — worth seeing, not
+  // worth hiding behind a generic success line.
+  return "the job answered, but did not say it accepted — its reply is below";
+}
+
+async function doCancel() {
+  if (!runId || busy) return;
+  busy = true;
+  $("confirm").hidden = true;
+  refreshCancel();
+  showAck(`asking ${runId} to stop…`, null, "");
+
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+    if (res.status === 409) {
+      // Nobody heard you, and nothing was cancelled. Not an error to bury: the
+      // app's message names the CLI that CAN stop the job, and with no live
+      // channel that is the only route left. Shown verbatim for that reason.
+      showAck("no live channel — nothing was cancelled", await problem(res), "bad");
+      return;
+    }
     if (!res.ok) {
-      $("gapText").textContent = `replay failed: ${res.status} ${await res.text()}`;
+      // 502 is the job refusing, and its words come through in the detail.
+      showAck(`the app answered ${res.status}`, await problem(res), "bad");
       return;
     }
     const body = await res.json();
-    // The job answers from its closed part files AND its in-flight buffer, so
-    // the newest records come back too — the ones a files-only implementation
-    // would silently omit.
-    body.messages.sort((a, b) => a.seq - b.seq).forEach(apply);
-    $("gap").classList.remove("show");
+    showAck(ackHeadline(body), JSON.stringify(body.acknowledged, null, 2), "ok");
+  } catch (err) {
+    showAck("the cancel request never left the browser", String(err), "bad");
   } finally {
-    $("fill").disabled = false;
+    busy = false;
+    refreshCancel();
   }
 }
+
+// --- wiring -----------------------------------------------------------------
 
 $("watch").addEventListener("click", watch);
 $("run").addEventListener("keydown", (e) => { if (e.key === "Enter") watch(); });
 $("fill").addEventListener("click", fill);
+$("cancel").addEventListener("click", arm);
+$("cancelNo").addEventListener("click", disarm);
+$("cancelYes").addEventListener("click", doCancel);
+// Escape is the other way out of an armed confirm, for anyone who reaches for
+// the keyboard before the mouse.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("confirm").hidden) disarm();
+});
 
 // ?run=... so a link can go straight to a run.
 const fromUrl = new URLSearchParams(location.search).get("run");

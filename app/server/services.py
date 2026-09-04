@@ -55,8 +55,20 @@ class JobConnections:
         self._by_run[run_id] = ws
 
     def unregister(self, run_id: str, ws: Any | None = None) -> None:
-        if ws is None or self._by_run.get(run_id) is ws:
-            self._by_run.pop(run_id, None)
+        if ws is not None and self._by_run.get(run_id) is not ws:
+            # A STALE socket, and it must not touch anything. A job whose
+            # connection is half-open reconnects on its own backoff long
+            # before the app's `receive_text` on the dead one raises, so the
+            # ordering here is: new socket registers, a cancel is sent on it,
+            # and only THEN does this coroutine notice its own socket died.
+            # Failing the pending calls at that point answers a cancel the
+            # live socket may already have delivered with "nobody heard you"
+            # — the exact confusion an acknowledged cancel exists to remove,
+            # and one that sends a user to `databricks jobs cancel-run` for a
+            # run that is already stopping.
+            return
+
+        self._by_run.pop(run_id, None)
         # Fail every call waiting on this run rather than leaving a caller
         # hanging until its own timeout: the socket is gone, and the answer is
         # never arriving.
@@ -91,13 +103,36 @@ class JobConnections:
         self._pending[(run_id, call_id)] = fut
 
         try:
-            await ws.send_text(request(method, params, id=call_id))
             async with asyncio.timeout(timeout_s):
+                # The SEND is inside the timeout, and that is not tidiness. A
+                # WebSocket send applies backpressure: a job that has stopped
+                # reading its socket — which is exactly what a slow `replay`
+                # does, since the job answers on the same single thread that
+                # reads — fills the send window and `send_text` blocks. With
+                # it outside the timeout this coroutine never returns at all,
+                # and a cancel that hangs forever is worse than one that
+                # fails: the caller is told nothing and never sees the
+                # `databricks jobs cancel-run` escape hatch.
+                await ws.send_text(request(method, params, id=call_id))
                 return await fut
         except TimeoutError:
             raise ConnectionError(
                 f"job for {run_id} did not answer {method} in {timeout_s}s"
             ) from None
+        except (ConnectionError, RpcError):
+            # Already the two shapes the callers know how to render: 409 with
+            # the escape hatch, or 502 "the job refused".
+            raise
+        except Exception as exc:  # noqa: BLE001 - a dead socket is not a bug
+            # The socket was registered but is not usable. Starlette raises
+            # RuntimeError once a close frame has gone out, and the transport
+            # can raise its own errors — none of which any caller catches, so
+            # they surfaced as a bare 500. To the user "the job went away as
+            # you clicked cancel" is the same event as "no job attached", and
+            # only one of those was telling them what to do about it.
+            raise ConnectionError(
+                f"send to the job for {run_id} failed: {type(exc).__name__}: {exc}"
+            ) from exc
         finally:
             self._pending.pop((run_id, call_id), None)
 
