@@ -49,14 +49,28 @@ def test_it_runs_the_heartbeat_through_the_shared_entrypoint(job, params):
 
 def test_every_declared_parameter_is_forwarded_to_the_entrypoint(job, params):
     """A parameter declared but never passed through is worse than a missing
-    one: the run starts and silently ignores its own configuration."""
+    one: the run starts and silently ignores its own configuration.
+
+    The converse is allowed, and is not laxity. A task positional may carry a
+    RUNTIME dynamic value that is nobody's parameter — `{{workspace.url}}`,
+    substituted by Databricks when the task starts. DATABRICKS_HOST is exactly
+    that: a serverless task does not get it for free, and the workspace a job
+    runs in is not something anyone should be setting per run. So the rule is
+    "every declared parameter is forwarded", not "the two sets match".
+    """
     task = job["tasks"][0]["spark_python_task"]
     forwarded = {arg.split("=", 1)[0] for arg in task["parameters"]}
-    assert forwarded == set(params), f"{set(params) ^ forwarded} not forwarded"
+    assert set(params) <= forwarded, f"declared but not forwarded: {set(params) - forwarded}"
 
     for arg in task["parameters"]:
         key, _, value = arg.partition("=")
-        assert value == f"{{{{job.parameters.{key}}}}}", arg
+        if key in params:
+            assert value == f"{{{{job.parameters.{key}}}}}", arg
+        else:
+            assert value.startswith("{{") and value.endswith("}}"), (
+                f"{key} is neither a job parameter nor a runtime dynamic value; "
+                f"the harness would receive the literal {value!r}"
+            )
 
 
 def test_the_app_never_sends_the_telemetry_volume(params):

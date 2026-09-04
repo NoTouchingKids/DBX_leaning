@@ -144,7 +144,13 @@ class M2MTokenProvider:
         http: Any = None,
         now: Any = time.monotonic,
     ) -> None:
-        self._host = host.removeprefix("https://").removeprefix("http://").rstrip("/")
+        self._host = (
+            host.removeprefix("https://")
+            .removeprefix("http://")
+            .rstrip("/")
+            .split("?")[0]
+            .rstrip("/")
+        )
         self._client_id = client_id
         self._client_secret = client_secret
         self._scope = scope

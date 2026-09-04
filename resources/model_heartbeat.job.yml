@@ -151,3 +151,17 @@ resources:
               - DBX_OAUTH_SECRET_SCOPE={{job.parameters.DBX_OAUTH_SECRET_SCOPE}}
               - DBX_OAUTH_CLIENT_ID_KEY={{job.parameters.DBX_OAUTH_CLIENT_ID_KEY}}
               - DBX_OAUTH_SECRET_KEY={{job.parameters.DBX_OAUTH_SECRET_KEY}}
+              # NOT a job parameter, and not `${workspace.url}` either. This is
+              # a RUNTIME dynamic value: Databricks substitutes `{{workspace.url}}`
+              # when the task starts, the way it does `{{job.parameters.X}}`
+              # above. A bundle `${workspace.url}` would be substituted at
+              # DEPLOY time instead, which also works — but declaring it as a
+              # job parameter means it shows in the run UI for no reason, and
+              # the workspace a job is running in is not configuration.
+              #
+              # It is here because a serverless task does NOT get DATABRICKS_HOST
+              # for free. Without it `JobConfig.workspace_host` is None, the M2M
+              # exchange has nowhere to send the request, and `auth_headers`
+              # returns {} — so every run went unobserved with the durable path
+              # perfectly healthy, which is the hardest kind of failure to see.
+              - DATABRICKS_HOST={{workspace.url}}

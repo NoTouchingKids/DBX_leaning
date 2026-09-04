@@ -227,9 +227,37 @@ def test_every_parameter_reaches_the_task():
     Serverless tasks have no env vars, so each one has to be forwarded
     explicitly as a `KEY={{job.parameters.KEY}}` positional. Adding a
     parameter and forgetting this line fails silently: the job accepts it, the
-    harness never sees it.
+    harness never sees it — which is exactly what happened to DATABRICKS_HOST
+    on 2026-09-04, and what this test caught.
+
+    The reverse is NOT a fault. A task positional may carry a RUNTIME dynamic
+    value that is nobody's parameter — `{{workspace.url}}` is substituted by
+    Databricks when the task starts, and the workspace a job runs in is not
+    configuration anyone should be setting per run.
     """
     job = _heartbeat_job()
     declared = {p["name"] for p in job["parameters"]}
-    forwarded = {arg.split("=", 1)[0] for arg in job["tasks"][0]["spark_python_task"]["parameters"]}
-    assert declared == forwarded, f"declared but not forwarded: {declared - forwarded}"
+    args = job["tasks"][0]["spark_python_task"]["parameters"]
+    forwarded = {arg.split("=", 1)[0] for arg in args}
+
+    assert declared <= forwarded, f"declared but not forwarded: {declared - forwarded}"
+
+    for name in forwarded - declared:
+        value = next(a.split("=", 1)[1] for a in args if a.startswith(f"{name}="))
+        assert value.startswith("{{") and value.endswith("}}"), (
+            f"{name} is forwarded but is neither a job parameter nor a runtime "
+            f"dynamic value; it would reach the harness as the literal {value!r}"
+        )
+
+
+def test_the_job_is_told_which_workspace_it_is_in():
+    """A serverless task does NOT get DATABRICKS_HOST for free.
+
+    Without it `JobConfig.workspace_host` is None, the M2M exchange has
+    nowhere to send its request, and `auth_headers` returns {} — so the run
+    goes unobserved with a perfectly healthy durable path. That is the hardest
+    kind of failure to see, and it is what every run did until this line was
+    added.
+    """
+    args = _heartbeat_job()["tasks"][0]["spark_python_task"]["parameters"]
+    assert "DATABRICKS_HOST={{workspace.url}}" in args
