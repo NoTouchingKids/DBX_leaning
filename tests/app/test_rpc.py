@@ -45,7 +45,7 @@ def _msg(seq, run_id="r1", **extra):
 def test_a_job_attaches_says_hello_and_is_acknowledged(app_and_hub):
     client, hub = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
-        ws.send_text(request(Method.HELLO, {"run_id": "r1", "next_seq": 4000}, id=1).decode())
+        ws.send_text(request(Method.HELLO, {"run_id": "r1", "next_seq": 4000}, id=1))
         reply = json.loads(ws.receive_text())
         assert reply["id"] == 1
         assert reply["result"]["observed"] is True
@@ -62,14 +62,12 @@ def test_telemetry_is_ingested_and_never_acknowledged(app_and_hub):
 
     with client.websocket_connect("/ws/job/r1") as ws:
         ws.send_text(
-            notification(
-                Method.TELEMETRY, {"run_id": "r1", "messages": [_msg(0), _msg(1)]}
-            ).decode()
+            notification(Method.TELEMETRY, {"run_id": "r1", "messages": [_msg(0), _msg(1)]})
         )
         # Prove nothing came back by asking something that DOES reply and
         # checking the reply is that one — a bare "no message" assertion would
         # only prove the socket was slow.
-        ws.send_text(request(Method.PING, {}, id=7).decode())
+        ws.send_text(request(Method.PING, {}, id=7))
         reply = json.loads(ws.receive_text())
         assert reply["id"] == 7
 
@@ -92,9 +90,9 @@ def test_a_message_for_another_run_is_refused(app_and_hub):
             notification(
                 Method.TELEMETRY,
                 {"run_id": "r1", "messages": [_msg(0, run_id="r1"), _msg(1, run_id="OTHER")]},
-            ).decode()
+            )
         )
-        ws.send_text(request(Method.PING, {}, id=1).decode())
+        ws.send_text(request(Method.PING, {}, id=1))
         json.loads(ws.receive_text())
 
     assert [m.seq for m in seen] == [0]
@@ -108,14 +106,14 @@ def test_a_malformed_frame_gets_an_error_rather_than_closing_the_socket(app_and_
         reply = json.loads(ws.receive_text())
         assert reply["error"]["code"] == ErrorCode.PARSE_ERROR
 
-        ws.send_text(request(Method.PING, {}, id=2).decode())
+        ws.send_text(request(Method.PING, {}, id=2))
         assert json.loads(ws.receive_text())["id"] == 2, "the socket did not survive"
 
 
 def test_an_unknown_method_is_refused_by_name(app_and_hub):
     client, _ = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
-        ws.send_text(request("escalate", {}, id=3).decode())
+        ws.send_text(request("escalate", {}, id=3))
         reply = json.loads(ws.receive_text())
         assert reply["error"]["code"] == ErrorCode.METHOD_NOT_FOUND
 
@@ -260,7 +258,7 @@ def test_a_job_socket_needs_no_credential_from_the_app(app_and_hub):
     """
     client, hub = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
-        ws.send_text(request(Method.PING, {}, id=1).decode())
+        ws.send_text(request(Method.PING, {}, id=1))
         assert json.loads(ws.receive_text())["result"]["pong"] is True
         assert hub.job_sockets.is_connected("r1")
 

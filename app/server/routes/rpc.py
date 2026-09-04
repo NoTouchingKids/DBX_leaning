@@ -87,7 +87,7 @@ async def job_socket(websocket: WebSocket, run_id: str) -> None:
             try:
                 frame = parse(raw)
             except RpcError as exc:
-                await websocket.send_text(failure(None, exc).decode())
+                await websocket.send_text(failure(None, exc))
                 continue
 
             if isinstance(frame, Response):
@@ -111,19 +111,17 @@ async def _handle(hub: ServiceHub, websocket: WebSocket, run_id: str, req: Reque
         result = await _invoke(hub, run_id, req)
     except RpcError as exc:
         if not req.is_notification:
-            await websocket.send_text(failure(req.id, exc).decode())
+            await websocket.send_text(failure(req.id, exc))
         return
     except Exception as exc:  # noqa: BLE001
         log.exception("handler for %s raised", req.method)
         if not req.is_notification:
-            await websocket.send_text(
-                failure(req.id, RpcError(ErrorCode.INTERNAL_ERROR, str(exc))).decode()
-            )
+            await websocket.send_text(failure(req.id, RpcError(ErrorCode.INTERNAL_ERROR, str(exc))))
         return
 
     # A notification gets no reply, ever.
     if not req.is_notification:
-        await websocket.send_text(success(req.id, result).decode())
+        await websocket.send_text(success(req.id, result))
 
 
 async def _invoke(hub: ServiceHub, run_id: str, req: Request) -> Any:

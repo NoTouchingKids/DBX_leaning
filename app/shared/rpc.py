@@ -168,21 +168,21 @@ class Response:
         return f"<response id={self.id} {'ok' if self.ok else self.error}>"
 
 
-def request(method: str, params: dict[str, Any] | None = None, *, id: int | str) -> bytes:
+def request(method: str, params: dict[str, Any] | None = None, *, id: int | str) -> str:
     return _encode({"jsonrpc": JSONRPC_VERSION, "id": id, "method": method, "params": params or {}})
 
 
-def notification(method: str, params: dict[str, Any] | None = None) -> bytes:
+def notification(method: str, params: dict[str, Any] | None = None) -> str:
     """No `id`, which is what makes it a notification — a reply would be a
     protocol error, not merely unnecessary."""
     return _encode({"jsonrpc": JSONRPC_VERSION, "method": method, "params": params or {}})
 
 
-def success(id: int | str | None, result: Any) -> bytes:
+def success(id: int | str | None, result: Any) -> str:
     return _encode({"jsonrpc": JSONRPC_VERSION, "id": id, "result": result})
 
 
-def failure(id: int | str | None, error: RpcError) -> bytes:
+def failure(id: int | str | None, error: RpcError) -> str:
     return _encode({"jsonrpc": JSONRPC_VERSION, "id": id, "error": error.as_dict()})
 
 
@@ -225,5 +225,26 @@ def parse(raw: str | bytes) -> Request | Response:
     raise RpcError(ErrorCode.INVALID_REQUEST, "frame is neither a request nor a response")
 
 
-def _encode(payload: dict[str, Any]) -> bytes:
-    return json.dumps(payload, separators=(",", ":")).encode()
+def _encode(payload: dict[str, Any]) -> str:
+    """TEXT, not bytes, and the type is the safeguard.
+
+    Every frame builder returns `str` so that a caller doing the obvious thing
+    — `ws.send(notification(...))` — sends a WebSocket TEXT frame. Returning
+    `bytes` made that same obvious call send a BINARY frame, which the app
+    then failed to read:
+
+        raw = await websocket.receive_text()
+        KeyError: 'text'
+
+    Starlette's `receive_text()` wants `message["text"]`; a binary frame
+    carries `message["bytes"]` instead. The app had `.decode()` at all five of
+    its own send sites and was correct; `job/ws.py` had six sends without one
+    and was not. Nothing caught it because each side was tested against a
+    stand-in more lenient than the real counterpart — `websockets.sync.server`
+    accepts either kind, and the app's tests built their own text frames
+    rather than using the job's client.
+
+    `parse()` still accepts `str | bytes`: strict in what we send, liberal in
+    what we accept.
+    """
+    return json.dumps(payload, separators=(",", ":"))

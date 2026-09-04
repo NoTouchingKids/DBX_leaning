@@ -91,7 +91,7 @@ class JobConnections:
         self._pending[(run_id, call_id)] = fut
 
         try:
-            await ws.send_text(request(method, params, id=call_id).decode())
+            await ws.send_text(request(method, params, id=call_id))
             async with asyncio.timeout(timeout_s):
                 return await fut
         except TimeoutError:

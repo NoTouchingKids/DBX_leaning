@@ -31,6 +31,12 @@ class Server:
 
     def __init__(self):
         self.frames: list[dict] = []
+        #: The RAW frames, kept alongside the parsed ones so a test can assert
+        #: what KIND each was. `websockets` hands back `str` for a text frame
+        #: and `bytes` for a binary one, and it accepts both — which is
+        #: precisely why this had to be recorded rather than trusted. See
+        #: `test_every_frame_the_job_sends_is_text`.
+        self.raw_frames: list[str | bytes] = []
         self.ready = threading.Event()
         self._responses: queue.Queue[dict] = queue.Queue()
         self._conn = None
@@ -42,6 +48,7 @@ class Server:
         self.ready.set()
         try:
             for raw in ws:
+                self.raw_frames.append(raw)
                 frame = json.loads(raw)
                 self.frames.append(frame)
                 if "result" in frame or "error" in frame:
@@ -368,3 +375,45 @@ def test_app_client_builds_no_provider_without_client_credentials():
     # in job/auth.py: `auth_headers` with no client_id/secret never touches
     # `m2m` at all.
     assert client is not None
+
+
+def test_every_frame_the_job_sends_is_text():
+    """The bug this file did not catch, now pinned.
+
+    `shared.rpc`'s builders returned `bytes`, so `ws.send(...)` in `job/ws.py`
+    emitted BINARY frames. The app reads with starlette's `receive_text()`,
+    which wants `message["text"]` and gets `message["bytes"]`:
+
+        raw = await websocket.receive_text()
+        KeyError: 'text'
+
+    Every frame the job sent was affected — hello first, so the socket died on
+    the app's first read of every run.
+
+    Nothing here caught it because `websockets.sync.server` accepts either
+    kind and `json.loads` takes either, so the assertions above all passed on
+    binary frames. The app's own tests did not catch it either, for the mirror
+    reason: they build their own frames with `send_text`, so they never
+    exercised what the job actually puts on the wire. Two lenient stand-ins,
+    one real incompatibility between them.
+
+    `websockets` returns `str` for a text frame and `bytes` for a binary one,
+    which makes the frame KIND directly assertable.
+    """
+    with Server() as server:
+        client = _client(server, batch_max=10)
+        client.start()
+        try:
+            assert server.wait_for(Method.HELLO)
+            client.send({"type": "log", "seq": 1})
+            assert server.wait_for(Method.TELEMETRY)
+        finally:
+            client.stop()
+
+        assert server.raw_frames, "nothing arrived; the test proves nothing"
+        binary = [f for f in server.raw_frames if not isinstance(f, str)]
+        assert not binary, (
+            f"{len(binary)} of {len(server.raw_frames)} frames were binary. "
+            f"Starlette's receive_text() raises KeyError: 'text' on those, so "
+            f"the app drops the socket on its first read."
+        )
