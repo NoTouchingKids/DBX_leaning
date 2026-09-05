@@ -35,13 +35,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Two extras, because there are two deployable units and no models yet.
+# Two extras, because there are two deployable units and no model needs one.
 #
 # The per-model extras that used to be here — gurobi, forecasting, mcmc,
 # bayesian, nn, scenario, streaming, annealing, ortools, panel, and the
 # `models` aggregate — are on `dev` with the models they scoped. That split was
-# the good part of v3's packaging and it comes back with them; it simply has
-# nothing to scope right now.
+# the good part of v3's packaging and it comes back with them.
+#
+# `annealing` came back first and did NOT bring its extra, which is the whole
+# reason it was ported first: the extra in v3 was an empty list, so the model
+# that reads Unity Catalog and writes a Delta table still adds nothing to any
+# environment. A model that needs a solver declares it in its own
+# `models/<name>/pyproject.toml` now, not here.
 #
 # The SDK note that used to sit here has changed, and v4 reverses half of it:
 # `databricks-sdk` is adopted for TOKEN ACQUISITION AND REFRESH, because
@@ -65,14 +70,20 @@ job = [
 # PEP 735 group, not an extra: `uv sync` installs these by default for
 # development, and nothing that installs the package can pull them in.
 dev = [
-    # The one model this branch has, installed editable so the suite can drive
-    # it. It is a DEV dependency and must stay one: the platform does not
+    # The models this branch has, installed editable so the suite can drive
+    # them. They are DEV dependencies and must stay ones: the platform does not
     # depend on any particular model — the harness finds whatever is installed
     # by entry point — and, concretely, the job environment installs this
     # repo's root with pip, which cannot resolve `dbx-model-heartbeat` from
     # PyPI. Only `[tool.uv.sources]` below knows where it lives, and only uv
     # reads that. A model in `[project.dependencies]` fails the deploy.
+    #
+    # Two of them now, and the second is the one that proves the rule rather
+    # than following it: `dbx-model-annealing` is a real model — it reads Unity
+    # Catalog and writes a results table — and its own `dependencies` list is
+    # still empty. Nothing about being a model costs an environment anything.
     "dbx-model-heartbeat",
+    "dbx-model-annealing",
     # The shared model template. A DEV dependency here for the same reason the
     # heartbeat is one: on Databricks it is provided by the serverless
     # environment, not resolved from an index, so it must not appear in
@@ -129,13 +140,19 @@ dev = [
 members = ["models/*", "libs/*"]
 
 [tool.uv.sources]
-# Both are workspace members, and this block is what makes `uv sync` install
-# them from the tree instead of looking on PyPI, where neither exists.
-# Commenting it out makes `uv sync` fail outright, which is the good failure —
-# the bad one would be a silent fall through to an index.
+# All three are workspace members, and this block is what makes `uv sync`
+# install them from the tree instead of looking on PyPI, where none of them
+# exists. Commenting it out makes `uv sync` fail outright, which is the good
+# failure — the bad one would be a silent fall through to an index.
 # `editable` is not spelled here: a workspace member is installed editable
 # already, and uv >=0.8 rejects both keys together.
+#
+# `[tool.uv.workspace] members` globs `models/*`, so a new model is FOUND
+# without editing anything. It is still listed here and in the dev group above,
+# because being a workspace member says where a package lives, not that
+# anything installs it.
 dbx-model-heartbeat = { workspace = true }
+dbx-model-annealing = { workspace = true }
 dbx-modelkit = { workspace = true }
 
 [tool.uv]

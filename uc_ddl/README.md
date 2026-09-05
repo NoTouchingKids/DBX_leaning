@@ -41,16 +41,21 @@ Four things worth knowing before changing anything here:
   these keys. Change one, change both — a mismatch surfaces at write time on a
   real workspace and nowhere in the test suite.
 - **The per-model tables mirror each model's result rows, and nothing checks
-  that.** `tests/deploy/test_bundle.py` proves a table with the right *name*
-  exists for every model, in both directions. It does not compare a single
-  column. The two failure modes are not symmetric: a column no model writes is
-  harmless clutter, but **a row key with no column is a silently dropped
-  field**. Diff them by hand when you touch either side — every key in the
-  dict a model passes to `emit("result", rows=...)` or returns from
-  `results()` needs a column, minus `run_id` and `chunk_index`, which
-  `job/emitter.py` stamps and the model must not supply. (Audited across all
-  eleven models on 2026-08-25: no mismatches, and no NOT NULL column receives
-  a null on any path.)
+  that.** Not one column is compared anywhere. The two failure modes are not
+  symmetric: a column no model writes is harmless clutter, but **a row key with
+  no column is a silently dropped field**. Diff them by hand when you touch
+  either side.
+  **What to diff against changed in v4.** A model no longer hands rows to the
+  harness — `job/delta.py` is gone, and each model writes its own table in
+  `poststep` through Spark. So the thing to compare a table with is the model's
+  own row builder and the schema tuple it writes with, e.g.
+  `models/annealing/annealing/model.py::RESULT_SCHEMA`, which names every
+  column and its SQL type in order. `run_id` and `chunk_index` are part of that
+  now: `job/emitter.py` used to stamp them and no longer exists, so a model
+  that does not supply them writes nulls into two NOT NULL columns.
+  (v3 audit, across all eleven models on 2026-08-25: no mismatches, and no NOT
+  NULL column received a null on any path. Only `results_annealing` has been
+  re-checked against a v4 model.)
 - **`main.dbx_leaning` is hardcoded here and is `${var.catalog}` /
   `${var.schema}` everywhere else.** These files are applied by hand and
   `databricks sql query --file` does no substitution, so retargeting a

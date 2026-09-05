@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "dbx-leaning",
+    "dbx-model-annealing",
     "dbx-model-heartbeat",
     "dbx-modelkit",
 ]
@@ -471,6 +472,7 @@ job = [
 [package.dev-dependencies]
 dev = [
     { name = "databricks-connect", marker = "python_full_version >= '3.12'" },
+    { name = "dbx-model-annealing" },
     { name = "dbx-model-heartbeat" },
     { name = "dbx-modelkit" },
     { name = "jsonschema" },
@@ -498,6 +500,7 @@ provides-extras = ["app", "job"]
 [package.metadata.requires-dev]
 dev = [
     { name = "databricks-connect", marker = "python_full_version >= '3.12'", specifier = "~=18.0.0" },
+    { name = "dbx-model-annealing", editable = "models/annealing" },
     { name = "dbx-model-heartbeat", editable = "models/heartbeat" },
     { name = "dbx-modelkit", editable = "libs/modelkit" },
     { name = "jsonschema", specifier = ">=4.23" },
@@ -508,6 +511,11 @@ dev = [
     { name = "ruff", specifier = ">=0.4" },
     { name = "ty", specifier = ">=0.0.1a1" },
 ]
+
+[[package]]
+name = "dbx-model-annealing"
+version = "0.1.0"
+source = { editable = "models/annealing" }
 
 [[package]]
 name = "dbx-model-heartbeat"

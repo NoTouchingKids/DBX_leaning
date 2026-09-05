@@ -29,6 +29,7 @@ direct form when the question is about the model.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,6 +126,15 @@ def run_local(
     being able to pass it here. See `job/auth.py`.
     """
     root = Path(telemetry_dir) if telemetry_dir else Path(tempfile.mkdtemp(prefix="dbx-local-"))
+    # The same one line `job/main.py` carries, for the same reason: a model
+    # writes its own results table and keys the rows by the run id it can see.
+    # Without this a notebook run puts telemetry under `run_id` and rows under
+    # whatever the model falls back to — two unrelated halves, neither of them
+    # wrong enough to raise. `run_local` is the path a model author actually
+    # develops against, so it is the path where the mismatch would be found
+    # last.
+    os.environ["DBX_RUN_ID"] = run_id
+
     writer = PartFileWriter(root, run_id)
 
     harness = Harness(

@@ -1,0 +1,199 @@
+# The annealing job — Slice 4's first half, and the control case.
+#
+# A real model: it reads Unity Catalog, searches for a while, and writes its own
+# results table. What it does NOT do is carry a single third-party library, so
+# this environment is byte for byte the heartbeat's plus one more package path.
+# That is the point of deploying this model first — if it breaks, the fault is
+# the platform's and not a solver's.
+#
+#   databricks bundle deploy -t dev
+#   databricks bundle run model_annealing -t dev
+#
+# `project: dbx-leaning` is load-bearing rather than decorative. v4's app finds
+# its jobs by that tag instead of being handed ids the bundle interpolated —
+# which is what lets a job live in another bundle, another repo, or be created
+# by hand, without the app changing. A misspelling here means the app simply
+# does not see this job; `/healthz` reports what was discovered, which is what
+# keeps that from being a mystery.
+#
+# What it does NOT have, and deliberately:
+#
+#   * no model-specific dependency extra. The harness floor is the whole
+#     environment, because this model imports nothing a solver would.
+#   * no DBX_RESULTS_TABLE. A model owns its own data lifecycle in v4, so the
+#     harness has no table to be told about — and this model DOES write one.
+#     It learns where from DBX_CATALOG/DBX_SCHEMA below, which is why those two
+#     are more than decoration here: they were inert for the heartbeat, and for
+#     this job they choose which catalog the results land in.
+#
+# This file repeats most of resources/model_heartbeat.job.yml rather than
+# sharing an anchor with it. That duplication is the design (CLAUDE.md, "a
+# model is a microservice"): it is what lets a model that later needs GPU
+# compute, or a longer timeout, change its own file and nothing else.
+
+resources:
+  jobs:
+    model_annealing:
+      name: "[${bundle.target}] dbx-leaning · annealing"
+      description: >-
+        Simulated annealing over a knapsack of taxi trips: which trips to
+        accept in a fixed shift to maximise fares. Reads samples.nyctaxi.trips,
+        writes results_annealing. Depends on no third-party library at all.
+      max_concurrent_runs: 1
+      # Comfortably past the default config below, which is sized in the
+      # hundreds of seconds. Raise `iterations` far enough and this is what
+      # stops the run rather than the schedule finishing — Free Edition caps
+      # concurrent tasks at 5 account-wide, so a job that will not end is a job
+      # that blocks four others.
+      timeout_seconds: 1800
+      queue:
+        enabled: true
+      tags:
+        project: dbx-leaning
+        model: annealing
+
+      parameters:
+        - name: DBX_RUN_ID
+          # Empty is a supported trigger — `bundle run` sends nothing — and the
+          # model notices: with no run id to key its rows by it falls back to
+          # `job-{{DATABRICKS_JOB_RUN_ID}}` rather than inventing one, so the
+          # rows can still be traced to a run in the Jobs UI. See
+          # `annealing/model.py::_resolve_run_id`.
+          default: ""
+        - name: DBX_MODEL
+          # A name, resolved by entry point — not an import path. The harness
+          # asks importlib.metadata what is installed, so this stays correct if
+          # the model moves to its own repository.
+          default: annealing
+        # Sized so a deployed run lasts minutes rather than milliseconds, which
+        # is half of why this model exists: a heartbeat never exercises result
+        # reporting and never meets the ingress's real timeouts. An iteration
+        # measured ~3.6us in pure Python, so 20M is roughly 70s of search on a
+        # laptop and more on serverless. Raise it well past the ingress's
+        # suspected ~120s cut when the question is whether a long stream
+        # survives it; lower it to 30_000 when the question is anything else.
+        #
+        # `progress_every` is iterations per progress message AND per cancel
+        # check — one `step` is one sweep — so it sets the live cadence: 200
+        # sweeps here, i.e. a message every few hundred milliseconds. The model
+        # bounds it at both ends whatever this says (MAX_PROGRESS_POINTS,
+        # MAX_SWEEP_ITERATIONS), so a careless value degrades rather than
+        # flooding the channel or making a cancel look ignored.
+        - name: DBX_MODEL_CONFIG
+          default: '{"iterations": 20000000, "progress_every": 100000}'
+        # NOT inert for this job. The model composes
+        # `<catalog>.<schema>.results_annealing` from these two and appends its
+        # shift to it through Spark, so pointing them at a catalog whose DDL
+        # has not been applied means `saveAsTable` creates the table from the
+        # model's own schema — see uc_ddl/002_model_results.sql, which is the
+        # authority and carries the comments and constraints.
+        - name: DBX_CATALOG
+          default: ${var.catalog}
+        - name: DBX_SCHEMA
+          default: ${var.schema}
+        # Where telemetry part files go — uc_ddl/004_telemetry_volume.sql.
+        # Slice 0 settled the shape: a part is durable only when CLOSED, so
+        # this volume sees whole files, never a handle held open.
+        - name: DBX_TELEMETRY_VOLUME
+          default: /Volumes/${var.catalog}/${var.schema}/telemetry
+        # Empty means the run proceeds unobserved, which is the normal case
+        # rather than a degraded one — apps run ~8h/day and jobs do not. This
+        # model's results survive it either way: they go to Unity Catalog
+        # whether or not anyone is watching the search happen.
+        - name: DBX_APP_URL
+          default: ${var.app_public_url}
+
+        # --- the shared ingress identity -------------------------------
+        #
+        # LOCATIONS ONLY — a scope and two key names, none of them a
+        # credential. BOTH halves of the identity live in the secret scope and
+        # are read at run time with `dbutils.secrets.get`.
+        #
+        # That matters because job parameters are VISIBLE: they come back from
+        # `databricks jobs get-run` and are shown in the run UI. And there is
+        # nowhere else to put a secret anyway — `databricks bundle schema`
+        # gives a spark_python_task only `parameters`, `python_file` and
+        # `source`, and serverless has no `spark_env_vars`.
+        #
+        # Why a shared principal at all: the alternative is the job's own
+        # runtime identity, which means every principal any job runs as needs
+        # CAN_USE on the app. One ingress principal is one grant for any number
+        # of models, including ones in other bundles or repositories.
+        #
+        # All three empty is a supported, normal deploy: the job falls back to
+        # its runtime identity, and if that lacks CAN_USE the run goes
+        # unobserved, which is not a failure. See job/auth.py.
+        - name: DBX_OAUTH_SECRET_SCOPE
+          default: ${var.job_ingress_scope}
+        - name: DBX_OAUTH_CLIENT_ID_KEY
+          default: ${var.job_ingress_client_id_key}
+        - name: DBX_OAUTH_SECRET_KEY
+          default: ${var.job_ingress_secret_key}
+
+      environments:
+        - environment_key: annealing
+          spec:
+            # `environment_version`, NOT `client`. The bundle schema is blunt
+            # about it — the `client` field's entire description is "Use
+            # `environment_version` instead" — and the two are not spellings of
+            # the same thing: each environment version pins its own Python.
+            #
+            # 5, because that is what this repo is resolved against.
+            # `[tool.databricks.environment]` in pyproject.toml records it, and
+            # `databricks environments setup-local --serverless-version 5` is
+            # what wrote both that and the `constraint-dependencies` block.
+            environment_version: "5"
+            dependencies:
+              # INSTALLED, not synced. Python finds an installed package, so
+              # there is no repo root to search for and nothing to copy.
+              #
+              # The model is its own distribution and brings its own
+              # dependencies — of which it has none. This list is therefore the
+              # heartbeat's list plus one line, which is the claim this model
+              # is here to test: `pyspark` comes from the runtime and
+              # `modelkit` from the environment, so a model that reads Unity
+              # Catalog and writes a Delta table still adds nothing.
+              - -r ${workspace.file_path}/job/requirements.txt
+              - ${workspace.file_path}
+              # The shared model template, installed as a SERVERLESS
+              # ENVIRONMENT dependency rather than as a dependency of the
+              # model. Every model environment gets this line and no model
+              # declares it — see libs/modelkit/pyproject.toml and
+              # docs/docs-databricks-com-aws-en-compute-serverless-dependencies.md,
+              # "Create common tools to share across your workspace".
+              - ${workspace.file_path}/libs/modelkit
+              - ${workspace.file_path}/models/annealing
+
+      tasks:
+        - task_key: run
+          environment_key: annealing
+          spark_python_task:
+            python_file: ${workspace.file_path}/job/run_model.py
+            source: WORKSPACE
+            parameters:
+              - DBX_RUN_ID={{job.parameters.DBX_RUN_ID}}
+              - DBX_MODEL={{job.parameters.DBX_MODEL}}
+              - DBX_MODEL_CONFIG={{job.parameters.DBX_MODEL_CONFIG}}
+              - DBX_CATALOG={{job.parameters.DBX_CATALOG}}
+              - DBX_SCHEMA={{job.parameters.DBX_SCHEMA}}
+              - DBX_TELEMETRY_VOLUME={{job.parameters.DBX_TELEMETRY_VOLUME}}
+              - DBX_APP_URL={{job.parameters.DBX_APP_URL}}
+              - DBX_OAUTH_SECRET_SCOPE={{job.parameters.DBX_OAUTH_SECRET_SCOPE}}
+              - DBX_OAUTH_CLIENT_ID_KEY={{job.parameters.DBX_OAUTH_CLIENT_ID_KEY}}
+              - DBX_OAUTH_SECRET_KEY={{job.parameters.DBX_OAUTH_SECRET_KEY}}
+              # NOT a job parameter, and not `${workspace.url}` either. This is
+              # a RUNTIME dynamic value: Databricks substitutes
+              # `{{workspace.url}}` when the task starts, the way it does
+              # `{{job.parameters.X}}` above. A bundle `${workspace.url}` would
+              # be substituted at DEPLOY time instead, which also works — but
+              # declaring it as a job parameter means it shows in the run UI
+              # for no reason, and the workspace a job is running in is not
+              # configuration.
+              #
+              # It is here because a serverless task does NOT get
+              # DATABRICKS_HOST for free. Without it `JobConfig.workspace_host`
+              # is None, the M2M exchange has nowhere to send its request, and
+              # `auth_headers` returns {} — so every run goes unobserved with
+              # the durable path perfectly healthy, which is the hardest kind
+              # of failure to see.
+              - DATABRICKS_HOST={{workspace.url}}

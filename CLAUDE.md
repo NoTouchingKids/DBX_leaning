@@ -208,7 +208,7 @@ models/         ONE INSTALLABLE PACKAGE PER MODEL, each its own distribution
                 with its own dependency list and ONE entry point. Discovered
                 by `importlib.metadata`, not by a registry — so a model in
                 another repository works identically. See models/README.md.
-                Only `heartbeat/` on this branch; the other eleven are on `dev`
+                `heartbeat/` and `annealing/` here; the other ten are on `dev`
 notebooks/      Databricks notebook source (`# COMMAND ----------` cells).
                 `heartbeat.py` is the answer to "how do I work on a model from
                 a notebook": %pip install three paths, then ordinary imports.

@@ -16,6 +16,7 @@ honest terminal status instead of vanishing mid-part.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 
@@ -83,6 +84,27 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
 def main(argv: list[str] | None = None) -> int:
     _setup_logging()
     cfg = JobConfig.from_env()
+
+    # THE RUN ID IS ONE VALUE, and this is what makes that true for everything
+    # else in the process.
+    #
+    # `JobConfig` generates `run-<hex>` when DBX_RUN_ID is absent or empty —
+    # which is the COMMON case, not an edge one: the job YAML defaults that
+    # parameter to `""`, and `run_model.py` drops empty arguments rather than
+    # exporting them, so `databricks bundle run` produces exactly this. Without
+    # the line below the generated id existed only on `cfg`, and a model
+    # reading DBX_RUN_ID for itself saw nothing.
+    #
+    # A model needs it because a model writes its own results table now, and
+    # those rows have to be keyed by the same run the telemetry is. Without
+    # this the two disagree — telemetry under `run-a1b2c3`, result rows under
+    # whatever the model fell back to — and nothing joins them back together.
+    # Neither side errors; the run just becomes two unrelated halves.
+    #
+    # Assigned rather than `setdefault`: `cfg.run_id` is the authoritative id
+    # whichever way it was arrived at, so the environment should agree with it
+    # rather than win over it.
+    os.environ["DBX_RUN_ID"] = cfg.run_id
 
     writer = PartFileWriter(
         cfg.telemetry_root,
