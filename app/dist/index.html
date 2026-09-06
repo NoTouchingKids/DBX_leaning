@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
-  The Slice 1 client. Hand-written, committed, served as-is — see
-  app/client/README.md for why there is no build step.
+  The client. Hand-written, committed, served as-is — see app/client/README.md
+  for why there is no build step.
 
   Slice 1's job was to show that a tick left a deployed job and arrived here.
   Slices 2 and 3 add the two things that can only be done to a job that is
@@ -10,12 +10,24 @@
   job over its RPC socket, both are triggered by a click, and neither has a
   timer behind it. If something breaks in the transport it is still visible
   here, because there is still nothing else in this file to break.
+
+  What this pass adds is the other half of a control surface: a run can be
+  STARTED from here, picked out of a list rather than remembered, and its
+  RESULT — the whole point of running it — is rendered instead of counted.
+
+  The rule that shapes all of it: nothing in this file knows the name of a
+  model. `progress.payload` is rendered by iterating whatever keys it has,
+  `result.preview` is charted by finding whatever columns are numeric, and the
+  chart's label is `primary_metric_label` because the producer said so. v3's
+  SPA had 20,117 lines of per-model views — 2.8x the models they visualised —
+  and deleting them is a large part of why v4 exists. Adding a model must cost
+  nothing here.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DBX_leaning · heartbeat</title>
+<title>DBX_leaning</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -28,16 +40,21 @@
   }
   * { box-sizing: border-box; }
   /* The `hidden` attribute is a UA rule of the lowest specificity, so any id or
-     class rule below that sets `display` silently outranks it — `#ack` and
-     `#cancelBox .row` both do. Without this the confirm step and the ack panel
-     are permanently on screen and the two-step cancel is one step. */
+     class rule below that sets `display` silently outranks it — `#ack`, `.row`
+     and `.panel` all do. Without this the confirm step, the ack panel and the
+     result panel are permanently on screen and the two-step cancel is one
+     step. Every `hidden` toggle in the script below leans on this one line. */
   [hidden] { display: none !important; }
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
   header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:12px;
            align-items:center; flex-wrap:wrap; }
   h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:-.01em; }
-  input, button { font:inherit; padding:6px 10px; border:1px solid var(--line);
-                  border-radius:6px; background:var(--bg); color:var(--fg); }
+  h2 { font-size:11px; margin:0; font-weight:600; letter-spacing:.06em;
+       text-transform:uppercase; color:var(--dim); }
+  input, button, select, textarea {
+    font:inherit; padding:6px 10px; border:1px solid var(--line);
+    border-radius:6px; background:var(--bg); color:var(--fg); }
+  textarea { font:12px/1.5 var(--mono); width:100%; resize:vertical; }
   button { cursor:pointer; }
   button:disabled { opacity:.45; cursor:default; }
   button.bad { border-color:var(--bad); color:var(--bad); }
@@ -46,14 +63,32 @@
   .pill.live { color:var(--ok); border-color:var(--ok); }
   .pill.down { color:var(--bad); border-color:var(--bad); }
   main { padding:20px; display:grid; gap:16px; max-width:900px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .panel { border:1px solid var(--line); border-radius:8px; padding:12px 14px;
+           display:grid; gap:10px; }
   .bar { height:6px; background:var(--line); border-radius:99px; overflow:hidden; }
   .bar > i { display:block; height:100%; width:0; background:var(--accent);
              transition:width .3s ease; }
   .stats { display:flex; gap:24px; flex-wrap:wrap; color:var(--dim); font:12px var(--mono); }
   .stats b { color:var(--fg); font-weight:600; }
+  .big { font:600 19px/1.2 var(--mono); }
   .note { color:var(--dim); font-size:12px; }
   .ok { color:var(--ok); }
   .bad { color:var(--bad); }
+  pre { margin:0; font:12px/1.5 var(--mono); color:var(--dim);
+        white-space:pre-wrap; word-break:break-word; }
+  /* Generic key/value rendering: the payload viewer and the preview fallback
+     both pour into this and neither knows what the keys will be. */
+  .kv { display:grid; grid-template-columns:max-content minmax(0,1fr);
+        gap:2px 16px; font:12px/1.6 var(--mono); }
+  .kv > .k { color:var(--dim); }
+  .kv > .v { word-break:break-word; }
+  /* Fixed height and 100% width, because the SVG inside is drawn in
+     percentages — see sparkline(). Nothing here measures anything. */
+  .chart { display:block; width:100%; height:110px; border:1px solid var(--line);
+           border-radius:6px; }
+  .chart polyline { fill:none; stroke:var(--accent); stroke-width:1.5;
+                    stroke-linejoin:round; stroke-linecap:round; }
   /* Deliberately NOT the error colour. A gap is routinely not a fault — see
      the note inside the box — and painting "you joined this run late" in red
      trains people to ignore the one colour that should mean something. */
@@ -63,6 +98,8 @@
   #gapText { font-weight:600; }
   #feed { border:1px solid var(--line); border-radius:8px; overflow:auto; max-height:56vh; }
   table { border-collapse:collapse; width:100%; font:12px/1.6 var(--mono); }
+  th { padding:3px 10px; text-align:left; font-weight:600; color:var(--dim);
+       border-bottom:1px solid var(--line); }
   td { padding:3px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
   td.seq { color:var(--dim); text-align:right; width:1%; }
   td.kind { width:1%; color:var(--dim); }
@@ -70,18 +107,18 @@
   tr.WARNING td, tr.ERROR td { color:var(--bad); }
   tr.gaprow td { color:var(--dim); border-top:1px dashed var(--dim); text-align:center; }
   .empty { padding:24px; color:var(--dim); text-align:center; }
+  #runs { max-height:30vh; overflow:auto; }
+  #runs tbody tr { cursor:pointer; }
+  #runs tbody tr:hover, #runs tbody tr:focus { background:var(--line); outline:none; }
   #cancelBox { border-top:1px solid var(--line); padding-top:16px; display:grid; gap:8px; }
-  #cancelBox .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   #ack { border:1px solid var(--line); border-radius:6px; padding:10px 12px;
          display:grid; gap:6px; }
-  #ackJson { margin:0; font:12px/1.5 var(--mono); color:var(--dim);
-             white-space:pre-wrap; word-break:break-word; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>DBX_leaning · heartbeat</h1>
+  <h1>DBX_leaning</h1>
   <input id="run" placeholder="run_id" size="26" spellcheck="false">
   <button id="watch">Watch</button>
   <span id="conn" class="pill">idle</span>
@@ -89,6 +126,50 @@
 </header>
 
 <main>
+
+  <!-- Starting a run. The models come from GET /api/models, which lists the
+       job map the app discovered — a name here is a name the app can hand to
+       run-now, not a name this file knows. -->
+  <section class="panel" id="launch">
+    <div class="row">
+      <h2>Start a run</h2>
+      <span id="modelNote" class="note"></span>
+    </div>
+    <div class="row">
+      <label for="model" class="note">model</label>
+      <select id="model"><option value="">loading…</option></select>
+      <label for="newRun" class="note">run id</label>
+      <input id="newRun" placeholder="(the app mints one)" size="18" spellcheck="false">
+      <button id="start" disabled>Start run</button>
+    </div>
+    <!-- Verbatim: whatever is in here is JSON-encoded into DBX_MODEL_CONFIG and
+         handed to the model's factory. There are deliberately NO per-model
+         defaults prefilled — that would be this file knowing what a model
+         takes, which is the one thing it must not know. `{}` means "the
+         model's own defaults", which every model already has. -->
+    <label for="config" class="note">config → <code>DBX_MODEL_CONFIG</code>, passed
+      through verbatim. <code>{}</code> leaves the model on its own defaults.
+      It travels as a <b>job parameter</b>, which comes back from
+      <code>databricks jobs get-run</code> and is shown in the run UI — so no
+      secrets in here. A secret is read in the job, by name, from a scope.</label>
+    <textarea id="config" rows="2" spellcheck="false">{}</textarea>
+    <div id="launchNote" class="note"></div>
+  </section>
+
+  <!-- Fetched on load and on a click, never on a timer. This is the one view
+       on the page that touches the run store, and the store may still be the
+       warehouse-backed default (app/server/store.py) where cost is uptime —
+       so a refresh is a decision somebody makes, the same as everything else
+       here. -->
+  <section class="panel" id="runsBox">
+    <div class="row">
+      <h2>Recent runs</h2>
+      <button id="reload">Refresh</button>
+      <span id="runsNote" class="note"></span>
+    </div>
+    <div id="runs"></div>
+  </section>
+
   <div class="bar"><i id="progress"></i></div>
   <div class="stats">
     <span>seq <b id="seq">—</b></span>
@@ -113,13 +194,53 @@
     <button id="fill">Ask the job to resend</button>
   </div>
 
-  <div id="feed"><div class="empty">Enter a run id and press Watch.</div></div>
+  <!-- The generic progress view: a chart of primary_metric labelled by
+       primary_metric_label, and every key of `payload` as a label/value pair.
+       No key here is spelled out anywhere in this file. -->
+  <section class="panel" id="latest" hidden>
+    <div class="row">
+      <h2>Latest progress</h2>
+      <span id="metricCaption" class="note"></span>
+    </div>
+    <svg id="metricChart" class="chart" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    <div id="payload" class="kv"></div>
+    <div id="payloadNote" class="note"></div>
+  </section>
 
-  <!-- Last on the page and nowhere near Watch, deliberately. A mis-click here
-       ends a run that may have been solving for an hour and there is no undo:
-       the job stops where it is and keeps whatever it had already written. The
-       two-step confirm is the other half of that — one stray click cannot do
-       it, and the run id is spelled out before the second one. -->
+  <div id="feed"><div class="empty">Start a run above, or enter a run id and press Watch.</div></div>
+
+  <!-- The result. row_count first and largest: "succeeded, wrote 8,760 rows"
+       and "succeeded, wrote nothing" are the same green pill otherwise. -->
+  <section class="panel" id="resultBox" hidden>
+    <div class="row">
+      <h2>Result</h2>
+      <span id="chunkNote" class="note"></span>
+    </div>
+    <div class="row">
+      <span><span id="rowCount" class="big">—</span> <span class="note">rows written</span></span>
+      <span class="note" id="rowCountNote"></span>
+    </div>
+    <div class="row" id="previewControls">
+      <label for="previewY" class="note">plot</label>
+      <select id="previewY"></select>
+      <span id="previewCaption" class="note"></span>
+    </div>
+    <svg id="previewChart" class="chart" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    <div id="previewFallback" class="kv"></div>
+    <div class="note">
+      <code>fetch_hint</code> — the model's own account of where the full rows
+      went. Off-platform it reads <code>"written": false</code> with a reason,
+      which is information, not a failure:
+    </div>
+    <pre id="fetchHint"></pre>
+  </section>
+
+  <!-- Last on the page and nowhere near Watch or Start, deliberately. A
+       mis-click here ends a run that may have been solving for an hour and
+       there is no undo: the job stops where it is and keeps whatever it had
+       already written. The two-step confirm is the other half of that — one
+       stray click cannot do it, and the run id is spelled out before the
+       second one. -->
   <section id="cancelBox">
     <div class="row">
       <button id="cancel" disabled>Cancel this run…</button>
@@ -166,7 +287,10 @@ function conn(text, cls) {
 /* FastAPI wraps an HTTPException's message in {"detail": ...}. Handing the raw
    body to a person puts JSON punctuation in front of text that was written to
    be read — and on a 409 that text is the only thing telling them what to do
-   instead, so it has to arrive intact. */
+   instead, so it has to arrive intact. A 422 from request validation is the
+   one case where `detail` is a list of objects; it is stringified rather than
+   prettified, because it means this client sent a shape the API rejected,
+   which is a bug here and not a thing to style. */
 async function problem(res) {
   const raw = await res.text();
   try {
@@ -175,6 +299,110 @@ async function problem(res) {
     if (detail != null) return JSON.stringify(detail);
   } catch (err) { /* not JSON: the body itself is the message */ }
   return raw;
+}
+
+function note(id, text, cls) {
+  $(id).textContent = text;
+  $(id).className = "note" + (cls ? " " + cls : "");
+}
+
+// --- rendering values nobody declared ---------------------------------------
+
+/* A number as a person reads it.
+
+   Raw floats arrive with their binary tails on (0.30000000000000004), which
+   makes a payload look like a debugger dump. Six significant figures, then
+   back through Number so the trailing zeros go: 1e-7 stays 1e-7 instead of
+   flattening to 0, which a naive toFixed() does. */
+function num(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return String(v);
+  return Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(6)));
+}
+
+/* Any JSON value, shown rather than hidden. A nested object is stringified
+   compactly instead of being skipped — a payload key this file has never
+   heard of is exactly the case it exists to handle. */
+function show(v) {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === "number") return num(v);
+  if (typeof v === "string" || typeof v === "boolean") return String(v);
+  try { return JSON.stringify(v); } catch (err) { return String(v); }
+}
+
+/* Label/value pairs for an object whose keys are not known here.
+
+   `order` is an optional list that fixes the ROW ORDER across renders. Object
+   key order follows insertion, and a model that builds its payload dict a
+   little differently one iteration makes the whole panel jump — so first-seen
+   order wins and new keys land at the bottom. */
+function renderKV(el, obj, order) {
+  el.replaceChildren();
+  const present = Object.keys(obj || {});
+  const keys = order ? order.filter((k) => present.includes(k)) : present;
+  for (const k of keys) {
+    const key = document.createElement("div");
+    key.className = "k";
+    key.textContent = k;
+    const val = document.createElement("div");
+    val.className = "v";
+    val.textContent = show(obj[k]);
+    el.append(key, val);
+  }
+  return keys.length;
+}
+
+// --- charts: one routine, two callers ---------------------------------------
+
+//: Points actually drawn. A run emitting progress at 10 Hz for an hour is
+//: 36,000 points into a path a few hundred pixels wide, which costs real time
+//: to build and shows nobody anything. Strided evenly, which CAN hide a spike
+//: — the durable copy on the volume is not strided, and the metric in the
+//: stats bar is the true latest value, so nothing here is the only witness.
+const CHART_POINTS = 600;
+
+function strided(points) {
+  if (points.length <= CHART_POINTS) return points;
+  const step = Math.ceil(points.length / CHART_POINTS);
+  const out = points.filter((_, i) => i % step === 0);
+  const last = points[points.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);   // keep the tail: it is the newest
+  return out;
+}
+
+/* A polyline in percentages.
+
+   viewBox 0 0 100 100 with preserveAspectRatio="none" means the path is
+   written as percentages and the browser scales it — no resize listener, no
+   measuring, and nothing to get wrong when the panel is hidden and
+   clientWidth is 0. The cost is that the stroke stretches with it, which
+   `vector-effect` undoes. Text is NOT put in the SVG for the same reason: it
+   would stretch too, so every label lives in HTML beside it.
+
+   Extremes come from a loop rather than Math.min(...xs): the spread form
+   throws somewhere north of 100k arguments, and "the array is small" is the
+   kind of thing that stops being true without anyone editing this function.
+
+   Returns the extremes for the caption, or null if there was nothing to draw. */
+function sparkline(svg, points) {
+  svg.replaceChildren();
+  if (points.length < 2) return null;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [x, y] of points) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  // A flat series is drawn down the middle rather than divided by zero.
+  const sx = (v) => (x1 === x0 ? 50 : ((v - x0) / (x1 - x0)) * 100);
+  const sy = (v) => (y1 === y0 ? 50 : 100 - ((v - y0) / (y1 - y0)) * 100);
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  line.setAttribute("vector-effect", "non-scaling-stroke");
+  line.setAttribute("points",
+    points.map(([x, y]) => `${sx(x).toFixed(2)},${sy(y).toFixed(2)}`).join(" "));
+  svg.append(line);
+  return { x0, x1, y0, y1 };
 }
 
 // --- the feed ---------------------------------------------------------------
@@ -315,6 +543,172 @@ function surveyGaps() {
   return missing;
 }
 
+// --- progress: the generic view ---------------------------------------------
+
+let metricSeries = [];      // [{seq, x: elapsed_seconds, y: primary_metric}]
+let metricLabel = "metric"; // whatever the producer last called it
+let payloadOrder = [];      // first-seen key order, so rows do not jump
+let redrawQueued = false;
+
+/* Coalesced to one draw per frame. A model sampling progress faster than the
+   display refreshes would otherwise rebuild the same path several times
+   between two paints, which nobody can see and everybody pays for. */
+function scheduleMetricDraw() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  requestAnimationFrame(() => { redrawQueued = false; drawMetric(); });
+}
+
+/* Insert by seq, same reason `place()` does: a replayed point belongs where it
+   happened, and a chart that appends it draws a line back through time. */
+function addMetricPoint(msg) {
+  if (msg.primary_metric == null || !Number.isFinite(msg.primary_metric)) return;
+  const point = { seq: msg.seq, x: msg.elapsed_seconds, y: msg.primary_metric };
+  let i = metricSeries.length;
+  while (i > 0 && metricSeries[i - 1].seq > point.seq) i--;
+  metricSeries.splice(i, 0, point);
+  scheduleMetricDraw();
+}
+
+function drawMetric() {
+  const box = sparkline($("metricChart"), strided(metricSeries).map((p) => [p.x, p.y]));
+  const n = metricSeries.length;
+  $("metricChart").hidden = box === null;
+  $("metricCaption").textContent = box === null
+    ? `${metricLabel} — ${n} point${n === 1 ? "" : "s"}; a line needs two`
+    : `${metricLabel} ${num(box.y0)} … ${num(box.y1)} over ${num(box.x0)}–${num(box.x1)}s, ` +
+      `${n} points${n > CHART_POINTS ? " (thinned to draw)" : ""}`;
+}
+
+/* `payload` is model-specific data rendered by a view that is not.
+
+   Every key present is shown as a label and a value. There is no branch on a
+   model name anywhere in this function, and adding one is the failure mode
+   this whole file is arranged to avoid — a model that ships tomorrow with keys
+   nobody has thought of renders here without an edit. */
+function renderPayload(msg) {
+  metricLabel = msg.primary_metric_label || "metric";
+  const payload = msg.payload || {};
+  for (const k of Object.keys(payload)) {
+    if (!payloadOrder.includes(k)) payloadOrder.push(k);
+  }
+  const shown = renderKV($("payload"), payload, payloadOrder);
+  $("payloadNote").textContent = shown
+    ? `payload of seq ${msg.seq}, ${msg.elapsed_seconds.toFixed(1)}s in`
+    : "this model sends no payload — the chart and the bar above are the whole story";
+  $("latest").hidden = false;
+}
+
+// --- result: what the run was for -------------------------------------------
+
+const results = new Map();  // chunk_index -> the message. Not a list: replay redelivers
+let shownResult = null;     // the chunk currently on screen, for the axis picker
+let sawFinal = false;
+let previewY = null;        // the column the person chose, kept across chunks
+
+/* Keys that are a finite number in EVERY row. A key that is a number in some
+   rows and a string in others cannot be an axis, and finding that out halfway
+   along the path is worse than not offering it. */
+function numericKeys(rows) {
+  return Object.keys(rows[0] || {}).filter(
+    (k) => rows.every((r) => typeof r[k] === "number" && Number.isFinite(r[k])));
+}
+
+/* Which column is the x axis, decided by shape rather than by name.
+
+   A preview is a curve someone ordered — by time, by rank, by iteration — so
+   the ordering column is the one that only ever goes one way. If no column
+   does, the row order itself is the axis (null), which is exactly right for a
+   preview that is already in the order the model wanted. */
+function chooseX(rows, keys) {
+  for (const k of keys) {
+    let up = true, down = true;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][k] < rows[i - 1][k]) up = false;
+      if (rows[i][k] > rows[i - 1][k]) down = false;
+    }
+    if ((up || down) && rows[0][k] !== rows[rows.length - 1][k]) return k;
+  }
+  return null;
+}
+
+function acceptResult(msg) {
+  results.set(msg.chunk_index, msg);
+  if (msg.final) sawFinal = true;
+  // The HIGHEST chunk goes on screen, not the last one to ARRIVE: a replayed
+  // chunk 0 landing after live chunk 3 must not walk the panel backwards.
+  const top = Math.max(...results.keys());
+  renderResult(results.get(top));
+  $("chunkNote").textContent =
+    `chunk ${top}, ${results.size} received` +
+    (sawFinal ? ", final seen" : " — more to come (no final chunk yet)");
+}
+
+function renderResult(m) {
+  shownResult = m;
+  $("resultBox").hidden = false;
+  $("rowCount").textContent = m.row_count.toLocaleString();
+  // Zero is a legitimate answer, not a rendering failure — a model that found
+  // nothing to write says so honestly, and `fetch_hint` below carries why. It
+  // is not painted red for that reason.
+  $("rowCountNote").textContent = m.row_count === 0
+    ? "zero rows written — the run reported this, it is not a display problem; see fetch_hint"
+    : "";
+  $("fetchHint").textContent = JSON.stringify(m.fetch_hint ?? {}, null, 2);
+  drawPreview();   // owns the picker as well as the chart: one place picks the axes
+}
+
+function drawPreview() {
+  const m = shownResult;
+  if (!m) return;
+  const rows = Array.isArray(m.preview) ? m.preview : [];
+  const keys = numericKeys(rows);
+  const xKey = chooseX(rows, keys);
+
+  // The picker is rebuilt only when the columns actually change, so a second
+  // chunk arriving does not throw away a choice that is still valid.
+  const select = $("previewY");
+  if ([...select.options].map((o) => o.value).join(",") !== keys.join(",")) {
+    select.replaceChildren();
+    for (const k of keys) {
+      const opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = k;
+      select.append(opt);
+    }
+  }
+  if (previewY === null || !keys.includes(previewY)) {
+    previewY = keys.find((k) => k !== xKey) ?? keys[0] ?? null;
+  }
+  if (previewY !== null) select.value = previewY;
+
+  const points = previewY === null ? [] :
+    rows.map((r, i) => [xKey === null ? i : r[xKey], r[previewY]]);
+  const box = sparkline($("previewChart"), strided(points));
+
+  $("previewControls").hidden = keys.length === 0;
+  $("previewChart").hidden = box === null;
+  $("previewFallback").replaceChildren();
+
+  if (box !== null) {
+    $("previewCaption").textContent =
+      `y ${previewY} ${num(box.y0)} … ${num(box.y1)}  ·  ` +
+      `x ${xKey === null ? "row order" : xKey}  ·  ${rows.length} preview points ` +
+      `(bounded and downsampled by the model; the full set is in its own table)`;
+  } else if (rows.length) {
+    // Something came back that will not plot — one row, or no numeric column.
+    // Show the first row rather than an empty box: the shape of a preview
+    // nobody can chart is worth seeing, and it is the same renderer as payload.
+    $("previewCaption").textContent =
+      `${rows.length} preview row${rows.length === 1 ? "" : "s"}, nothing chartable ` +
+      `(a line needs two rows and a numeric column) — first row:`;
+    renderKV($("previewFallback"), rows[0]);
+  } else {
+    $("previewCaption").textContent =
+      "no preview points in this result — row_count and fetch_hint are the whole answer";
+  }
+}
+
 // --- the stream -------------------------------------------------------------
 
 function apply(msg) {
@@ -337,12 +731,24 @@ function apply(msg) {
   $("count").textContent = count;
   $("seq").textContent = lastSeq;
 
-  if (newest && msg.type === "progress") {
-    if (msg.percent_complete != null) $("progress").style.width = msg.percent_complete + "%";
-    if (msg.primary_metric != null) {
-      $("metric").textContent = `${msg.primary_metric_label || "metric"} ${msg.primary_metric}`;
+  if (msg.type === "progress") {
+    // The CHART takes every point, replayed ones included — filling a gap
+    // should improve the curve, and a point drawn where it happened cannot
+    // mislead. The vitals and the payload take only the newest, for the
+    // reason above: they describe "now", and a replayed record is not now.
+    addMetricPoint(msg);
+    if (newest) {
+      if (msg.percent_complete != null) $("progress").style.width = msg.percent_complete + "%";
+      if (msg.primary_metric != null) {
+        $("metric").textContent = `${msg.primary_metric_label || "metric"} ${msg.primary_metric}`;
+      }
+      renderPayload(msg);
     }
   }
+  // Not newest-gated: a result is keyed by its own chunk_index, so arrival
+  // order cannot corrupt it, and a result recovered by replay is frequently
+  // the only copy this page will ever see.
+  if (msg.type === "result") acceptResult(msg);
   if (newest && msg.type === "status") {
     $("status").textContent = msg.status;
     // `terminal` is stated by the producer, never inferred from the status
@@ -364,6 +770,8 @@ function watch() {
   if (!runId) return;
   seen = new Set(); lastSeq = -1; count = 0; failures = 0; gaps = [];
   finished = false; busy = false;
+  metricSeries = []; payloadOrder = []; metricLabel = "metric";
+  results.clear(); shownResult = null; sawFinal = false; previewY = null;
   $("feed").innerHTML = '<div class="empty">Waiting for the first message…</div>';
   $("gap").classList.remove("show");
   $("fillNote").textContent = "";
@@ -374,8 +782,21 @@ function watch() {
   $("status").textContent = "—";
   $("reconnects").textContent = "0";
   $("progress").style.width = "0";
+  $("latest").hidden = true;
+  $("resultBox").hidden = true;
+  // Emptied, not just hidden. The metric chart is redrawn on a frame callback,
+  // so the panel can be un-hidden by the new run's first progress message a
+  // frame before the old run's polyline is replaced — one frame of the wrong
+  // run's curve, which is a hard thing to disbelieve once seen.
+  $("metricChart").replaceChildren();
+  $("previewChart").replaceChildren();
+  $("payload").replaceChildren();
+  $("previewFallback").replaceChildren();
   $("ack").hidden = true;
   $("confirm").hidden = true;
+  // The address bar follows the run being watched, so a reload — and a link
+  // pasted to somebody else — lands on the same run rather than on nothing.
+  history.replaceState(null, "", `?run=${encodeURIComponent(runId)}`);
   refreshCancel();
   open();
 }
@@ -413,6 +834,171 @@ function open() {
   };
 }
 
+// --- starting a run ---------------------------------------------------------
+
+let launching = false;
+
+/* What can be triggered from here, and — when the answer is "nothing" — why.
+
+   An empty list is a legitimate state with three different causes, which is
+   why `source` and `detail` exist on that response at all: "config" means
+   DBX_JOB_IDS was set, "discovered" means the workspace was searched by tag
+   because it was not, and "none" carries the reason in `detail`. Rendering a
+   silently empty dropdown throws away the only explanation there is. */
+async function loadModels() {
+  const select = $("model");
+  try {
+    const res = await fetch("/api/models");
+    if (!res.ok) {
+      select.replaceChildren();
+      note("modelNote", `the app answered ${res.status}: ${await problem(res)}`, "bad");
+      $("start").disabled = true;
+      return;
+    }
+    const body = await res.json();
+    select.replaceChildren();
+    for (const m of body.models) {
+      const opt = document.createElement("option");
+      opt.value = m.name;
+      opt.textContent = m.name;
+      opt.title = `job ${m.job_id}`;
+      select.append(opt);
+    }
+    $("start").disabled = body.models.length === 0;
+    const where = body.source === "config" ? "from DBX_JOB_IDS"
+      : body.source === "discovered" ? "discovered in the workspace by tag"
+      : `source: ${body.source}`;
+    note("modelNote", body.models.length
+      ? `${body.models.length} model${body.models.length === 1 ? "" : "s"} ${where}` +
+        (body.detail ? ` — ${body.detail}` : "")
+      : `nothing to trigger (${where})${body.detail ? ` — ${body.detail}` : ""}`,
+      body.models.length ? "" : "bad");
+  } catch (err) {
+    note("modelNote", `could not ask the app what it can run: ${err}`, "bad");
+    $("start").disabled = true;
+  }
+}
+
+async function start() {
+  if (launching || $("start").disabled) return;
+  const model = $("model").value;
+  if (!model) return;
+
+  // Parsed here so a typo is a sentence on this page rather than a 422 from
+  // FastAPI's validator, which arrives as a list of objects nobody wants to
+  // read. Nothing is sent until it parses.
+  let config;
+  const text = $("config").value.trim() || "{}";
+  try {
+    config = JSON.parse(text);
+  } catch (err) {
+    note("launchNote", `config is not valid JSON (${err.message}) — nothing was sent`, "bad");
+    return;
+  }
+  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+    note("launchNote", "config has to be a JSON object — {\"key\": value} — " +
+      "because that is what a model factory is handed. Nothing was sent.", "bad");
+    return;
+  }
+
+  launching = true;
+  $("start").disabled = true;
+  note("launchNote", `asking the app to run ${model}…`, "");
+  try {
+    const res = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // A blank id means "the app mints one". Supplying one is what makes the
+      // trigger idempotent from this side, and it is the id watched below.
+      body: JSON.stringify({ model, config, run_id: $("newRun").value.trim() || null }),
+    });
+    if (!res.ok) {
+      // 503: this app cannot trigger anything (no Jobs API credentials).
+      // 404: no job for that model. 502: Databricks refused. All three say so
+      // in words, and all three are the app's words rather than a guess here.
+      note("launchNote", `the app answered ${res.status}: ${await problem(res)}`, "bad");
+      return;
+    }
+    const body = await res.json();
+    note("launchNote",
+      `${body.model} queued as job run ${body.job_run_id} — watching ${body.run_id}. ` +
+      `A queued run attaches when it starts; until then this page is quiet, ` +
+      `and the run stays durable whether or not it ever attaches.`, "ok");
+    $("run").value = body.run_id;
+    watch();
+    loadRuns();   // it exists now; the list should say so without a second click
+  } catch (err) {
+    note("launchNote", `the trigger request never left the browser: ${err}`, "bad");
+  } finally {
+    launching = false;
+    $("start").disabled = $("model").options.length === 0;
+  }
+}
+
+// --- the run list -----------------------------------------------------------
+
+function fmtTime(ms) {
+  return ms ? new Date(ms).toLocaleString() : "—";
+}
+
+/* Recent runs, so a run can be picked instead of remembered.
+
+   Newest first, from the run store — which is the one thing on this page that
+   needs Lakebase (or the warehouse-backed default). Triggering and watching do
+   not, so a 503 here is worth explaining rather than hiding: everything else
+   on the page still works. */
+async function loadRuns() {
+  const box = $("runs");
+  try {
+    const res = await fetch("/api/runs?limit=20");
+    if (!res.ok) {
+      box.replaceChildren();
+      note("runsNote", `no list: ${await problem(res)}` +
+        (res.status === 503
+          ? " — the list is the only thing here that needs the run store; " +
+            "starting and watching runs do not."
+          : ""), "bad");
+      return;
+    }
+    const body = await res.json();
+    note("runsNote", body.count
+      ? `${body.count} run${body.count === 1 ? "" : "s"}, newest first — click one to watch it`
+      : "no runs recorded yet", "");
+    box.replaceChildren();
+    if (!body.count) return;
+
+    const table = document.createElement("table");
+    const head = table.createTHead().insertRow();
+    for (const label of ["run", "model", "status", "updated"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      head.append(th);
+    }
+    const tbody = table.createTBody();
+    for (const r of body.runs) {
+      const tr = tbody.insertRow();
+      tr.tabIndex = 0;
+      // `detail` is where a FAILED run says what happened. Not a column —
+      // it is long and usually absent — but not thrown away either.
+      tr.title = [r.detail, r.requested_by && `requested by ${r.requested_by}`,
+        r.job_run_id && `job run ${r.job_run_id}`].filter(Boolean).join("\n");
+      for (const text of [r.run_id, r.model,
+        r.status + (r.live ? " ●" : ""), fmtTime(r.updated_ts)]) {
+        tr.insertCell().textContent = text;
+      }
+      if (r.live) tr.cells[2].className = "ok";   // a job is attached right now
+      const pick = () => { $("run").value = r.run_id; watch(); };
+      tr.addEventListener("click", pick);
+      tr.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
+      });
+    }
+    box.append(table);
+  } catch (err) {
+    note("runsNote", `could not list runs: ${err}`, "bad");
+  }
+}
+
 // --- replay: client-triggered, always ---------------------------------------
 
 async function fill() {
@@ -428,6 +1014,12 @@ async function fill() {
     // the first hole to the last is frequently the whole run, and making the
     // job re-read and re-serialise every record it ever wrote to recover four
     // of them is real work taken from the thing the job is there to do.
+    //
+    // It is also a live hazard, not just waste: the reply crosses a WebSocket
+    // with a 16 MiB frame cap — order 77,000 records — and one oversized answer
+    // closes the app's socket with a 1009 and takes the job's live channel down
+    // with it. Which is why there is no "resend everything" button on this
+    // page, and why the ranges asked for are only ever the ones detected.
     //
     // Sequential, and it stops at the first failure: after a 409 there is no
     // job to ask, and firing the remaining ranges at it only multiplies the
@@ -562,6 +1154,10 @@ async function doCancel() {
 
 $("watch").addEventListener("click", watch);
 $("run").addEventListener("keydown", (e) => { if (e.key === "Enter") watch(); });
+$("start").addEventListener("click", start);
+$("newRun").addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
+$("reload").addEventListener("click", loadRuns);
+$("previewY").addEventListener("change", () => { previewY = $("previewY").value; drawPreview(); });
 $("fill").addEventListener("click", fill);
 $("cancel").addEventListener("click", arm);
 $("cancelNo").addEventListener("click", disarm);
@@ -571,6 +1167,11 @@ $("cancelYes").addEventListener("click", doCancel);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("confirm").hidden) disarm();
 });
+
+// Both on load, once. A page load is a person arriving, which is a decision;
+// nothing on this page repeats a request without another one.
+loadModels();
+loadRuns();
 
 // ?run=... so a link can go straight to a run.
 const fromUrl = new URLSearchParams(location.search).get("run");
