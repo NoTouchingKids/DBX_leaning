@@ -97,12 +97,34 @@ resources:
         #   databricks secrets put-secret ${var.app_secret_scope} \
         #     oauth-client-secret --string-value "<the SP's OAuth secret>"
         #
-        # - name: oauth-client-secret
-        #   description: Secret for the service principal the app runs as.
-        #   secret:
-        #     scope: ${var.app_secret_scope}
-        #     key: oauth-client-secret
-        #     permission: READ
+        # Live. The shared ingress identity — the same principal and keys the
+        # jobs read, and the only one with an OAuth login to Lakebase.
+        - name: oauth-client-secret
+          description: Secret for the service principal the app runs as.
+          secret:
+            scope: ${var.app_secret_scope}
+            key: oauth-client-secret
+            permission: READ
+
+        # The id comes from the scope too, so it cannot name a different
+        # principal than the secret beside it — that pair fails
+        # `/oidc/v1/token` with `invalid_client`, which says nothing about
+        # which half is wrong.
+        - name: oauth-client-id
+          description: Application id of that same principal.
+          secret:
+            scope: ${var.app_secret_scope}
+            key: oauth-client-id
+            permission: READ
+
+        # Same key again under a second name: one resource feeds exactly one
+        # env var. Two vars pointing at one resource leaves the second empty.
+        - name: lakebase-user
+          description: The Postgres role — that same application id.
+          secret:
+            scope: ${var.app_secret_scope}
+            key: oauth-client-id
+            permission: READ
 
         - name: app-store-read
           description: Read the app's own volume.
@@ -246,26 +268,16 @@ resources:
           # with a matching entry under `resources:` above. That block is
           # empty of secrets now that the ingress token is gone, so this would
           # be the first one back.
-          # THE NEXT TWO ARE COMMENTED OUT, and not because Lakebase is
-          # optional. AN EMPTY BUNDLE VARIABLE DROPS THE `value` KEY ENTIRELY.
-          # It does not resolve to `value: ""` — the resolved config is
-          # `{"name": "DBX_LAKEBASE_HOST"}` with no source at all, and
-          # `databricks bundle run` then fails the deployment with:
-          #
-          #   Error: Must specify environment variable source using either
-          #   `value` or `valueFrom`.
-          #
-          # which names neither the variable nor the file. `lakebase_host` and
-          # `lakebase_user` both default to empty, so both do this.
-          #
-          # Absent and empty mean the same thing to `server/config.py`, which
-          # reads every one of these as `e.get(...) or ""`. So nothing is lost
-          # by leaving them out — uncomment when you set the variables.
-          #
-          # - name: DBX_LAKEBASE_HOST
-          #   value: ${var.lakebase_host}
-          # - name: DBX_LAKEBASE_USER
-          #   value: ${var.lakebase_user}
+          # If `lakebase_host` is ever set back to empty, comment its entry out
+          # again: an empty bundle variable drops the `value` key entirely, and
+          # only `bundle run` fails — `validate` and `deploy` both pass.
+          - name: DBX_LAKEBASE_HOST
+            value: ${var.lakebase_host}
+          # The Postgres role must be the principal whose token is the
+          # password, so it reads the same scope key as DBX_OAUTH_CLIENT_ID.
+          # `var.lakebase_user` is unused here.
+          - name: DBX_LAKEBASE_USER
+            value_from: lakebase-user
           - name: DBX_LAKEBASE_DATABASE
             value: ${var.lakebase_database}
           - name: DBX_LAKEBASE_PORT
@@ -291,15 +303,11 @@ resources:
           # The id alone does nothing — `has_client_credentials` needs both —
           # and setting it without uncommenting the secret below is reported
           # on `/healthz` rather than silently ignored.
-          # Commented out for the same reason as the two Lakebase variables
-          # above, not only because it is opt-in: `oauth_client_id` defaults to
-          # empty, and an empty variable leaves the entry with no source at all,
-          # which fails the deployment. Uncomment BOTH lines together with the
-          # secret below.
-          # - name: DBX_OAUTH_CLIENT_ID
-          #   value: ${var.oauth_client_id}
-          # - name: DBX_OAUTH_CLIENT_SECRET
-          #   value_from: oauth-client-secret
+          # Live, with the two secret resources above — all three or none.
+          - name: DBX_OAUTH_CLIENT_ID
+            value_from: oauth-client-id
+          - name: DBX_OAUTH_CLIENT_SECRET
+            value_from: oauth-client-secret
 
           # DBX_JOB_IDS IS DELIBERATELY ABSENT. The app discovers its jobs
           # from the workspace by the `project: dbx-leaning` tag rather than

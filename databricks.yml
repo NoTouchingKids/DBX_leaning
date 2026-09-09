@@ -49,6 +49,9 @@ variables:
       credential; the matching secret is a SECRET (`oauth-client-secret` in
       the scope below), never a variable. Empty falls back to the service
       principal Databricks Apps injects for the app itself.
+
+      UNUSED. The app reads both halves from the `dbx-leaning` scope instead
+      (resources/app.yml), so the id cannot drift from its secret.
     default: ""
   app_secret_scope:
     description: >-
@@ -108,7 +111,7 @@ variables:
       Lakebase instance hostname, e.g.
       instance-name.database.cloud.databricks.com. Empty falls back to the
       warehouse-backed run store — see the note above.
-    default: ""
+    default: "ep-cool-fog-d8vyaasx.database.us-east-2.cloud.databricks.com"
   lakebase_database:
     description: Database within the Lakebase instance.
     default: databricks_postgres
@@ -145,7 +148,12 @@ variables:
       sends you looking at the secret. `tests/deploy/test_bundle.py` refuses
       the mismatch, and `/healthz` reports it at run time.
 
-      Empty falls back to the warehouse-backed run store.
+      UNUSED, like `oauth_client_id`: resources/app.yml reads the role from
+      the `dbx-leaning` scope so it matches the token's principal.
+
+      For whoever re-enables it: empty means NO run store on v4, not the
+      warehouse fallback named above — that was deleted. Triggering and
+      streaming still work; listing past runs 503s.
     default: ""
 
 # The workspace sync is what puts the tree in the workspace;
