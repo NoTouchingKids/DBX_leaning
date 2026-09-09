@@ -24,6 +24,22 @@ _IDENTITY_HEADERS = (
 )
 
 
+# `/api/healthz` is the one that WORKS in production, and the bare `/healthz`
+# is kept only because this repo's docs and `deploy/README.md` name it in a
+# dozen places.
+#
+# The Databricks Apps ingress answers `/healthz` ITSELF and never forwards it:
+# HTTP 200, `content-length: 0`, and no `content-type` at all, where every
+# other route on the same app sets one. Measured 2026-09-05 against the
+# deployed app — `/healthz`, `/healthz/` and `/healthz?x=1` are all swallowed,
+# while `/HEALTHZ` falls through to the SPA, so it is an exact, case-sensitive
+# path match by the proxy rather than anything this app does.
+#
+# That matters more than a dead endpoint. This route is the thing that is
+# supposed to make a misspelled `project: dbx-leaning` tag visible instead of a
+# mystery — `docs/v4-rewrite-plan.md` says so explicitly — and in production it
+# could not be read at all. Nothing raised; the probe returned 200.
+@router.get("/api/healthz")
 @router.get("/healthz")
 async def healthz(hub: Hub) -> dict:
     return {

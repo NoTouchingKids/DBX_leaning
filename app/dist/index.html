@@ -1,33 +1,43 @@
 <!doctype html>
 <!--
-  The client. Hand-written, committed, served as-is — see app/client/README.md
-  for why there is no build step.
+  THE TEST CONSOLE. Hand-written, committed, served as-is — see
+  app/client/README.md for why there is no build step.
 
-  Slice 1's job was to show that a tick left a deployed job and arrived here.
-  Slices 2 and 3 add the two things that can only be done to a job that is
-  still running: ask it to stop and report what it said back (cancel), and ask
-  it to resend records that never reached this page (replay). Both go to the
-  job over its RPC socket, both are triggered by a click, and neither has a
-  timer behind it. If something breaks in the transport it is still visible
-  here, because there is still nothing else in this file to break.
+  This is not the product UI and is not trying to be. It is the bench: a way
+  to fire every endpoint by hand, watch a run arrive, and see the raw bytes
+  that came back. When the real UI is designed this file goes away. Until
+  then, the ranking is completeness and inspectability over polish — a thing
+  that is visible here does not have to be reconstructed from an app log.
 
-  What this pass adds is the other half of a control surface: a run can be
-  STARTED from here, picked out of a list rather than remembered, and its
-  RESULT — the whole point of running it — is rendered instead of counted.
+  What it does, and the one rule that shapes all of it:
 
-  The rule that shapes all of it: nothing in this file knows the name of a
-  model. `progress.payload` is rendered by iterating whatever keys it has,
-  `result.preview` is charted by finding whatever columns are numeric, and the
-  chart's label is `primary_metric_label` because the producer said so. v3's
-  SPA had 20,117 lines of per-model views — 2.8x the models they visualised —
-  and deleting them is a large part of why v4 exists. Adding a model must cost
-  nothing here.
+  - Every endpoint the app serves has a button, and every request made from
+    this page — GET, POST, and the SSE open — lands in one wire log with its
+    status, duration and verbatim body. Three of them used to be fired
+    invisibly.
+  - Every message in the feed expands to its raw JSON, filterable by type and
+    by log level, copyable.
+  - The stream is MEASURED while it is watched. docs/spike-results.md names
+    three numbers that would change specific code and records none of them:
+    whether the ingress cuts a long stream and at what elapsed time, whether
+    an idle connection dies sooner, and whether SSE events are buffered or
+    prompt. The diagnostics panel is where those get read off a real run.
+
+  The rule: NOTHING IN THIS FILE KNOWS THE NAME OF A MODEL. `progress.payload`
+  is rendered by iterating whatever keys it has, `result.preview` is charted by
+  finding whatever columns are numeric, and the chart's label is
+  `primary_metric_label` because the producer said so. v3's SPA had 20,117
+  lines of per-model views — 2.8x the models they visualised — and deleting
+  them is a large part of why v4 exists. Adding a model must cost nothing here.
+
+  And nothing here runs on a timer. Every request is a click or a page load.
+  Replay especially: see the comment above `fill()`.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DBX_leaning</title>
+<title>DBX_leaning — test console</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -47,7 +57,8 @@
   [hidden] { display: none !important; }
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
   header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:12px;
-           align-items:center; flex-wrap:wrap; }
+           align-items:center; flex-wrap:wrap; position:sticky; top:0; background:var(--bg);
+           z-index:2; }
   h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:-.01em; }
   h2 { font-size:11px; margin:0; font-weight:600; letter-spacing:.06em;
        text-transform:uppercase; color:var(--dim); }
@@ -58,11 +69,13 @@
   button { cursor:pointer; }
   button:disabled { opacity:.45; cursor:default; }
   button.bad { border-color:var(--bad); color:var(--bad); }
+  button.ep { font:12px var(--mono); }
+  button.mini { font:11px var(--mono); padding:2px 8px; }
   .pill { font:600 11px var(--mono); padding:3px 8px; border-radius:99px;
           border:1px solid var(--line); color:var(--dim); text-transform:uppercase; }
   .pill.live { color:var(--ok); border-color:var(--ok); }
   .pill.down { color:var(--bad); border-color:var(--bad); }
-  main { padding:20px; display:grid; gap:16px; max-width:900px; }
+  main { padding:20px; display:grid; gap:16px; max-width:1040px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .panel { border:1px solid var(--line); border-radius:8px; padding:12px 14px;
            display:grid; gap:10px; }
@@ -75,10 +88,12 @@
   .note { color:var(--dim); font-size:12px; }
   .ok { color:var(--ok); }
   .bad { color:var(--bad); }
+  code { font:12px var(--mono); }
   pre { margin:0; font:12px/1.5 var(--mono); color:var(--dim);
         white-space:pre-wrap; word-break:break-word; }
-  /* Generic key/value rendering: the payload viewer and the preview fallback
-     both pour into this and neither knows what the keys will be. */
+  /* Generic key/value rendering: the payload viewer, the health panel, the
+     diagnostics panel and the preview fallback all pour into this and none of
+     them knows what the keys will be. */
   .kv { display:grid; grid-template-columns:max-content minmax(0,1fr);
         gap:2px 16px; font:12px/1.6 var(--mono); }
   .kv > .k { color:var(--dim); }
@@ -89,6 +104,15 @@
            border-radius:6px; }
   .chart polyline { fill:none; stroke:var(--accent); stroke-width:1.5;
                     stroke-linejoin:round; stroke-linecap:round; }
+  /* The wire log. Native <details> rather than a JS toggle: the open/closed
+     state is then the browser's problem, and it survives a re-render because
+     entries are prepended rather than rebuilt. */
+  details { border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+  summary { cursor:pointer; font:12px var(--mono); color:var(--dim); }
+  details[open] > summary { margin-bottom:8px; }
+  summary.ok { color:var(--ok); }
+  summary.bad { color:var(--bad); }
+  #wire { max-height:44vh; overflow:auto; display:grid; gap:6px; align-content:start; }
   /* Deliberately NOT the error colour. A gap is routinely not a fault — see
      the note inside the box — and painting "you joined this run late" in red
      trains people to ignore the one colour that should mean something. */
@@ -106,6 +130,19 @@
   tr.status td.kind { color:var(--accent); font-weight:600; }
   tr.WARNING td, tr.ERROR td { color:var(--bad); }
   tr.gaprow td { color:var(--dim); border-top:1px dashed var(--dim); text-align:center; }
+  tr.msg { cursor:pointer; }
+  tr.msg:hover { background:var(--line); }
+  tr.raw td { border-left:2px solid var(--accent); background:transparent; }
+  tr.raw pre { max-height:40vh; overflow:auto; }
+  /* Feed filters are CSS classes on the container, not a re-render: a run
+     emitting 30,000 messages must not rebuild its table because somebody
+     unticked "log". The rows carry their type and level as class names
+     already — the same ones that colour a WARNING — so filtering is free. */
+  #feed.no-log tr.log, #feed.no-progress tr.progress,
+  #feed.no-status tr.status, #feed.no-result tr.result { display:none; }
+  #feed.lvl-info tr.DEBUG,
+  #feed.lvl-warn tr.DEBUG, #feed.lvl-warn tr.INFO,
+  #feed.lvl-error tr.DEBUG, #feed.lvl-error tr.INFO, #feed.lvl-error tr.WARNING { display:none; }
   .empty { padding:24px; color:var(--dim); text-align:center; }
   #runs { max-height:30vh; overflow:auto; }
   #runs tbody tr { cursor:pointer; }
@@ -118,7 +155,7 @@
 <body>
 
 <header>
-  <h1>DBX_leaning</h1>
+  <h1>DBX_leaning <span class="note">test console</span></h1>
   <input id="run" placeholder="run_id" size="26" spellcheck="false">
   <button id="watch">Watch</button>
   <span id="conn" class="pill">idle</span>
@@ -127,12 +164,60 @@
 
 <main>
 
+  <!-- Every endpoint, and the raw answer. The POST routes are fired from their
+       own panels further down (starting a run, cancelling one) but they land in
+       the same log, so this is the whole conversation with the app in one
+       place and in one order. -->
+  <section class="panel" id="apiBox">
+    <div class="row">
+      <h2>Endpoints</h2>
+      <span class="note">every request on this page — including the POSTs and the
+        SSE open — is logged below with its status, duration and verbatim body</span>
+    </div>
+    <div class="row">
+      <button id="epHealth" class="ep">GET /api/healthz</button>
+      <button id="epModels" class="ep">GET /api/models</button>
+      <button id="epWhoami" class="ep">GET /api/whoami</button>
+      <button id="epSchema" class="ep">GET /api/schema</button>
+      <select id="schemaKind">
+        <option value="protocol">protocol</option>
+        <option value="envelope">envelope</option>
+        <option value="control">control</option>
+      </select>
+      <button id="epRuns" class="ep">GET /api/runs</button>
+      <button id="epRun" class="ep">GET /api/runs/{id}</button>
+    </div>
+    <div id="epNote" class="note"></div>
+
+    <!-- `/api/healthz`, not `/healthz`. The bare path is answered by the
+         Databricks Apps ingress itself — 200, zero bytes, no content-type —
+         and never reaches this app, so the one endpoint that exists to make a
+         misconfiguration visible could not be read in production at all.
+         Nothing raised; the probe returned 200. -->
+    <div class="row">
+      <h2>Health</h2>
+      <span class="note">the app answers <code>/api/healthz</code>. The bare
+        <code>/healthz</code> is swallowed by the Apps ingress (200, zero bytes,
+        no content-type) and never forwarded — do not probe it.</span>
+    </div>
+    <div id="healthKV" class="kv"></div>
+    <div id="healthNote" class="note"></div>
+
+    <div class="row">
+      <h2>Wire log</h2>
+      <button id="wireClear" class="mini">clear</button>
+      <span id="wireNote" class="note"></span>
+    </div>
+    <div id="wire"></div>
+  </section>
+
   <!-- Starting a run. The models come from GET /api/models, which lists the
        job map the app discovered — a name here is a name the app can hand to
        run-now, not a name this file knows. -->
   <section class="panel" id="launch">
     <div class="row">
       <h2>Start a run</h2>
+      <button id="reloadModels" class="mini">reload models</button>
       <span id="modelNote" class="note"></span>
     </div>
     <div class="row">
@@ -164,20 +249,33 @@
   <section class="panel" id="runsBox">
     <div class="row">
       <h2>Recent runs</h2>
+      <label for="runsLimit" class="note">limit</label>
+      <input id="runsLimit" value="20" size="4" inputmode="numeric">
       <button id="reload">Refresh</button>
       <span id="runsNote" class="note"></span>
     </div>
     <div id="runs"></div>
   </section>
 
-  <div class="bar"><i id="progress"></i></div>
-  <div class="stats">
-    <span>seq <b id="seq">—</b></span>
-    <span>messages <b id="count">0</b></span>
-    <span>missing <b id="missing">0</b></span>
-    <span>metric <b id="metric">—</b></span>
-    <span>reconnects <b id="reconnects">0</b></span>
-  </div>
+  <section class="panel" id="streamBox">
+    <div class="row">
+      <h2>Stream</h2>
+      <button id="diagRecompute" class="mini">recompute</button>
+      <span class="note">the three numbers <code>docs/spike-results.md</code> says
+        would change specific code, and records none of — read them off a real
+        run here</span>
+    </div>
+    <div class="bar"><i id="progress"></i></div>
+    <div class="stats">
+      <span>seq <b id="seq">—</b></span>
+      <span>messages <b id="count">0</b></span>
+      <span>missing <b id="missing">0</b></span>
+      <span>metric <b id="metric">—</b></span>
+      <span>reconnects <b id="reconnects">0</b></span>
+    </div>
+    <div id="diagKV" class="kv"></div>
+    <div id="diagWarn" class="note"></div>
+  </section>
 
   <!-- Never automatic. A routine reconnect is a gap of milliseconds, and some
        gaps are permanent by design — client_visible=false records never travel
@@ -194,6 +292,27 @@
     <button id="fill">Ask the job to resend</button>
   </div>
 
+  <!-- The manual range exists because this is a bench and asking for a
+       specific window is a thing you want to do on a bench. It is bounded, and
+       the bound is not politeness — see the comment on MANUAL_REPLAY_MAX. -->
+  <section class="panel" id="replayBox">
+    <div class="row">
+      <h2>Replay by hand</h2>
+      <label for="replayFrom" class="note">from_seq</label>
+      <input id="replayFrom" value="0" size="7" inputmode="numeric">
+      <label for="replayTo" class="note">to_seq</label>
+      <input id="replayTo" value="199" size="7" inputmode="numeric">
+      <button id="replayGo">GET /api/runs/{id}/replay</button>
+    </div>
+    <div class="note">Bounded to <b>2000 seqs</b> per request, and defaulted small.
+      The job's answer crosses a WebSocket with a 16 MiB frame cap — order 77,000
+      records — and one oversized reply closes the app's socket with a 1009,
+      taking the job's live channel down with it. A <code>from_seq=0</code> ask
+      on a long run is that reply. There is no "resend everything" control here
+      and there should not be one.</div>
+    <div id="replayNote" class="note"></div>
+  </section>
+
   <!-- The generic progress view: a chart of primary_metric labelled by
        primary_metric_label, and every key of `payload` as a label/value pair.
        No key here is spelled out anywhere in this file. -->
@@ -207,7 +326,37 @@
     <div id="payloadNote" class="note"></div>
   </section>
 
-  <div id="feed"><div class="empty">Start a run above, or enter a run id and press Watch.</div></div>
+  <section class="panel" id="feedBox">
+    <div class="row">
+      <h2>Feed</h2>
+      <label class="note"><input type="checkbox" id="f-log" checked> log</label>
+      <label class="note"><input type="checkbox" id="f-progress" checked> progress</label>
+      <label class="note"><input type="checkbox" id="f-status" checked> status</label>
+      <label class="note"><input type="checkbox" id="f-result" checked> result</label>
+      <label for="f-level" class="note">min level</label>
+      <select id="f-level">
+        <option value="">all</option>
+        <option value="INFO">INFO</option>
+        <option value="WARNING">WARNING</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+      <span id="feedCounts" class="note"></span>
+    </div>
+    <div class="note">Click any row for the raw envelope as it arrived. Filters
+      hide rows with CSS and drop nothing — an unticked type is still counted,
+      still deduped, and still fills a gap.</div>
+    <div id="feed"><div class="empty">Start a run above, or enter a run id and press Watch.</div></div>
+    <!-- Said plainly, because it looks like a bug the first time and is not.
+         There is no history path for a finished run today. -->
+    <div id="historyNote" class="note">A run that has finished shows nothing here.
+      Once the job detaches, <code>replay</code> answers 409 — there is no job
+      left to ask — and <code>GET /{run_id}/results</code> was removed in the v4
+      purge, because the app holds no grant on the telemetry volume by design.
+      Live observation is the only way to watch a run today. The volume → SQL
+      ingestion job (Slice 4, not built) is what changes that. The telemetry
+      itself is durable on the volume the whole time; it is this page that
+      cannot reach it.</div>
+  </section>
 
   <!-- The result. row_count first and largest: "succeeded, wrote 8,760 rows"
        and "succeeded, wrote nothing" are the same green pill otherwise. -->
@@ -273,15 +422,81 @@ let es = null;          // the one EventSource for the run being watched
 let runId = null;
 let seen = new Set();   // every seq rendered. Dedupe AND the gap list come from here
 let lastSeq = -1;       // the HIGHEST seq seen, not the last one applied
+let firstSeq = null;    // the LOWEST seq seen, which is where this page attached
 let gaps = [];          // [{from, to}] — derived, never maintained; see missingRanges()
 let failures = 0;
 let count = 0;
 let finished = false;   // a terminal status arrived: nothing more is coming
 let busy = false;       // a cancel or a replay is in flight
+const tally = { log: 0, progress: 0, status: 0, result: 0 };
+
+/* The raw envelopes, for the expander. Kept as objects rather than as
+   pre-rendered JSON strings on each row: a 30,000-message run would otherwise
+   hold two copies of everything, one of them a string nobody has asked to see.
+
+   Capped, because a run can emit indefinitely and a console left open on one
+   should not end the tab. Insertion order is ARRIVAL order, not seq order, so
+   the entry dropped is the oldest received — a replayed record can therefore
+   outlive a live one it came before. Said out loud because the row is still on
+   screen after its record is gone, and the expander says so. */
+const records = new Map();
+const RECORD_CAP = 20000;
 
 function conn(text, cls) {
   $("conn").textContent = text;
   $("conn").className = "pill" + (cls ? " " + cls : "");
+  diag.state = text;
+  diag.touchedAt = performance.now();
+  scheduleDiag();
+}
+
+function note(id, text, cls) {
+  $(id).textContent = text;
+  $(id).className = "note" + (cls ? " " + cls : "");
+}
+
+// --- the wire: one place every request goes through --------------------------
+
+//: Entries kept in the log. Enough to hold a start, a watch, a cancel and the
+//: reads around them; not so many that the panel becomes its own haystack.
+const WIRE_CAP = 25;
+//: Bodies are shown whole up to this. `GET /api/schema?kind=protocol` is tens
+//: of kilobytes and pouring all of it into a <pre> makes the panel unusable —
+//: the copy button hands over the untruncated text.
+const WIRE_MAX_CHARS = 20000;
+
+/* Every request this page makes, and its verbatim answer.
+
+   The body is read ONCE, as text, and parsed from that text — never
+   `res.json()` after a `res.text()`, which is a consumed-stream error, and
+   never a body read twice down two different branches. That is also what lets
+   the same string be shown, copied and parsed without three reads.
+
+   It does not throw. A network failure comes back as `status: 0` with the
+   error as the body, so callers have one shape to handle and the failure is in
+   the log rather than only in the console. */
+async function api(method, url, body) {
+  const started = performance.now();
+  const init = { method };
+  if (body !== undefined) {
+    init.headers = { "content-type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const entry = { method, url, request: body === undefined ? null : JSON.stringify(body, null, 2) };
+  try {
+    const res = await fetch(url, init);
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (err) { /* not JSON; the text stands */ }
+    const out = { ok: res.ok, status: res.status, text, json, ms: performance.now() - started };
+    logWire({ ...entry, ...out });
+    return out;
+  } catch (err) {
+    const out = { ok: false, status: 0, text: String(err), json: null,
+                  ms: performance.now() - started };
+    logWire({ ...entry, ...out, note: "the request never left the browser" });
+    return out;
+  }
 }
 
 /* FastAPI wraps an HTTPException's message in {"detail": ...}. Handing the raw
@@ -291,19 +506,82 @@ function conn(text, cls) {
    one case where `detail` is a list of objects; it is stringified rather than
    prettified, because it means this client sent a shape the API rejected,
    which is a bug here and not a thing to style. */
-async function problem(res) {
-  const raw = await res.text();
-  try {
-    const detail = JSON.parse(raw).detail;
-    if (typeof detail === "string") return detail;
-    if (detail != null) return JSON.stringify(detail);
-  } catch (err) { /* not JSON: the body itself is the message */ }
-  return raw;
+function problemOf(r) {
+  const detail = r.json && r.json.detail;
+  if (typeof detail === "string") return detail;
+  if (detail != null) return JSON.stringify(detail);
+  return r.text;
 }
 
-function note(id, text, cls) {
-  $(id).textContent = text;
-  $(id).className = "note" + (cls ? " " + cls : "");
+/* No timer resets a button label anywhere in this file, so "copied" stays
+   until the next copy. `navigator.clipboard` is unavailable on an insecure
+   origin, which the app is not, but a browser can still refuse — so the
+   failure says what to do instead rather than doing nothing visible. */
+async function copyText(btn, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = "copied " + text.length + " chars";
+  } catch (err) {
+    btn.textContent = "copy refused — select the text below";
+  }
+}
+
+function logWire(entry) {
+  const box = $("wire");
+  const det = document.createElement("details");
+  det.open = true;   // the newest exchange is the one you just asked for
+  const sum = document.createElement("summary");
+  // `status` is a number for a fetch and a phrase for the synthesised SSE
+  // entries, which is why it is interpolated rather than formatted. The
+  // duration is dropped when there is none: "opening → in 0ms" reads as a
+  // measurement and is not one.
+  const code = entry.status === 0 ? "no response" : entry.status;
+  sum.textContent = `${entry.method} ${entry.url} → ${code}` +
+    (entry.ms ? ` in ${entry.ms.toFixed(0)}ms` : "") +
+    (entry.note ? ` (${entry.note})` : "");
+  sum.className = entry.ok ? "ok" : "bad";
+  det.append(sum);
+
+  if (entry.request != null) {
+    const label = document.createElement("div");
+    label.className = "note";
+    label.textContent = "request body";
+    const req = document.createElement("pre");
+    req.textContent = entry.request;
+    det.append(label, req);
+  }
+
+  const pretty = entry.json === null ? entry.text : JSON.stringify(entry.json, null, 2);
+  if (pretty) {
+    const body = document.createElement("pre");
+    body.textContent = pretty.length > WIRE_MAX_CHARS
+      ? pretty.slice(0, WIRE_MAX_CHARS) +
+        `\n… ${pretty.length - WIRE_MAX_CHARS} more characters (use copy)`
+      : pretty;
+    const tools = document.createElement("div");
+    tools.className = "row";
+    const copy = document.createElement("button");
+    copy.className = "mini";
+    copy.textContent = "copy response";
+    // The copy hands over the UNTRUNCATED text, which is the point of
+    // truncating the display: `kind=protocol` is tens of kilobytes and is
+    // worth having in a buffer rather than in a scroll box.
+    copy.addEventListener("click", () => copyText(copy, pretty));
+    tools.append(copy);
+    det.append(tools, body);
+  }
+
+  box.prepend(det);
+  while (box.children.length > WIRE_CAP) box.lastElementChild.remove();
+  $("wireNote").textContent = `newest first, last ${WIRE_CAP} kept`;
+}
+
+/* The SSE connection is not a fetch, so it never passes through `api()` — and
+   a console that logs every request except the one carrying all the data is
+   the wrong console. These are synthesised entries with no body. */
+function logStream(what, ok) {
+  logWire({ method: "SSE", url: `/api/runs/${runId}/stream`, request: null,
+            status: what, ok, ms: 0, text: "", json: null });
 }
 
 // --- rendering values nobody declared ---------------------------------------
@@ -423,7 +701,11 @@ function feedBody() {
    one walks back to where it actually happened. Appending it instead would put
    the contents of a gap at the bottom of the feed, a screen or more away from
    the messages it belongs between, which is exactly what "merge in seq order"
-   is asking not to do. */
+   is asking not to do.
+
+   Every row this walk can meet MUST carry `data-seq`, expander rows included:
+   `Number(undefined)` is NaN and `NaN < seq` is false, so a row without one is
+   never the break point and the next insert lands on the wrong side of it. */
 function place(tr, seq) {
   const body = feedBody();
   const feed = $("feed");
@@ -444,14 +726,53 @@ function place(tr, seq) {
 
 function row(msg) {
   const tr = document.createElement("tr");
-  tr.className = msg.type + " " + (msg.level || "");
+  tr.className = ["msg", msg.type, msg.level || ""].join(" ");
   for (const [text, cls] of [[msg.seq, "seq"], [msg.type, "kind"], [describe(msg), "body"]]) {
     const td = document.createElement("td");
     td.className = cls;
     td.textContent = text;
     tr.append(td);
   }
+  tr.addEventListener("click", () => toggleRaw(tr, msg.seq));
   place(tr, msg.seq);
+}
+
+/* The envelope as it arrived, under the row it belongs to.
+
+   The expander row copies its parent's classes so the type and level filters
+   act on both — an open expander for a DEBUG log must disappear with its row,
+   not hang there attached to nothing — and carries the same `data-seq` so
+   `place()` treats the pair as one unit. */
+function toggleRaw(tr, seq) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains("raw")) { next.remove(); return; }
+
+  const msg = records.get(seq);
+  const raw = document.createElement("tr");
+  raw.className = tr.className.replace("msg", "raw");
+  raw.dataset.seq = seq;
+  const td = document.createElement("td");
+  td.colSpan = 3;
+
+  const text = msg === undefined
+    ? `seq ${seq}: the raw record was dropped — this page keeps the last ` +
+      `${RECORD_CAP.toLocaleString()} received and this one aged out. The row above ` +
+      `is what was rendered from it.`
+    : JSON.stringify(msg, null, 2);
+
+  const tools = document.createElement("div");
+  tools.className = "row";
+  const copy = document.createElement("button");
+  copy.className = "mini";
+  copy.textContent = "copy raw";
+  copy.addEventListener("click", (e) => { e.stopPropagation(); copyText(copy, text); });
+  tools.append(copy);
+
+  const pre = document.createElement("pre");
+  pre.textContent = text;
+  td.append(tools, pre);
+  raw.append(td);
+  tr.after(raw);
 }
 
 function describe(m) {
@@ -466,6 +787,28 @@ function describe(m) {
   if (m.type === "result") return `${m.row_count} rows, chunk ${m.chunk_index}` +
     (m.final ? " (final)" : "");
   return JSON.stringify(m);
+}
+
+/* Filters are class flips on the container. Nothing is removed, nothing is
+   re-rendered, and the counts report what exists rather than what is shown —
+   a hidden ERROR is still an ERROR that happened. */
+const LEVEL_CLASS = { "": "", INFO: "lvl-info", WARNING: "lvl-warn", ERROR: "lvl-error" };
+
+function applyFilters() {
+  const feed = $("feed");
+  for (const t of MESSAGE_TYPES) feed.classList.toggle("no-" + t, !$("f-" + t).checked);
+  for (const cls of Object.values(LEVEL_CLASS)) if (cls) feed.classList.remove(cls);
+  const chosen = LEVEL_CLASS[$("f-level").value] || "";
+  if (chosen) feed.classList.add(chosen);
+  renderCounts();
+}
+
+function renderCounts() {
+  const parts = MESSAGE_TYPES.map((t) =>
+    `${t} ${tally[t]}${$("f-" + t).checked ? "" : " (hidden)"}`);
+  const level = $("f-level").value;
+  $("feedCounts").textContent = parts.join(" · ") +
+    (level ? ` · logs below ${level} hidden` : "");
 }
 
 // --- gaps -------------------------------------------------------------------
@@ -541,6 +884,161 @@ function surveyGaps() {
   $("gap").classList.add("show");
   gaps.forEach(gapMarker);
   return missing;
+}
+
+// --- diagnostics: the numbers the spike doc never recorded -------------------
+
+//: A gap this small did not travel — it was already in the browser when the
+//: one before it was handed over. A run of them is the signature of a proxy
+//: holding events and releasing them together.
+const BURST_MS = 5;
+//: Below this many samples any percentile is a story about three numbers.
+const BURST_MIN_SAMPLES = 20;
+//: What "buffered" means here, stated in the UI too so nobody has to read this
+//: file to know what the warning is claiming: most gaps at zero AND at least
+//: one long stall. Either alone is ordinary — a fast model bursts, a slow one
+//: stalls; both together mean the transport, not the model, is deciding when
+//: messages arrive.
+const BURST_SHARE = 0.5;
+const BURST_MAX_MS = 500;
+//: Inter-arrival samples kept. A percentile over the last few thousand gaps is
+//: the answer to "is it buffered right now", which is the question; keeping
+//: every gap of a six-hour run to sort them all on a frame callback is not.
+const GAP_SAMPLES = 4000;
+
+const diag = {
+  state: "idle",
+  firstOpenAt: 0,      // performance.now() at the first open of this watch
+  opens: 0,
+  firstEventAt: null,
+  ttfe: null,          // ms from the first open to the first event
+  lastEventAt: null,
+  gapsMs: [],
+  cuts: [],            // stream age in ms at each error, which is the cut clock
+  badFrames: 0,
+  touchedAt: 0,
+};
+
+function resetDiag() {
+  diag.state = "idle";
+  diag.firstOpenAt = 0;
+  diag.opens = 0;
+  diag.firstEventAt = null;
+  diag.ttfe = null;
+  diag.lastEventAt = null;
+  diag.gapsMs = [];
+  diag.cuts = [];
+  diag.badFrames = 0;
+  diag.touchedAt = 0;
+}
+
+/* Called from the SSE handler and NOWHERE else. A replayed record arrives over
+   an ordinary fetch, and folding those arrival times into the inter-event
+   series would measure this page's own click instead of the transport. */
+function noteArrival() {
+  const t = performance.now();
+  if (diag.firstEventAt === null) {
+    diag.firstEventAt = t;
+    diag.ttfe = t - diag.firstOpenAt;
+  } else {
+    diag.gapsMs.push(t - diag.lastEventAt);
+    if (diag.gapsMs.length > GAP_SAMPLES) diag.gapsMs.shift();
+  }
+  diag.lastEventAt = t;
+  diag.touchedAt = t;
+  scheduleDiag();
+}
+
+//: Nearest-rank, which is the definition that does not invent a value between
+//: two samples — a p99 that never occurred is a bad thing to tune a timeout on.
+function percentile(sorted, p) {
+  if (!sorted.length) return null;
+  return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
+}
+
+function msText(v) { return v == null ? "—" : `${v.toFixed(v < 10 ? 1 : 0)}ms`; }
+
+let diagQueued = false;
+
+/* One render per frame, same reason the metric chart coalesces: a model
+   sampling faster than the display refreshes would otherwise sort the gap
+   array several times between two paints. The feed's per-type counts ride
+   along on the same callback — they change on exactly the same events and
+   there is no reason to touch the DOM twice for one message. */
+function scheduleDiag() {
+  if (diagQueued) return;
+  diagQueued = true;
+  requestAnimationFrame(() => { diagQueued = false; renderDiag(); renderCounts(); });
+}
+
+function renderDiag() {
+  const sorted = diag.gapsMs.slice().sort((a, b) => a - b);
+  const n = sorted.length;
+  const p50 = percentile(sorted, 0.5);
+  const p99 = percentile(sorted, 0.99);
+  const worst = n ? sorted[n - 1] : null;
+  const bursts = sorted.filter((g) => g < BURST_MS).length;
+  const share = n ? bursts / n : 0;
+  const age = diag.firstOpenAt ? diag.touchedAt - diag.firstOpenAt : 0;
+
+  // Contiguity in O(1). Gaps are counted from 0 — a page that attached at seq
+  // 812 has genuinely not been sent the 812 before it — so the count is
+  // (highest + 1) - what arrived, which is the same number missingRanges()
+  // sums to by construction. Two views, one arithmetic.
+  const missing = lastSeq < 0 ? 0 : lastSeq + 1 - seen.size;
+
+  renderKV($("diagKV"), {
+    connection: `${diag.state} · ${diag.opens} open${diag.opens === 1 ? "" : "s"} · ` +
+      `${failures} consecutive failure${failures === 1 ? "" : "s"} (gives up at 10)`,
+    "time to first event": diag.ttfe == null
+      ? (diag.firstOpenAt ? "still waiting" : "—")
+      : msText(diag.ttfe),
+    "inter-event p50 / p99 / max": n
+      ? `${msText(p50)} / ${msText(p99)} / ${msText(worst)}   (${n} sample${n === 1 ? "" : "s"}` +
+        `${n === GAP_SAMPLES ? ", most recent only" : ""})`
+      : "no samples yet — two events are needed for one gap",
+    // A computed key, so the label cannot drift from the constant it reports.
+    [`gaps under ${BURST_MS}ms`]: n
+      ? `${bursts} of ${n} (${(share * 100).toFixed(0)}%)` : "—",
+    "stream age": diag.firstOpenAt
+      ? `${(age / 1000).toFixed(1)}s — as of the last event or state change; ` +
+        `press recompute for the current value`
+      : "—",
+    // The ages, not just the count. Cuts clustered at 120s and 240s are a
+    // two-minute ingress ceiling, and no other reading on this page says so.
+    // Only the last eight are printed: a run cut fifty times has already
+    // answered the question, and the line has to stay readable.
+    "cut before a terminal status": diag.cuts.length
+      ? `${diag.cuts.length} cut${diag.cuts.length === 1 ? "" : "s"} at ` +
+        diag.cuts.slice(-8).map((c) => `${(c / 1000).toFixed(1)}s`).join(", ") +
+        (diag.cuts.length > 8 ? " (last 8)" : "") +
+        (finished ? " (a terminal status did arrive afterwards)"
+                  : " — no terminal status yet")
+      : (finished ? "no — the run reached a terminal status" : "no cuts so far"),
+    "seq contiguity": lastSeq < 0
+      ? "nothing yet"
+      : `lowest ${firstSeq} · highest ${lastSeq} · ${seen.size} seen · ${missing} missing`,
+    "unparseable frames": diag.badFrames,
+  });
+
+  let verdict, bad = false;
+  if (n < BURST_MIN_SAMPLES) {
+    verdict = `delivery: not enough data yet (${n}/${BURST_MIN_SAMPLES} gaps). ` +
+      `The test is ${Math.round(BURST_SHARE * 100)}%+ of gaps under ${BURST_MS}ms ` +
+      `together with a maximum over ${BURST_MAX_MS}ms.`;
+  } else if (share >= BURST_SHARE && worst >= BURST_MAX_MS) {
+    bad = true;
+    verdict = `delivery: BUFFERED. ${(share * 100).toFixed(0)}% of gaps are under ` +
+      `${BURST_MS}ms but the largest is ${msText(worst)} — messages are arriving in ` +
+      `held-and-released batches, so "live" progress is not live. That is the ingress ` +
+      `ignoring X-Accel-Buffering: no, and it is the third measurement in ` +
+      `docs/spike-results.md.`;
+  } else {
+    verdict = `delivery: looks prompt — p50 ${msText(p50)}, max ${msText(worst)}, ` +
+      `${(share * 100).toFixed(0)}% of gaps under ${BURST_MS}ms. Nothing here says ` +
+      `the stream is being held.`;
+  }
+  note("diagWarn", verdict, bad ? "bad" : "");
 }
 
 // --- progress: the generic view ---------------------------------------------
@@ -650,7 +1148,9 @@ function renderResult(m) {
   $("rowCount").textContent = m.row_count.toLocaleString();
   // Zero is a legitimate answer, not a rendering failure — a model that found
   // nothing to write says so honestly, and `fetch_hint` below carries why. It
-  // is not painted red for that reason.
+  // is not painted red for that reason. It is also the field that separates
+  // "succeeded, wrote 8,760 rows" from "succeeded, wrote nothing", which is
+  // why it is the largest thing in the panel.
   $("rowCountNote").textContent = m.row_count === 0
     ? "zero rows written — the run reported this, it is not a display problem; see fetch_hint"
     : "";
@@ -715,6 +1215,10 @@ function apply(msg) {
   if (seen.has(msg.seq)) return;   // live and replayed records meet here
   seen.add(msg.seq);
   count += 1;
+  if (firstSeq === null || msg.seq < firstSeq) firstSeq = msg.seq;
+  if (msg.type in tally) tally[msg.type] += 1;
+  records.set(msg.seq, msg);
+  if (records.size > RECORD_CAP) records.delete(records.keys().next().value);
 
   // Older than something already applied, so it can only have come from a
   // replay. It belongs in the feed, but it must not touch the vitals: walking
@@ -757,10 +1261,12 @@ function apply(msg) {
       finished = true;
       conn("finished", "");
       if (es) es.close();
+      logStream("closed on a terminal status", true);
       refreshCancel();
     }
   }
   row(msg);
+  scheduleDiag();   // redraws the diagnostics AND the feed counts, once a frame
   if (jumped) surveyGaps();
 }
 
@@ -768,13 +1274,17 @@ function watch() {
   if (es) es.close();
   runId = $("run").value.trim();
   if (!runId) return;
-  seen = new Set(); lastSeq = -1; count = 0; failures = 0; gaps = [];
+  seen = new Set(); lastSeq = -1; firstSeq = null; count = 0; failures = 0; gaps = [];
   finished = false; busy = false;
+  for (const t of MESSAGE_TYPES) tally[t] = 0;
+  records.clear();
+  resetDiag();
   metricSeries = []; payloadOrder = []; metricLabel = "metric";
   results.clear(); shownResult = null; sawFinal = false; previewY = null;
   $("feed").innerHTML = '<div class="empty">Waiting for the first message…</div>';
   $("gap").classList.remove("show");
   $("fillNote").textContent = "";
+  $("replayNote").textContent = "";
   $("missing").textContent = "0";
   $("seq").textContent = "—";
   $("count").textContent = "0";
@@ -794,19 +1304,25 @@ function watch() {
   $("previewFallback").replaceChildren();
   $("ack").hidden = true;
   $("confirm").hidden = true;
+  renderCounts();
   // The address bar follows the run being watched, so a reload — and a link
   // pasted to somebody else — lands on the same run rather than on nothing.
   history.replaceState(null, "", `?run=${encodeURIComponent(runId)}`);
   refreshCancel();
-  open();
+  openStream();
 }
 
-function open() {
+function openStream() {
   conn("connecting", "");
+  diag.opens += 1;
+  if (!diag.firstOpenAt) diag.firstOpenAt = performance.now();
+  logStream(`opening (attempt ${diag.opens})`, true);
   es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
 
   const receive = (e) => {
-    try { apply(JSON.parse(e.data)); } catch (err) { console.error(err, e.data); }
+    noteArrival();
+    try { apply(JSON.parse(e.data)); }
+    catch (err) { diag.badFrames += 1; console.error(err, e.data); }
   };
 
   es.onopen = () => {
@@ -815,6 +1331,7 @@ function open() {
     // long-lived connections periodically.
     failures = 0;
     conn("live", "live");
+    logStream("open", true);
   };
   // The server names every event after the message's type, so `onmessage` —
   // which fires only for events named "message" — never fires against it at
@@ -827,11 +1344,101 @@ function open() {
   es.onerror = () => {
     failures += 1;
     $("reconnects").textContent = failures;
-    if (failures >= 10) { es.close(); conn("gave up", "down"); return; }
+    // The age at the cut is the number that reveals an ingress duration cap:
+    // errors clustered at 120s and 240s are a two-minute ceiling, and no other
+    // reading on this page would say so.
+    if (diag.firstOpenAt) diag.cuts.push(performance.now() - diag.firstOpenAt);
+    if (failures >= 10) {
+      es.close();
+      conn("gave up", "down");
+      logStream(`gave up after ${failures} consecutive failures`, false);
+      scheduleDiag();
+      return;
+    }
     conn(`reconnecting (${failures})`, "down");
+    logStream(`error ${failures} — EventSource will retry`, false);
     // EventSource reconnects on its own, carrying Last-Event-ID — which is why
     // the server sets `id:` to the message's seq and no handshake is needed.
   };
+}
+
+// --- the endpoint buttons ---------------------------------------------------
+
+/* Health, rendered rather than only logged. Every field on this response
+   answers a question somebody has asked out loud during a deploy, so each one
+   gets a line — the raw body is in the wire log for the rest. */
+function renderHealth(b) {
+  const flat = {
+    status: b.status,
+    protocol_schema_version: b.protocol_schema_version,
+    "store.kind": (b.store && b.store.kind) ?? "(none — degraded)",
+    "store.server_version": (b.store && b.store.server_version) ?? "(none)",
+    "job_ids.source": b.job_ids && b.job_ids.source,
+    "job_ids.count": b.job_ids && b.job_ids.count,
+    live_jobs: b.live_jobs,
+    messages_ingested: b.messages_ingested,
+  };
+  const degraded = b.degraded || {};
+  for (const k of Object.keys(degraded)) flat["degraded." + k] = degraded[k];
+  if (!Object.keys(degraded).length) flat.degraded = "nothing degraded";
+  renderKV($("healthKV"), flat);
+
+  // "discovered" is a working app AND a warning: it means this deployment was
+  // not created by `databricks bundle run`, so nothing else in resources/app.yml
+  // reached it either — not the volume, not the ingress token, not Lakebase.
+  const source = b.job_ids && b.job_ids.source;
+  const parts = [];
+  if (source === "discovered") {
+    parts.push("job_ids came from workspace discovery, not config — which means this " +
+      "deployment was not created by `databricks bundle run`, so nothing else in " +
+      "resources/app.yml reached it either (volume, ingress token, Lakebase host)");
+  }
+  if (b.status !== "ok") parts.push("the app is degraded; the reasons are listed above");
+  note("healthNote", parts.join(" · ") || "", parts.length ? "bad" : "");
+}
+
+async function getHealth() {
+  const r = await api("GET", "/api/healthz");
+  if (!r.ok) {
+    renderKV($("healthKV"), {});
+    note("healthNote", `the app answered ${r.status || "nothing"}: ${problemOf(r)}`, "bad");
+    return;
+  }
+  renderHealth(r.json || {});
+}
+
+async function getSchema() {
+  const kind = $("schemaKind").value;
+  const r = await api("GET", `/api/schema?kind=${encodeURIComponent(kind)}`);
+  note("epNote", r.ok
+    ? `schema ${kind}: ${r.text.length.toLocaleString()} characters — in the wire log below`
+    : `schema ${kind}: ${r.status} ${problemOf(r)}`, r.ok ? "" : "bad");
+}
+
+async function getWhoami() {
+  const r = await api("GET", "/api/whoami");
+  if (!r.ok) { note("epNote", `whoami: ${r.status} ${problemOf(r)}`, "bad"); return; }
+  const b = r.json || {};
+  // Cosmetic identity from the platform proxy. Said here as well as in the
+  // response, because it is exactly the field somebody builds a check on.
+  note("epNote", b.authenticated
+    ? `whoami: ${b.email || b.user || b.user_id} — cosmetic identity from the proxy, ` +
+      `not an authorization boundary`
+    : "whoami: no forwarded identity headers — running without the Apps proxy in front", "");
+}
+
+/* GET /api/runs/{id}: the store's own record, plus whether a job is attached
+   right now and how far the app's snapshot has seen. Useful mostly to answer
+   "is anything actually connected" before blaming the page. */
+async function getRun() {
+  const id = $("run").value.trim();
+  if (!id) { note("epNote", "put a run id in the box at the top first", "bad"); return; }
+  const r = await api("GET", `/api/runs/${encodeURIComponent(id)}`);
+  if (!r.ok) { note("epNote", `run ${id}: ${r.status} ${problemOf(r)}`, "bad"); return; }
+  const b = r.json || {};
+  const rec = b.run || {};
+  note("epNote", `run ${id}: ${rec.status} · model ${rec.model} · ` +
+    `live=${b.live} · last_seq_seen=${b.last_seq_seen} · job run ${rec.job_run_id}`, "");
 }
 
 // --- starting a run ---------------------------------------------------------
@@ -847,36 +1454,33 @@ let launching = false;
    silently empty dropdown throws away the only explanation there is. */
 async function loadModels() {
   const select = $("model");
-  try {
-    const res = await fetch("/api/models");
-    if (!res.ok) {
-      select.replaceChildren();
-      note("modelNote", `the app answered ${res.status}: ${await problem(res)}`, "bad");
-      $("start").disabled = true;
-      return;
-    }
-    const body = await res.json();
+  const r = await api("GET", "/api/models");
+  if (!r.ok) {
     select.replaceChildren();
-    for (const m of body.models) {
-      const opt = document.createElement("option");
-      opt.value = m.name;
-      opt.textContent = m.name;
-      opt.title = `job ${m.job_id}`;
-      select.append(opt);
-    }
-    $("start").disabled = body.models.length === 0;
-    const where = body.source === "config" ? "from DBX_JOB_IDS"
-      : body.source === "discovered" ? "discovered in the workspace by tag"
-      : `source: ${body.source}`;
-    note("modelNote", body.models.length
-      ? `${body.models.length} model${body.models.length === 1 ? "" : "s"} ${where}` +
-        (body.detail ? ` — ${body.detail}` : "")
-      : `nothing to trigger (${where})${body.detail ? ` — ${body.detail}` : ""}`,
-      body.models.length ? "" : "bad");
-  } catch (err) {
-    note("modelNote", `could not ask the app what it can run: ${err}`, "bad");
+    note("modelNote", r.status
+      ? `the app answered ${r.status}: ${problemOf(r)}`
+      : `could not ask the app what it can run: ${r.text}`, "bad");
     $("start").disabled = true;
+    return;
   }
+  const body = r.json || { models: [] };
+  select.replaceChildren();
+  for (const m of body.models) {
+    const opt = document.createElement("option");
+    opt.value = m.name;
+    opt.textContent = m.name;
+    opt.title = `job ${m.job_id}`;
+    select.append(opt);
+  }
+  $("start").disabled = body.models.length === 0;
+  const where = body.source === "config" ? "from DBX_JOB_IDS"
+    : body.source === "discovered" ? "discovered in the workspace by tag"
+    : `source: ${body.source}`;
+  note("modelNote", body.models.length
+    ? `${body.models.length} model${body.models.length === 1 ? "" : "s"} ${where}` +
+      (body.detail ? ` — ${body.detail}` : "")
+    : `nothing to trigger (${where})${body.detail ? ` — ${body.detail}` : ""}`,
+    body.models.length ? "" : "bad");
 }
 
 async function start() {
@@ -905,21 +1509,21 @@ async function start() {
   $("start").disabled = true;
   note("launchNote", `asking the app to run ${model}…`, "");
   try {
-    const res = await fetch("/api/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // A blank id means "the app mints one". Supplying one is what makes the
-      // trigger idempotent from this side, and it is the id watched below.
-      body: JSON.stringify({ model, config, run_id: $("newRun").value.trim() || null }),
-    });
-    if (!res.ok) {
+    // A blank id means "the app mints one". Supplying one is what makes the
+    // trigger idempotent from this side, and it is the id watched below.
+    const r = await api("POST", "/api/runs",
+      { model, config, run_id: $("newRun").value.trim() || null });
+    if (!r.ok) {
       // 503: this app cannot trigger anything (no Jobs API credentials).
-      // 404: no job for that model. 502: Databricks refused. All three say so
-      // in words, and all three are the app's words rather than a guess here.
-      note("launchNote", `the app answered ${res.status}: ${await problem(res)}`, "bad");
+      // 404: no job for that model. 502: Databricks refused. 0: the request
+      // never left the browser. All of them say so in words, and the first
+      // three are the app's words rather than a guess here.
+      note("launchNote", r.status
+        ? `the app answered ${r.status}: ${problemOf(r)}`
+        : `the trigger request never left the browser: ${r.text}`, "bad");
       return;
     }
-    const body = await res.json();
+    const body = r.json || {};
     note("launchNote",
       `${body.model} queued as job run ${body.job_run_id} — watching ${body.run_id}. ` +
       `A queued run attaches when it starts; until then this page is quiet, ` +
@@ -927,8 +1531,6 @@ async function start() {
     $("run").value = body.run_id;
     watch();
     loadRuns();   // it exists now; the list should say so without a second click
-  } catch (err) {
-    note("launchNote", `the trigger request never left the browser: ${err}`, "bad");
   } finally {
     launching = false;
     $("start").disabled = $("model").options.length === 0;
@@ -949,57 +1551,87 @@ function fmtTime(ms) {
    on the page still works. */
 async function loadRuns() {
   const box = $("runs");
-  try {
-    const res = await fetch("/api/runs?limit=20");
-    if (!res.ok) {
-      box.replaceChildren();
-      note("runsNote", `no list: ${await problem(res)}` +
-        (res.status === 503
+  const limit = Math.max(1, Math.min(500, Number($("runsLimit").value) || 20));
+  const r = await api("GET", `/api/runs?limit=${limit}`);
+  if (!r.ok) {
+    box.replaceChildren();
+    note("runsNote", r.status
+      ? `no list: ${problemOf(r)}` +
+        (r.status === 503
           ? " — the list is the only thing here that needs the run store; " +
             "starting and watching runs do not."
-          : ""), "bad");
-      return;
-    }
-    const body = await res.json();
-    note("runsNote", body.count
-      ? `${body.count} run${body.count === 1 ? "" : "s"}, newest first — click one to watch it`
-      : "no runs recorded yet", "");
-    box.replaceChildren();
-    if (!body.count) return;
-
-    const table = document.createElement("table");
-    const head = table.createTHead().insertRow();
-    for (const label of ["run", "model", "status", "updated"]) {
-      const th = document.createElement("th");
-      th.textContent = label;
-      head.append(th);
-    }
-    const tbody = table.createTBody();
-    for (const r of body.runs) {
-      const tr = tbody.insertRow();
-      tr.tabIndex = 0;
-      // `detail` is where a FAILED run says what happened. Not a column —
-      // it is long and usually absent — but not thrown away either.
-      tr.title = [r.detail, r.requested_by && `requested by ${r.requested_by}`,
-        r.job_run_id && `job run ${r.job_run_id}`].filter(Boolean).join("\n");
-      for (const text of [r.run_id, r.model,
-        r.status + (r.live ? " ●" : ""), fmtTime(r.updated_ts)]) {
-        tr.insertCell().textContent = text;
-      }
-      if (r.live) tr.cells[2].className = "ok";   // a job is attached right now
-      const pick = () => { $("run").value = r.run_id; watch(); };
-      tr.addEventListener("click", pick);
-      tr.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
-      });
-    }
-    box.append(table);
-  } catch (err) {
-    note("runsNote", `could not list runs: ${err}`, "bad");
+          : "")
+      : `could not list runs: ${r.text}`, "bad");
+    return;
   }
+  const body = r.json || { count: 0, runs: [] };
+  note("runsNote", body.count
+    ? `${body.count} run${body.count === 1 ? "" : "s"}, newest first — click one to watch it`
+    : "no runs recorded yet", "");
+  box.replaceChildren();
+  if (!body.count) return;
+
+  const table = document.createElement("table");
+  const head = table.createTHead().insertRow();
+  for (const label of ["run", "model", "status", "updated"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    head.append(th);
+  }
+  const tbody = table.createTBody();
+  for (const rec of body.runs) {
+    const tr = tbody.insertRow();
+    tr.tabIndex = 0;
+    // `detail` is where a FAILED run says what happened. Not a column —
+    // it is long and usually absent — but not thrown away either.
+    tr.title = [rec.detail, rec.requested_by && `requested by ${rec.requested_by}`,
+      rec.job_run_id && `job run ${rec.job_run_id}`].filter(Boolean).join("\n");
+    for (const text of [rec.run_id, rec.model,
+      rec.status + (rec.live ? " ●" : ""), fmtTime(rec.updated_ts)]) {
+      tr.insertCell().textContent = text;
+    }
+    if (rec.live) tr.cells[2].className = "ok";   // a job is attached right now
+    const pick = () => { $("run").value = rec.run_id; watch(); };
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
+    });
+  }
+  box.append(table);
 }
 
 // --- replay: client-triggered, always ---------------------------------------
+
+//: The hard cap on a hand-typed range. The job's reply crosses a WebSocket
+//: with a 16 MiB frame cap — order 77,000 records — and one oversized answer
+//: closes the app's socket with a 1009, taking the job's live channel down
+//: with it. So the bench gets a range control, and the range control gets a
+//: bound. Nothing on this page can ask for "everything".
+const MANUAL_REPLAY_MAX = 2000;
+
+/* Ask the job for one range and merge what comes back.
+
+   Shared by the gap-filler and the manual control so there is one description
+   of what a replay does: sort by seq, hand each record to `apply()`, let
+   `seen` absorb the duplicates. Returns an error string, or null. */
+async function replayRange(from, to) {
+  const r = await api("GET", `/api/runs/${encodeURIComponent(runId)}/replay` +
+    `?from_seq=${from}&to_seq=${to}`);
+  if (!r.ok) {
+    return r.status
+      ? `seq ${from}–${to}: ${problemOf(r)}`
+      : `seq ${from}–${to}: the replay request never completed (${r.text})`;
+  }
+  // The job answers from its closed part files AND its in-flight buffer, so
+  // the newest records come back too — the ones a files-only implementation
+  // would silently omit. Sorted before applying so the merge is in seq order
+  // even if some future writer hands them back in another one.
+  const payload = r.json || {};
+  for (const m of (payload.messages || []).slice().sort((a, b) => a.seq - b.seq)) {
+    try { apply(m); } catch (err) { console.error("unrenderable record", m, err); }
+  }
+  return null;
+}
 
 async function fill() {
   if (!runId || busy || !gaps.length) return;
@@ -1013,34 +1645,19 @@ async function fill() {
     // One request per range, not one request spanning all of them. A span from
     // the first hole to the last is frequently the whole run, and making the
     // job re-read and re-serialise every record it ever wrote to recover four
-    // of them is real work taken from the thing the job is there to do.
-    //
-    // It is also a live hazard, not just waste: the reply crosses a WebSocket
-    // with a 16 MiB frame cap — order 77,000 records — and one oversized answer
-    // closes the app's socket with a 1009 and takes the job's live channel down
-    // with it. Which is why there is no "resend everything" button on this
-    // page, and why the ranges asked for are only ever the ones detected.
+    // of them is real work taken from the thing the job is there to do. It is
+    // also the 1009 hazard described on MANUAL_REPLAY_MAX.
     //
     // Sequential, and it stops at the first failure: after a 409 there is no
     // job to ask, and firing the remaining ranges at it only multiplies the
     // same answer.
+    //
     // A snapshot of the ranges, because `apply()` can resurvey and rebind
     // `gaps` from under this loop.
     for (const g of gaps.slice()) {
-      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/replay` +
-        `?from_seq=${g.from}&to_seq=${g.to}`);
-      if (!res.ok) { trouble = `seq ${range(g)}: ${await problem(res)}`; break; }
-      const body = await res.json();
-      // The job answers from its closed part files AND its in-flight buffer, so
-      // the newest records come back too — the ones a files-only implementation
-      // would silently omit. Sorted before applying so the merge is in seq
-      // order even if some future writer hands them back in another one.
-      for (const m of body.messages.slice().sort((a, b) => a.seq - b.seq)) {
-        try { apply(m); } catch (err) { console.error("unrenderable record", m, err); }
-      }
+      trouble = await replayRange(g.from, g.to);
+      if (trouble) break;
     }
-  } catch (err) {
-    trouble = `the replay request never completed: ${err}`;
   } finally {
     busy = false;
     $("fill").disabled = false;
@@ -1060,6 +1677,44 @@ async function fill() {
     } else {
       $("fillNote").textContent = `merged ${merged}; nothing missing.`;
     }
+    refreshCancel();
+  }
+}
+
+async function manualReplay() {
+  if (!runId) { note("replayNote", "watch a run first — replay goes to its job", "bad"); return; }
+  if (busy) return;
+  const from = Number($("replayFrom").value);
+  const to = Number($("replayTo").value);
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from) {
+    note("replayNote", "from_seq and to_seq must be whole numbers with to_seq ≥ from_seq", "bad");
+    return;
+  }
+  if (to - from + 1 > MANUAL_REPLAY_MAX) {
+    note("replayNote", `that is ${(to - from + 1).toLocaleString()} seqs; the cap here is ` +
+      `${MANUAL_REPLAY_MAX.toLocaleString()}. Not politeness — the reply crosses a ` +
+      `WebSocket with a 16 MiB frame cap, and one oversized answer closes the app's ` +
+      `socket with a 1009 and takes the job's live channel with it. Ask in windows.`, "bad");
+    return;
+  }
+  busy = true;
+  $("replayGo").disabled = true;
+  note("replayNote", `asking the job for seq ${from}–${to}…`, "");
+  const before = count;
+  try {
+    const trouble = await replayRange(from, to);
+    note("replayNote", trouble
+      ? trouble + (trouble.includes("no job attached")
+          ? " — a finished run has no history path from this page today; see the note under the feed."
+          : "")
+      : `merged ${count - before} new record${count - before === 1 ? "" : "s"} ` +
+        `(a range already on screen merges nothing — dedupe is by seq)`,
+      trouble ? "bad" : "");
+  } finally {
+    busy = false;
+    $("replayGo").disabled = false;
+    surveyGaps();
+    refreshCancel();
   }
 }
 
@@ -1127,23 +1782,23 @@ async function doCancel() {
   showAck(`asking ${runId} to stop…`, null, "");
 
   try {
-    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
-    if (res.status === 409) {
+    const r = await api("POST", `/api/runs/${encodeURIComponent(runId)}/cancel`);
+    if (r.status === 409) {
       // Nobody heard you, and nothing was cancelled. Not an error to bury: the
       // app's message names the CLI that CAN stop the job, and with no live
       // channel that is the only route left. Shown verbatim for that reason.
-      showAck("no live channel — nothing was cancelled", await problem(res), "bad");
+      showAck("no live channel — nothing was cancelled", problemOf(r), "bad");
       return;
     }
-    if (!res.ok) {
+    if (!r.ok) {
       // 502 is the job refusing, and its words come through in the detail.
-      showAck(`the app answered ${res.status}`, await problem(res), "bad");
+      showAck(r.status ? `the app answered ${r.status}`
+                       : "the cancel request never left the browser",
+              problemOf(r), "bad");
       return;
     }
-    const body = await res.json();
+    const body = r.json || {};
     showAck(ackHeadline(body), JSON.stringify(body.acknowledged, null, 2), "ok");
-  } catch (err) {
-    showAck("the cancel request never left the browser", String(err), "bad");
   } finally {
     busy = false;
     refreshCancel();
@@ -1157,19 +1812,47 @@ $("run").addEventListener("keydown", (e) => { if (e.key === "Enter") watch(); })
 $("start").addEventListener("click", start);
 $("newRun").addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
 $("reload").addEventListener("click", loadRuns);
+$("runsLimit").addEventListener("keydown", (e) => { if (e.key === "Enter") loadRuns(); });
+$("reloadModels").addEventListener("click", loadModels);
 $("previewY").addEventListener("change", () => { previewY = $("previewY").value; drawPreview(); });
 $("fill").addEventListener("click", fill);
+$("replayGo").addEventListener("click", manualReplay);
 $("cancel").addEventListener("click", arm);
 $("cancelNo").addEventListener("click", disarm);
 $("cancelYes").addEventListener("click", doCancel);
+
+$("epHealth").addEventListener("click", getHealth);
+$("epModels").addEventListener("click", loadModels);
+$("epWhoami").addEventListener("click", getWhoami);
+$("epSchema").addEventListener("click", getSchema);
+$("epRuns").addEventListener("click", loadRuns);
+$("epRun").addEventListener("click", getRun);
+$("wireClear").addEventListener("click", () => {
+  $("wire").replaceChildren();
+  $("wireNote").textContent = "cleared";
+});
+$("diagRecompute").addEventListener("click", () => {
+  // The one thing that does not update itself: stream age has no event behind
+  // it while the stream is silent, and a silent stream is exactly when the
+  // number matters. A click, like everything else here.
+  diag.touchedAt = performance.now();
+  renderDiag();
+});
+
+for (const t of MESSAGE_TYPES) $("f-" + t).addEventListener("change", applyFilters);
+$("f-level").addEventListener("change", applyFilters);
+
 // Escape is the other way out of an armed confirm, for anyone who reaches for
 // the keyboard before the mouse.
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("confirm").hidden) disarm();
 });
 
-// Both on load, once. A page load is a person arriving, which is a decision;
+// On load, once. A page load is a person arriving, which is a decision;
 // nothing on this page repeats a request without another one.
+applyFilters();
+renderDiag();
+getHealth();
 loadModels();
 loadRuns();
 
