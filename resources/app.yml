@@ -90,40 +90,34 @@ resources:
         # in this platform degrades at RUN time and says so on `/healthz`;
         # this one cannot, so it is off until you opt in.
         #
-        # To use a principal of your own, create the secret first, then
-        # uncomment BOTH this block and the DBX_OAUTH_CLIENT_SECRET env below,
-        # and set the `oauth_client_id` variable to its application id:
+        # NOW OPTED IN, with a principal of this app's own: the service
+        # principal `dbx-leaning lakebase`
+        # (application id 1560db44-c718-40b6-9ebf-70386cfa7165), created
+        # 2026-09-09 for exactly one job — authenticating to Lakebase.
         #
-        #   databricks secrets put-secret ${var.app_secret_scope} \
-        #     oauth-client-secret --string-value "<the SP's OAuth secret>"
+        # Its own OAuth secret lives in the scope under `lakebase-client-secret`,
+        # NOT `oauth-client-secret`. That key is a different identity — the
+        # shared job INGRESS principal ("TheApp") — and pointing the app at it
+        # would make one principal both the thing jobs authenticate as and the
+        # thing that owns the run-state database. Separate keys keep them
+        # separately rotatable.
         #
-        # Live. The shared ingress identity — the same principal and keys the
-        # jobs read, and the only one with an OAuth login to Lakebase.
-        - name: oauth-client-secret
-          description: Secret for the service principal the app runs as.
+        #   databricks service-principals create --display-name "dbx-leaning lakebase"
+        #   databricks service-principal-secrets-proxy create <numeric sp id>
+        #   databricks secrets put-secret ${var.app_secret_scope} lakebase-client-secret ...
+        #
+        # Note the SECOND command: on Free Edition the account-level
+        # `databricks account service-principal-secrets` API answers 404, and
+        # `service-principal-secrets-proxy` is the workspace-level route that
+        # does the same job. That is the one that works here.
+        #
+        # This resource is validated at deploy time, per the warning above, so
+        # the key has to exist before the next `bundle deploy`. It does.
+        - name: lakebase-client-secret
+          description: OAuth secret for the principal the app authenticates as.
           secret:
             scope: ${var.app_secret_scope}
-            key: oauth-client-secret
-            permission: READ
-
-        # The id comes from the scope too, so it cannot name a different
-        # principal than the secret beside it — that pair fails
-        # `/oidc/v1/token` with `invalid_client`, which says nothing about
-        # which half is wrong.
-        - name: oauth-client-id
-          description: Application id of that same principal.
-          secret:
-            scope: ${var.app_secret_scope}
-            key: oauth-client-id
-            permission: READ
-
-        # Same key again under a second name: one resource feeds exactly one
-        # env var. Two vars pointing at one resource leaves the second empty.
-        - name: lakebase-user
-          description: The Postgres role — that same application id.
-          secret:
-            scope: ${var.app_secret_scope}
-            key: oauth-client-id
+            key: lakebase-client-secret
             permission: READ
 
         - name: app-store-read
@@ -268,16 +262,33 @@ resources:
           # with a matching entry under `resources:` above. That block is
           # empty of secrets now that the ingress token is gone, so this would
           # be the first one back.
-          # If `lakebase_host` is ever set back to empty, comment its entry out
-          # again: an empty bundle variable drops the `value` key entirely, and
-          # only `bundle run` fails — `validate` and `deploy` both pass.
+          # THE NEXT TWO WERE COMMENTED OUT, and not because Lakebase is
+          # optional. AN EMPTY BUNDLE VARIABLE DROPS THE `value` KEY ENTIRELY.
+          # It does not resolve to `value: ""` — the resolved config is
+          # `{"name": "DBX_LAKEBASE_HOST"}` with no source at all, and
+          # `databricks bundle run` then fails the deployment with:
+          #
+          #   Error: Must specify environment variable source using either
+          #   `value` or `valueFrom`.
+          #
+          # which names neither the variable nor the file.
+          #
+          # Both variables now carry a real default, so both resolve and both
+          # are live. **If either is ever set back to empty, comment its entry
+          # out again** — `validate` and `deploy` will still pass and only `run`
+          # will fail, three commands downstream of the cause.
+          #
+          # `lakebase_user` is the app's own service principal APPLICATION id
+          # (`service_principal_client_id` from `databricks apps get`), not its
+          # numeric id and not its display name. Lakebase authenticates with an
+          # OAuth token and names the role after the principal that token
+          # belongs to, so any other value fails as an ordinary authentication
+          # error — which reads as a bad password and sends you looking at the
+          # secret instead of at this line.
           - name: DBX_LAKEBASE_HOST
             value: ${var.lakebase_host}
-          # The Postgres role must be the principal whose token is the
-          # password, so it reads the same scope key as DBX_OAUTH_CLIENT_ID.
-          # `var.lakebase_user` is unused here.
           - name: DBX_LAKEBASE_USER
-            value_from: lakebase-user
+            value: ${var.lakebase_user}
           - name: DBX_LAKEBASE_DATABASE
             value: ${var.lakebase_database}
           - name: DBX_LAKEBASE_PORT
@@ -303,11 +314,63 @@ resources:
           # The id alone does nothing — `has_client_credentials` needs both —
           # and setting it without uncommenting the secret below is reported
           # on `/healthz` rather than silently ignored.
-          # Live, with the two secret resources above — all three or none.
+          # BOTH ARE LIVE NOW, and they have to move together: the id alone
+          # does nothing, because `has_client_credentials` requires both, and
+          # `services.py::_token_source` reports the half-configured case on
+          # `/healthz` rather than silently falling back.
+          #
+          # `value_from` names an app RESOURCE declared in the `resources:`
+          # block above — NOT a scope key directly. Getting that wrong fails at
+          # BUILD time with `error resolving resource <name> ... not found`,
+          # the env var resolves empty, and the token exchange then answers
+          # `401 invalid_client` — which reads like a bad secret rather than an
+          # undeclared resource.
+          #
+          # If `oauth_client_id` is ever set back to empty, comment both lines
+          # out again: an empty variable leaves the entry with no source and
+          # only `bundle run` fails, three commands downstream of the cause.
+          # RE-COMMENTED 2026-09-09, and the reason is worth keeping. Turning
+          # these on made the app authenticate as `dbx-leaning lakebase` for
+          # EVERYTHING, not just Postgres — `services.py::startup` builds one
+          # token provider and hands it to the store AND `JobsApi`. The
+          # exchange answered `401 invalid_client`, so the app lost Lakebase
+          # (which never worked) *and* job discovery (which did): `/api/healthz`
+          # went from `job_ids: {source: discovered, count: 2}` to
+          # `{source: none, count: 0}` and nothing could be triggered.
+          #
+          # That is the real lesson here: this is not a Lakebase-only switch.
+          # One bad credential takes the whole app down to nothing, so verify
+          # the client-credentials exchange OUT OF BAND before turning it on:
+          #
+          #   curl -u "<client_id>:<secret>" -d grant_type=client_credentials \
+          #     -d scope=all-apis https://<workspace>/oidc/v1/token
+          #
+          # The secret, the resource declaration and the variables are all in
+          # place and correct; what is unproven is whether that principal can
+          # complete the exchange at all on this workspace.
+          # LIVE AGAIN, and this time with the resource actually registered.
+          #
+          # The first attempt failed because `databricks apps get` showed
+          # `resources: []` — the CLI's app-config update was being rejected
+          # wholesale (`Invalid update mask ... forward_user_access_token`), so
+          # `value_from` had nothing to resolve and the app posted an empty
+          # secret. `401 invalid_client` was the symptom; an unregistered
+          # resource was the cause.
+          #
+          # Registering the resources out of band with
+          # `databricks apps update dbx-leaning --json` cleared it, and
+          # `bundle deploy` now reports `Updated apps.dbx_leaning`.
+          #
+          # AND THIS BLOCK IS WHAT COUNTS, not `app/app.yaml`: when the bundle
+          # manages the app config, what is declared HERE is the env the
+          # runtime gets. Setting them only in `app/app.yaml` left
+          # `DBX_OAUTH_CLIENT_ID` unset, the app fell back to the principal
+          # Apps injects for it, and `/healthz` reported `lakebase_identity` —
+          # connecting as one principal while presenting another's token.
           - name: DBX_OAUTH_CLIENT_ID
-            value_from: oauth-client-id
+            value: ${var.oauth_client_id}
           - name: DBX_OAUTH_CLIENT_SECRET
-            value_from: oauth-client-secret
+            value_from: lakebase-client-secret
 
           # DBX_JOB_IDS IS DELIBERATELY ABSENT. The app discovers its jobs
           # from the workspace by the `project: dbx-leaning` tag rather than

@@ -50,9 +50,12 @@ variables:
       the scope below), never a variable. Empty falls back to the service
       principal Databricks Apps injects for the app itself.
 
-      UNUSED. The app reads both halves from the `dbx-leaning` scope instead
-      (resources/app.yml), so the id cannot drift from its secret.
-    default: ""
+      Set 2026-09-09 to `dbx-leaning lakebase`, a service principal created for
+      this one purpose. Its OAuth secret is the `lakebase-client-secret` key in
+      `app_secret_scope`, declared as an app resource in `resources/app.yml`.
+      Keep this equal to `lakebase_user` below — Lakebase names its Postgres
+      role after whoever the token belongs to.
+    default: "1560db44-c718-40b6-9ebf-70386cfa7165"
   app_secret_scope:
     description: >-
       Workspace secret scope holding the ingress service principal's OAuth
@@ -148,13 +151,18 @@ variables:
       sends you looking at the secret. `tests/deploy/test_bundle.py` refuses
       the mismatch, and `/healthz` reports it at run time.
 
-      UNUSED, like `oauth_client_id`: resources/app.yml reads the role from
-      the `dbx-leaning` scope so it matches the token's principal.
+      Empty means NO run store at all on v4 — the warehouse-backed fallback
+      this used to name was deleted with the rest of the app's warehouse path.
+      The app still triggers and streams; listing and reading past runs 503.
 
-      For whoever re-enables it: empty means NO run store on v4, not the
-      warehouse fallback named above — that was deleted. Triggering and
-      streaming still work; listing past runs 503s.
-    default: ""
+      MUST equal `oauth_client_id` above, and does: both are the
+      `dbx-leaning lakebase` principal, 1560db44-c718-40b6-9ebf-70386cfa7165.
+      It was briefly the app's OWN injected principal
+      (f48cf783-…, from `databricks apps get`) — which is the right answer only
+      when `oauth_client_id` is empty and the app authenticates as itself.
+      Once an explicit principal is named, connecting as one identity while
+      presenting another's token fails as a plain authentication error.
+    default: "1560db44-c718-40b6-9ebf-70386cfa7165"
 
 # The workspace sync is what puts the tree in the workspace;
 # `resources/app.yml` then hands Databricks Apps the `app/` subfolder of it,
