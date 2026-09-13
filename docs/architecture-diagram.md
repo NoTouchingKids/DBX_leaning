@@ -19,10 +19,7 @@ flowchart TB
         SPA["app/dist/index.html<br/>hand-written SPA, no build step<br/>EventSource + fetch"]
     end
 
-    subgraph ControlPlane["Databricks control plane"]
-        JobsService["Jobs API<br/>/api/2.2/jobs/run-now, /runs/get"]
-        OIDC["OIDC token endpoint<br/>/oidc/v1/token"]
-    end
+    OIDC["OIDC token endpoint<br/>/oidc/v1/token<br/>(a Databricks REST API, not a system of its own)"]
 
     subgraph App["Databricks App — app/server/ (FastAPI, async)<br/>up to 24h per deploy, ~8h/day in practice"]
         Meta["routes/meta.py<br/>healthz · whoami · /api/schema"]
@@ -51,7 +48,7 @@ flowchart TB
 
     subgraph UC["Unity Catalog"]
         Volume[("Telemetry volume<br/>/Volumes/.../telemetry/runs/&lt;run_id&gt;/part-NNNNN.jsonl<br/>durable once a part is CLOSED")]
-        DeltaCore[("Delta core tables<br/>uc_ddl/001_core_tables.sql")]
+        DeltaCore[("Delta core tables (job-authored, uc_ddl/001_core_tables.sql)<br/>run_logs · run_progress<br/>run_events — append-only status transitions,<br/>THE authoritative status record")]
         DeltaResults[("Delta per-model results tables<br/>uc_ddl/002_model_results.sql")]
     end
 
@@ -74,19 +71,16 @@ flowchart TB
     RpcRoute --> JobConn
     JobConn --> Broadcaster
     Broadcaster -->|"fan out to every SSE<br/>subscriber of this run_id"| StreamRoute
-    RpcRoute -.->|"ingest(): status msg -&gt; set_status()<br/>best-effort, off the socket path"| Store
+    RpcRoute -.->|"ingest(): mirrors the latest status into run_status —<br/>a best-effort CACHE for fast point-lookups &amp; the<br/>concurrency ceiling. NOT authoritative: run_events is"| Store
 
-    %% ---- app -> control plane ----
-    JobsApiC -->|"run-now(job_id, job_parameters)"| JobsService
-    JobsApiC -.->|"get_run() -&gt; terminal_status()<br/>on demand, not a poll loop"| JobsService
+    %% ---- app -> job, via the Jobs REST API (not drawn as its own system —<br/>       it's a plain Databricks API call, same as any other) ----
+    JobsApiC ==>|"run_now(job_id, job_parameters) via Jobs API<br/>-&gt; starts a new serverless task<br/>DATABRICKS_HOST as a task parameter"| Harness
+    JobsApiC -.->|"get_run() -&gt; terminal_status() via Jobs API<br/>on demand, not a poll loop"| Harness
     OAuthC <-->|"client-credentials"| OIDC
     JobsApiC -.-> OAuthC
 
     %% ---- app <-> lakebase ----
     Store <-->|"parameterised SQL, bound params<br/>claim_slot: advisory-lock txn = real 5-task ceiling"| RunStatus
-
-    %% ---- control plane -> job ----
-    JobsService ==>|"starts serverless task<br/>DATABRICKS_HOST as a task parameter"| Harness
 
     %% ---- job internals ----
     Harness --> Loader --> Model
@@ -127,7 +121,7 @@ flowchart TB
     class Volume,DeltaCore,DeltaResults uc;
     class SEA wh;
     class RunStatus lb;
-    class JobsService,OIDC ctrl;
+    class OIDC ctrl;
 ```
 
 Reading it:
@@ -151,6 +145,22 @@ Reading it:
   telemetry notifications flow job→app continuously; `cancel`/`replay`/`ping`
   requests flow app→job on the same socket, answered by
   `JobConnections`'s pending-future bookkeeping.
+- **`run_events` (Delta, job-authored) is authoritative for status — `run_status`
+  (Lakebase) is not.** The job writes every status transition into `run_events`
+  through the same unconditional telemetry path as everything else
+  (`PartWriter` → `Spark write_batch()`), whether or not the app is listening.
+  `run_status` only exists because `run_events` is the wrong *shape* for what
+  the app needs live — a point lookup by `run_id` and an atomic
+  count-and-claim against the 5-task ceiling — so the app keeps its own
+  one-row-per-run mirror, best-effort, updated when a WS status message
+  happens to arrive. The job has no Postgres/Lakebase code at all
+  (`app/shared/tables.py` says this outright); it never writes that mirror.
+- **The Jobs API and the OIDC token endpoint aren't drawn as boxes.** Both are
+  plain Databricks REST calls the app happens to make (`run_now`/`get_run`,
+  and the M2M token exchange) — treating them as their own "control plane"
+  system implied a component that isn't there. The diagram shows their effect
+  directly: `run_now` starts the task, `get_run`/`terminal_status()` answers a
+  question about it, and the OIDC edge is just how a token gets minted.
 
 ## Run lifecycle (sequence)
 
@@ -162,8 +172,7 @@ sequenceDiagram
     autonumber
     actor U as Browser
     participant A as App (routes/runs.py)
-    participant P as Lakebase (run_status)
-    participant JA as Jobs API
+    participant P as Lakebase (run_status, app's cache)
     participant J as Job task (Harness)
     participant M as Model
     participant V as Telemetry volume (UC)
@@ -175,8 +184,7 @@ sequenceDiagram
         P-->>A: SlotDenied
         A-->>U: 409, wait for a slot
     else slot claimed
-        A->>JA: run_now(job_id, job_parameters)
-        JA-->>J: starts serverless task
+        A->>J: run_now(job_id, job_parameters) via Jobs API<br/>starts a new serverless task
         A->>P: attach_job_run(job_run_id)
         Note over J: Harness loads Model by entry point,<br/>spawns roller + socket threads.<br/>Main thread blocks running the model — exactly as a solver wants to be.
         par best-effort, may never succeed
@@ -201,14 +209,14 @@ sequenceDiagram
             M-->>J: stops at next checkpoint, keeps its incumbent result
         end
         J->>V: final result + terminal status, part closed
-        V->>D: last flush (row_count now known)
+        V->>D: last flush: run_events gets the terminal<br/>status row. THIS is authoritative, regardless<br/>of anything below.
         opt WS still connected
             J-->>A: status message (terminal)
-            A->>P: set_status(run_id, terminal_status)
+            A->>P: set_status(run_id, terminal_status)<br/>— refresh the app's cache, nothing more
             A-->>U: SSE: status terminal
         end
     end
-    Note over A,J: If the WS was never up, or dropped and stayed down,<br/>none of the "opt WS is connected" steps happen.<br/>The run still finishes, still writes D fully — <br/>run_status in P can go stale, and JobsApi.get_run()/terminal_status()<br/>can answer "did it finish?" on demand from the Jobs API,<br/>which cannot go stale by construction.
+    Note over A,J: If the WS was never up, or dropped and stayed down,<br/>none of the opt-WS-is-connected steps happen — P's cache goes stale.<br/>The run still finishes and D still has the true terminal status either way,<br/>the job never depended on the app to make its own status authoritative.<br/>JobsApi.get_run()/terminal_status() can also answer did-it-finish<br/>on demand from the Jobs API, which cannot go stale by construction.
 ```
 
 Reading it:
@@ -223,6 +231,14 @@ Reading it:
   path — the escape hatch is a direct `databricks jobs cancel-run`
   (`app/server/jobs_api.py`'s `CANCEL_ESCAPE_HATCH` reference), not a warehouse
   flag a poller would pick up.
+- `run_now` is drawn straight from the app to the job task: the Jobs API is
+  the mechanism by which Databricks starts that task, not a separate system
+  worth its own lane on this diagram.
+- The terminal `set_status()` call into `P` (Lakebase) is labelled as a cache
+  refresh, not a source of truth — because it isn't one. The job's own write
+  into `D`'s `run_events`, one step earlier, is what makes the terminal status
+  real; it happens whether or not the app, the WS, or Lakebase are anywhere
+  in the picture.
 - The final note is deliberately hedged: `JobsApi.get_run()` and
   `terminal_status()` exist and can answer "did this finish?" for a
   `job_run_id` on demand, but as of this writing `app/server/main.py`'s
