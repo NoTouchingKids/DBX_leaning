@@ -391,6 +391,9 @@ Full procedure: `deploy/README.md`.
 ## Docs index
 
 - `docs/architecture.md` — why, condensed from the full design conversation
+- `docs/architecture-diagram.md` — what talks to what, as Mermaid diagrams
+  (component/data-flow + a run's lifecycle sequence), drawn from the built
+  code rather than the target layout above
 - `docs/free-edition-constraints.md` — verified platform facts + sources
 - `docs/message-envelope-spec.md` — the wire contract, in full
 - `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order
