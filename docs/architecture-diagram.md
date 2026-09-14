@@ -248,6 +248,108 @@ Reading it:
   otherwise; check `app/server/main.py` and `app/server/services.py` before
   relying on automatic reconciliation existing.
 
+## Proposed: job-authored `run_status` (not yet built)
+
+Everything above is the shipped design: the app writes `run_status` from a
+WS status message it happens to receive (`services.py::_persist_status`),
+and `job/` has no Postgres code at all. This section is a **proposal**,
+kept deliberately separate from the two diagrams above so neither one
+misrepresents what's actually running on `v4-plan` today.
+
+**The trigger for this change is that there are two entirely separate
+status vocabularies, and the current design blurs them:**
+
+| | Databricks job/task status | Our run status |
+|---|---|---|
+| Values | `life_cycle_state` / `result_state` (`RUNNING`, `TERMINATED`, `INTERNAL_ERROR`, `SUCCESS`, ...) | `QUEUED` / `RUNNING` / `SUCCEEDED` / `FAILED` / `CANCELLED` / `INFEASIBLE` + `detail` |
+| Means | did the container start, run, and exit cleanly | what the **model** concluded |
+| Owned by | Databricks itself — needs no write from us | the harness — only it can know this |
+| Read via | `GET /api/2.2/jobs/runs/get` (`JobsApi.get_run()`), any time, never stale | `run_events` (Delta, always) and, in this proposal, `run_status` (Lakebase) |
+
+`INFEASIBLE` is the sharpest illustration: a Gurobi task can exit with
+Databricks `result_state=SUCCESS` — the container ran fine — while the
+*model* concluded there's no feasible solution, which is a fact Databricks
+has no vocabulary for at all. Only the harness can produce that value, which
+is the argument for the harness writing `run_status` directly rather than
+the app inferring it from a channel (WS) that might never have been up.
+
+### What changes
+
+- **The app still claims the slot at launch, unchanged.** `claim_slot()`
+  (`app/server/store.py`) does an atomic count-and-claim *before* a job task
+  exists — that has to stay app-side, because it's the only point where
+  refusing a launch is free. Once `run_now()` returns, Databricks has
+  already spent one of the account's 5 concurrent-task slots regardless of
+  what our own Postgres row says; a job that self-checks the ceiling at
+  startup can only find out too late, after burning a real slot to enforce
+  a limit that exists to protect that exact resource.
+- **The harness becomes the sole writer of every transition after
+  `QUEUED`.** `RUNNING` on startup and the terminal status at the end get
+  written into Lakebase's `run_status` directly, alongside the existing
+  unconditional write into Delta's `run_events` — not instead of it.
+- **It has to be best-effort, never blocking the model** — the same
+  contract `job/ws.py`'s socket thread already has. A Lakebase write that
+  fails or hangs must not touch what the model reports or delay it.
+  `run_events` remains the durable record regardless of whether this
+  write lands; it is a better-shaped second mirror of the same fact, not a
+  new source of truth.
+- **The app stops writing `run_status` entirely.** `services.py::ingest()`
+  drops its call to `store.set_status()` on a WS status message — two
+  writers of one row was the thing worth removing.
+- **Per-run live status still needs no Lakebase read.** `Broadcaster`'s
+  `RunSnapshot` (`app/server/broadcaster.py`) already caches the latest
+  status/progress per `run_id` in-process precisely so a newly-connecting
+  SSE client doesn't need a DB round-trip — untouched, and it becomes the
+  *only* live-status path.
+- **Lakebase reads are for bulk views only** — `list_runs()`/`non_terminal()`
+  in `store.py`, for something like "show every run and its current state,"
+  where there's no single WS to ask and a DB query across many rows is
+  exactly what Postgres is for.
+- **`JobsApi.get_run()`/`terminal_status()` stays a fallback of last
+  resort**, not a live source of our status: it approximates *our*
+  vocabulary from *Databricks'* vocabulary (`jobs_api.py`'s `_RESULT_STATE`
+  table) for the one case the harness itself can't cover — it died before
+  writing a terminal status anywhere at all (e.g. the `sys.exit(0)`
+  failure mode `CLAUDE.md` already documents).
+
+```mermaid
+flowchart TB
+    RunsRoute["routes/runs.py<br/>POST run-now"]
+    Store["PostgresRunStore<br/>claim_slot() at launch (unchanged)<br/>list_runs()/non_terminal() — BULK READS ONLY"]
+    JobsApiC["JobsApi client"]
+    Harness["Harness (job/harness.py)"]
+    LakebaseWriter["NEW: best-effort Lakebase writer<br/>RUNNING at start, terminal at end<br/>needs psycopg + a Lakebase secret in job/"]
+    RunStatusDb[("run_status (Lakebase)<br/>OUR status: QUEUED/RUNNING/SUCCEEDED/<br/>FAILED/CANCELLED/INFEASIBLE + detail")]
+    RunEvents[("run_events (Delta)<br/>unchanged: append-only, unconditional,<br/>still written regardless of the above")]
+    RpcClient["RpcClient (job/ws.py)"]
+    Broadcaster["Broadcaster: RunSnapshot<br/>unchanged — the live per-run answer,<br/>no DB round-trip"]
+    DbxStatus["Databricks task status<br/>life_cycle_state / result_state<br/>owned by Databricks, not us"]
+
+    RunsRoute -->|"claim_slot(): count-and-claim,<br/>before any task exists"| Store
+    RunsRoute --> JobsApiC
+    JobsApiC ==>|"run_now()"| Harness
+    Harness --> LakebaseWriter
+    LakebaseWriter -.->|"best-effort UPDATE,<br/>never blocks the model"| RunStatusDb
+    Harness -->|"unconditional, as today"| RunEvents
+    Harness --> RpcClient
+    RpcClient <-->|"telemetry + cancel/replay/ping<br/>(unchanged)"| Broadcaster
+    JobsApiC -.->|"get_run()/terminal_status():<br/>fallback ONLY, approximates our<br/>status from Databricks' own"| DbxStatus
+    Store -.->|"bulk listing reads<br/>(unchanged shape, job-authored rows)"| RunsRoute
+
+    classDef proposed fill:#fff5f5,stroke:#d64545,color:#1a1a1a,stroke-dasharray: 4 2;
+    classDef unchanged fill:#f2f2f2,stroke:#888,color:#1a1a1a;
+    class LakebaseWriter,RunStatusDb proposed;
+    class RunEvents,Broadcaster,DbxStatus,RpcClient unchanged;
+```
+
+Red dashed nodes are new; grey ones are today's behaviour, unchanged.
+Building this needs: `psycopg` (or an equivalent) added to
+`job/requirements.txt`, a Lakebase credential obtained the same way every
+other job secret is (`job/auth.py::read_secret` / `dbutils.secrets.get` —
+never a job parameter or env var, per `CLAUDE.md`'s Secrets rule), and the
+host/schema threaded through as job config. None of this exists yet; treat
+this section as a design note, not a changelog entry.
+
 ## Where this stands relative to `CLAUDE.md`
 
 Both diagrams reflect **built** code (`app/server/`, `job/`, `shared/`,
@@ -255,3 +357,5 @@ Both diagrams reflect **built** code (`app/server/`, `job/`, `shared/`,
 target state `CLAUDE.md` describes. The other ten models, the volume→SQL
 ingestion job (Slice 4), and automatic startup reconciliation are not drawn
 here because they don't exist yet — see `CLAUDE.md`'s "Still not done" list.
+The proposed job-authored `run_status` design above is even earlier stage:
+it has no code at all yet, on either side.

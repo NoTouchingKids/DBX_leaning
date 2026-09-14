@@ -393,7 +393,9 @@ Full procedure: `deploy/README.md`.
 - `docs/architecture.md` — why, condensed from the full design conversation
 - `docs/architecture-diagram.md` — what talks to what, as Mermaid diagrams
   (component/data-flow + a run's lifecycle sequence), drawn from the built
-  code rather than the target layout above
+  code rather than the target layout above. Also sketches a proposed,
+  not-yet-built change: the harness writing `run_status` in Lakebase
+  directly, distinct from the Databricks job's own `life_cycle_state`
 - `docs/free-edition-constraints.md` — verified platform facts + sources
 - `docs/message-envelope-spec.md` — the wire contract, in full
 - `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order
