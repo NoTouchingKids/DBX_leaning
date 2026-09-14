@@ -11,6 +11,19 @@ What survives from v3 is the SIGTERM handling, and it survives because it earns
 its place: Databricks cancels a task with SIGTERM, and treating that as a
 cancel rather than a kill is what lets a run flush its telemetry and record an
 honest terminal status instead of vanishing mid-part.
+
+**SIGINT is handled differently, and deliberately not the same way.**
+`ipykernel` — which is what actually executes a serverless
+`spark_python_task`, see above — installs its own SIGINT handler on
+startup; that's the entire mechanism behind "Interrupt Kernel" raising
+`KeyboardInterrupt` in whatever cell is running. Databricks documents
+SIGTERM, never SIGINT, as its cancellation signal, so installing our own
+SIGINT handler under a real kernel buys this harness nothing and risks
+silently replacing a handler the kernel relies on for something else
+entirely. So SIGINT is only wired up when nothing already claims to be a
+kernel (`run_local`, a plain Ctrl-C). Both handlers, when installed, chain
+to whatever was there before — free insurance if "SIGTERM only" ever turns
+out to be wrong, and harmless otherwise.
 """
 
 from __future__ import annotations
@@ -19,6 +32,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Any
 
 from shared.envelope import RunStatus
 
@@ -35,6 +49,23 @@ def _setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+
+
+def _cancel_and_chain(harness: Harness, old: Any) -> Any:
+    """Cancel first, then fall through to whatever handler was already
+    installed for this signal — so taking SIGTERM/SIGINT here never
+    silently erases someone else's handler (`ipykernel`'s own SIGINT
+    handling, in particular). `old` is whatever `signal.getsignal()`
+    returned before we installed ours: a real handler, `SIG_DFL`, or
+    `SIG_IGN` — only the first of those is callable.
+    """
+
+    def handler(s: int, f: Any) -> None:
+        harness.token.cancel(f"received {signal.Signals(s).name}")
+        if callable(old):
+            old(s, f)
+
+    return handler
 
 
 def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
@@ -129,15 +160,21 @@ def main(argv: list[str] | None = None) -> int:
     # than a kill is what lets the run flush its telemetry and record an honest
     # terminal status. Unlike v3 this cannot fail for being off the main
     # thread, because `main()` IS the main thread now.
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    #
+    # SIGINT is skipped under a real kernel — see the module docstring for
+    # why — and installed only when nothing already claims to be one, e.g.
+    # `run_local()`'s plain Ctrl-C case.
+    sigs = (
+        (signal.SIGTERM,) if "ipykernel" in sys.modules else (signal.SIGTERM, signal.SIGINT)
+    )
+    for sig in sigs:
         try:
-            signal.signal(
-                sig, lambda s, _f: harness.token.cancel(f"received {signal.Signals(s).name}")
-            )
+            signal.signal(sig, _cancel_and_chain(harness, signal.getsignal(sig)))
         except (ValueError, OSError) as exc:
-            # Only if something else already owns the handler. Cancel over the
-            # RPC channel is unaffected; what is lost is the platform's own
-            # task cancellation being graceful.
+            # Only if something else already owns the handler in a way that
+            # rejects ours outright. Cancel over the RPC channel is
+            # unaffected; what is lost is the platform's own task
+            # cancellation being graceful.
             log.info("no %s handler (%s); cancel over the socket still works", sig, exc)
 
     outcome = harness.run()
