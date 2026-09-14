@@ -1,0 +1,96 @@
+-- The telemetry volume: where a run writes its own record, as it happens.
+--
+-- This is v4's durable path (docs/v4-rewrite-plan.md). The job writes each
+-- envelope through to a file here as it is produced — no in-memory buffer, no
+-- Spark, no Delta on the telemetry path at all. A separate scheduled or
+-- streaming ingestion job reads these files and loads them into SQL.
+--
+-- Layout, one directory per run:
+--
+--   /Volumes/main/dbx_leaning/telemetry/runs/<run_id>/part-00001.jsonl
+--
+-- Each run owns its own directory, so concurrent runs cannot conflict — which
+-- is strictly simpler than Delta's optimistic concurrency and its S3 locking
+-- caveat. Whether a run writes ONE growing file or a series of closed part
+-- files is what `scripts/probe_volume_append.py` decides; the layout above
+-- accommodates either.
+--
+-- ---------------------------------------------------------------------------
+-- THE GRANT IS THE ARCHITECTURE. Read this before "helpfully" adding the app.
+--
+-- The app gets NOTHING on this volume, deliberately. v4's rule is that the app
+-- never reads run telemetry from files: a live gap is filled by asking the JOB
+-- to replay it from its own log over the WebSocket, and history for a finished
+-- run comes from SQL after ingestion. Both paths exist and neither needs this
+-- volume.
+--
+-- Granting the app READ here would not break anything today. It would quietly
+-- turn a boundary into a suggestion, and the shortcut it enables — "just read
+-- the files, it's right there" — is the one that makes replay dead code and
+-- couples the app to the durable format. The permission error IS the design
+-- working.
+--
+-- So:  app  -> no grant, and not even the path in its config
+--      job  -> READ + WRITE   (READ because replay reads back what it wrote)
+--      ingestion -> READ
+--
+-- Note that READ and WRITE are separate privileges: WRITE VOLUME does not
+-- imply READ VOLUME. The app's own volume in 003 grants both explicitly for
+-- the same reason.
+--
+-- ---------------------------------------------------------------------------
+-- `main.dbx_leaning` is HARDCODED here and is a variable everywhere else —
+-- the same trap 001 documents at length. `databricks sql query --file` does no
+-- variable substitution, so if you retarget `var.catalog` / `var.schema`, sed
+-- 001, 002, 003 and this file in the same commit. Delta will not save you: the
+-- volume is created in one place, the job writes to another, and the failure
+-- arrives inside a run on a workspace.
+--
+-- The GRANTs below are commented out and the file is applicable as-is; see the
+-- note above them for when that stops being true.
+
+CREATE SCHEMA IF NOT EXISTS main.dbx_leaning;
+
+CREATE VOLUME IF NOT EXISTS main.dbx_leaning.telemetry
+  COMMENT 'Run telemetry, written by the job as it happens. Job-only: the app has no grant here by design — see uc_ddl/004_telemetry_volume.sql.';
+
+-- --------------------------------------------------------------------------
+-- Grants — COMMENTED OUT, and read this before uncommenting.
+--
+-- You probably do not need them yet. `databricks.yml` sets no `run_as`, and
+-- the `dev` target is `mode: development`, so jobs run as the DEPLOYING USER.
+-- If that is also who owns `main.dbx_leaning`, the owner already holds every
+-- privilege on a volume in it and these statements are no-ops.
+--
+-- They are commented rather than deleted because the moment any of that stops
+-- being true, this is the file someone comes looking in:
+--
+--   * a `run_as` service principal on the job,
+--   * the `prod` target, where jobs run as a named principal,
+--   * the ingestion job, if it runs as something else,
+--   * or the day the jobs move to their own bundle entirely — which is the
+--     direction v4 is going, and the point at which the app can no longer
+--     grant anything on their behalf.
+--
+-- Uncomment, substitute a real principal, and note that READ and WRITE are
+-- SEPARATE privileges: WRITE VOLUME does not imply READ VOLUME, and the job
+-- needs READ because replay reads back what it wrote.
+--
+-- The app is not on this list and must not be added — see the header.
+-- --------------------------------------------------------------------------
+
+-- GRANT READ VOLUME, WRITE VOLUME
+--   ON VOLUME main.dbx_leaning.telemetry
+--   TO `<the principal the model jobs run as>`;
+
+-- GRANT READ VOLUME
+--   ON VOLUME main.dbx_leaning.telemetry
+--   TO `<the principal the ingestion job runs as>`;
+
+-- The path the job sees. Volumes mount read/write at a fixed location, so this
+-- is not configurable and not worth deriving:
+--
+--   /Volumes/main/dbx_leaning/telemetry
+--
+-- The job reads it from DBX_TELEMETRY_VOLUME. The app has no equivalent
+-- variable, and adding one is the first symptom of the boundary above eroding.

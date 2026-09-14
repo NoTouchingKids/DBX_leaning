@@ -19,9 +19,9 @@ best-effort guess:
 
 - **WebSocket job→app works**, so it is the preferred live channel and
   **cancel has a real path** — the inbound command in `shared/protocol.py`
-  and `app/routes/runs.py` is reachable, not theoretical. HTTP push stays as
+  and `app/server/routes/runs.py` is reachable, not theoretical. HTTP push stays as
   the documented fallback rather than becoming the only tier.
-- **SSE app→client works**, so `app/routes/stream.py` and `EventSource`'s
+- **SSE app→client works**, so `app/server/routes/stream.py` and `EventSource`'s
   native `Last-Event-ID` resume are the design, unchanged.
 
 ## Numbers still worth capturing
@@ -31,7 +31,7 @@ change specific code, and none of them is recorded yet:
 
 | Measurement | What it decides |
 |---|---|
-| Whether the ingress cuts a long-lived stream, and at what elapsed time | The frontend's reconnect-counter design. A "stop after 3 consecutive failures" counter that does not reset on success would kill a healthy stream in ~6 minutes if cuts happen every ~120s. `frontend/README.md` flags this; a real number turns it from a hypothetical into a test case |
+| Whether the ingress cuts a long-lived stream, and at what elapsed time | The frontend's reconnect-counter design. A counter that does not reset on success would kill a healthy stream within minutes if cuts happen every ~120s. That counter is now built and tested — `app/client/src/transport/hub.ts` counts *consecutive* failures, resets on every successful open, and gives up at 10 — so a real number no longer decides the design; it decides whether 10 is the right cap and whether the retry interval (`retry: 2000`, set in `app/server/routes/stream.py`) is sensible |
 | Whether an *idle* connection is dropped sooner than an active one | `DBX_WS_PING_S` (default 20s) and the SSE keepalive (`DBX_SSE_KEEPALIVE_S`, default 10s). Both are currently set from community reports, not measurement |
 | Whether SSE events are buffered or delivered promptly | Whether `X-Accel-Buffering: no` is doing anything here. If events arrive in held-and-released batches, live progress is not actually live |
 
@@ -42,10 +42,20 @@ that work rather than tuned values.
 
 ## The one auth question that goes with this
 
-A job reaching a Databricks App needs a credential the app accepts on the
-handshake. `app/routes/ingest.py` checks a shared `DBX_APP_TOKEN` on both the
-WS and HTTP-push ingress, and skips the check entirely when none is
-configured (development posture). Whether that is the right mechanism — or
-whether the job should present an OAuth token for its service principal —
-is a deployment decision, not an ingress one, and belongs with the bundle
-config rather than here.
+**Answered: it needs both, on different headers.**
+
+`app/server/routes/rpc.py` used to check a shared `DBX_APP_TOKEN`, which authenticated the
+job *process* and skips entirely when none is configured (development
+posture). That is not a Databricks identity, and the Apps proxy in front of
+the app lets nothing through without one — so a job presenting the shared
+secret in `Authorization` never reaches the app at all.
+
+So the job presents an OAuth token for a service principal in
+`Authorization`, and the shared secret in `X-DBX-App-Token`. `job/auth.py`
+finds an identity from whatever the runtime offers — an explicit token,
+client credentials for the same principal the app uses, a PAT, or the job's
+own `dbutils` identity — and that principal needs `CAN_USE` on the app.
+See "How a job reaches the app" in `deploy/README.md`.
+
+A job with no identity runs unobserved rather than failing, which is the
+same state as the app being down.

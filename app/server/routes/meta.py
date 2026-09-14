@@ -1,0 +1,130 @@
+"""Health and identity.
+
+``whoami`` is cosmetic. The platform proxy already authenticated the caller;
+this endpoint tells client code who that is, for display and attribution. It
+is **not** an authorization boundary — that comes from Unity Catalog grants.
+There is no on-behalf-of-user path in this build at all.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Request, status
+
+from shared.schema import SCHEMA_VERSION, control_schema, envelope_schema, protocol_schema
+
+from ..deps import Hub
+
+router = APIRouter(tags=["meta"])
+
+#: Headers the Databricks Apps proxy forwards about the authenticated user.
+_IDENTITY_HEADERS = (
+    ("email", "x-forwarded-email"),
+    ("user", "x-forwarded-preferred-username"),
+    ("user_id", "x-forwarded-user"),
+)
+
+
+# `/api/healthz` is the one that WORKS in production, and the bare `/healthz`
+# is kept only because this repo's docs and `deploy/README.md` name it in a
+# dozen places.
+#
+# The Databricks Apps ingress answers `/healthz` ITSELF and never forwards it:
+# HTTP 200, `content-length: 0`, and no `content-type` at all, where every
+# other route on the same app sets one. Measured 2026-09-05 against the
+# deployed app — `/healthz`, `/healthz/` and `/healthz?x=1` are all swallowed,
+# while `/HEALTHZ` falls through to the SPA, so it is an exact, case-sensitive
+# path match by the proxy rather than anything this app does.
+#
+# That matters more than a dead endpoint. This route is the thing that is
+# supposed to make a misspelled `project: dbx-leaning` tag visible instead of a
+# mystery — `docs/v4-rewrite-plan.md` says so explicitly — and in production it
+# could not be read at all. Nothing raised; the probe returned 200.
+@router.get("/api/healthz")
+@router.get("/healthz")
+async def healthz(hub: Hub) -> dict:
+    return {
+        "status": "degraded" if hub.degraded else "ok",
+        "protocol_schema_version": SCHEMA_VERSION,
+        "degraded": hub.degraded,
+        # Which run store is live, and — for Lakebase — what Postgres actually
+        # answered. A deployment that thinks it is on Lakebase while running
+        # on the warehouse keeps the concurrency race and the missing primary
+        # key without anyone noticing. The version is the other half: Lakebase
+        # defaults to 16 and can be created on 18, immutably, so which one a
+        # deployment has is a fact to read rather than assume. Both are
+        # None-safe: no store at all is a valid, degraded state.
+        "store": {
+            "kind": getattr(hub.store, "name", None),
+            "server_version": getattr(hub.store, "server_version", None),
+        },
+        # Where the job map came from. "discovered" is a working app AND a
+        # warning: it means the live app deployment was not created by
+        # `databricks bundle run`, so nothing else in resources/app.yml
+        # reached it either — the volume, the ingress token, the Lakebase host.
+        "job_ids": {
+            "source": hub.job_ids_source,
+            "count": len(hub.config.job_ids),
+        },
+        "live_jobs": len(hub.job_sockets.run_ids),
+        "messages_ingested": hub.messages_ingested,
+    }
+
+
+@router.get("/api/schema")
+async def schema(kind: str = "protocol") -> dict:
+    """The wire protocol as JSON Schema, for the client to type itself from.
+
+    Served as well as committed under ``schema/``: the file is what a build
+    step generates TypeScript from, and this is what a running client can
+    check it is actually talking to — a version mismatch between a cached
+    bundle and a redeployed app is otherwise invisible until something
+    silently fails to parse.
+    """
+    builders = {
+        "protocol": protocol_schema,
+        "envelope": envelope_schema,
+        "control": control_schema,
+    }
+    build = builders.get(kind)
+    if build is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"no schema {kind!r}; available: {', '.join(sorted(builders))}",
+        )
+    return build()
+
+
+@router.get("/api/models")
+async def models(hub: Hub) -> dict:
+    """What can be triggered from here.
+
+    Derived from the configured job map, not from importing a model — the
+    app has no business pulling in gurobipy, scikit-learn and emcee just to
+    list names, and a model with no job behind it cannot be run anyway.
+    """
+    return {
+        "models": [
+            {"name": name, "job_id": hub.config.job_ids[name]}
+            for name in hub.config.triggerable_models
+        ],
+        "default_job_id": hub.config.default_job_id,
+        # An empty list is the one answer here that needs explaining, and it
+        # used to arrive bare: `{"models": [], "default_job_id": null}` says
+        # nothing about whether the app was misconfigured, unlucky, or simply
+        # not finished starting. `source` and `detail` are what turn it into a
+        # report — "config" means DBX_JOB_IDS was set, "discovered" means the
+        # workspace was asked because it was not, and "none" carries the reason.
+        "source": hub.job_ids_source,
+        **({"detail": hub.degraded["job_ids"]} if "job_ids" in hub.degraded else {}),
+    }
+
+
+@router.get("/api/whoami")
+async def whoami(request: Request, hub: Hub) -> dict:
+    identity = {key: request.headers.get(header) for key, header in _IDENTITY_HEADERS}
+    return {
+        **identity,
+        "authenticated": any(identity.values()),
+        # Said out loud so nobody builds an authorization check on this.
+        "note": "cosmetic identity from the platform proxy; not an authorization boundary",
+    }

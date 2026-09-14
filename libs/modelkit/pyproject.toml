@@ -1,0 +1,49 @@
+# The shared model template.
+#
+# Under `libs/` rather than `models/`, because it is not a model — it is the
+# thing models are built from. Beside them it would be wrong twice over: the
+# `models/*` workspace glob would pick it up as a model, and so would anyone
+# reading the tree.
+#
+# And nested one level rather than sitting at the repo root, which is not
+# cosmetic. A top-level `modelkit/` directory is itself importable as an empty
+# namespace package the moment the repo root is on `sys.path` — which it is
+# under pytest — and it SHADOWS the installed distribution:
+#
+#   ImportError: cannot import name 'Model' from 'modelkit' (unknown location)
+#
+# The Databricks doc's own example has the same shape for the same reason:
+# `helper_utils/` holding a package called `helpers`.
+#
+# It is installed as a SHARED SERVERLESS ENVIRONMENT DEPENDENCY, the pattern in
+# docs/docs-databricks-com-aws-en-compute-serverless-dependencies.md under
+# "Create common tools to share across your workspace": a workspace folder
+# carrying a pyproject.toml, added once to an environment, importable by every
+# notebook and task that uses it.
+#
+#   job YAML:  - ${workspace.file_path}/libs/modelkit
+#   notebook:  %pip install /Workspace/.../libs/modelkit
+#
+# Which is why a model does not declare it as a dependency.
+# `models/heartbeat/pyproject.toml` still says `dependencies = []`: the
+# environment provides the kit, exactly as it provides pyspark, and for the
+# same reason.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbx-modelkit"
+version = "0.1.0"
+description = "The model template: implement step(), get a Databricks job."
+requires-python = ">=3.11"
+
+# Empty, and it has to stay empty. This is installed into EVERY model
+# environment, so anything added here is paid for by all of them — including
+# the ones whose whole appeal is that they carry nothing. The module imports
+# only the standard library.
+dependencies = []
+
+[tool.setuptools]
+packages = ["modelkit"]

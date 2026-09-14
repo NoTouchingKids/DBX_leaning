@@ -15,9 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["JobConfig", "WriterKind"]
-
-WriterKind = str  # "auto" | "delta-rs" | "spark" | "jsonl"
+__all__ = ["JobConfig"]
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -45,7 +43,9 @@ class JobConfig:
     #: The platform's run identifier — what every message is keyed by, and
     #: what a browser subscribes to. Distinct from Databricks' own job run id.
     run_id: str
-    #: Import spec for the model: "models.scenario" or "models.scenario:build_model".
+    #: The model to run. Normally a NAME — "heartbeat" — resolved through the
+    #: `dbx_leaning.models` entry point every model package declares. An import
+    #: path still works for a model being developed and not yet installed.
     model_spec: str
     model_config: dict[str, Any] = field(default_factory=dict)
 
@@ -55,18 +55,43 @@ class JobConfig:
     #: Absent = no live channel at all. That is a normal case, not an error:
     #: apps run ~8h/day and jobs do not share that schedule.
     app_url: str | None = None
-    app_token: str | None = None
+
+    #: The SHARED INGRESS IDENTITY, if one is configured. LOCATIONS ONLY — a
+    #: scope and two key names. Both halves of the credential live in the
+    #: secret scope and are read at run time with `dbutils.secrets.get`;
+    #: neither ever becomes a job parameter, because parameters come back from
+    #: `jobs get-run` and are shown in the run UI. See job/auth.py.
+    oauth_secret_scope: str | None = None
+    oauth_client_id_key: str | None = None
+    oauth_secret_key: str | None = None
+
+    @property
+    def has_ingress_identity(self) -> bool:
+        """All three names present. Fewer is not a partial identity, it is a
+        misconfiguration, and the job falls back to its runtime identity."""
+        return bool(self.oauth_secret_scope and self.oauth_client_id_key and self.oauth_secret_key)
+
+    #: The workspace, for the OAuth exchange in `job/auth.py`.
+    #:
+    workspace_host: str | None = None
 
     catalog: str = "main"
     schema: str = "dbx_leaning"
-    #: Where this model's result rows go. Unqualified names get the
-    #: catalog/schema above.
-    results_table: str | None = None
+    # There is no `results_table` here any more. A model owns its own data
+    # lifecycle in v4 — it reads its inputs and writes its own results table —
+    # so the harness has no table to be told about. See the plan's "Who writes
+    # what": the harness is comms and telemetry, and nothing else.
 
-    writer: WriterKind = "auto"
-    #: Only used by the jsonl writer (local development and tests).
-    local_root: str = ".delta-local"
+    #: Where telemetry part files go. A Unity Catalog volume on a workspace;
+    #: any writable directory off one, which is what makes the whole harness
+    #: runnable on a laptop with no Databricks connection at all.
+    #:
+    #: The APP has no equivalent setting and must not gain one — it holds no
+    #: grant on this volume, deliberately (uc_ddl/004_telemetry_volume.sql),
+    #: and a live gap is served by `replay` rather than by reading these files.
+    telemetry_root: str = "/Volumes/main/dbx_leaning/telemetry"
 
+    #: Roll a telemetry part at this size. See job/telemetry.py.
     flush_max_bytes: int = 1_000_000
     #: The bound that actually caps data loss on a crash. Size alone is not a
     #: durability guarantee — a slow run may never reach 1 MB.
@@ -101,7 +126,7 @@ class JobConfig:
         if not model_spec:
             raise ValueError(
                 "DBX_MODEL is required — the import spec for the model to run, "
-                "e.g. 'models.scenario' or 'models.scenario:build_model'"
+                "e.g. 'heartbeat', or an import path for a model that is not installed"
             )
 
         app_url = (e.get("DBX_APP_URL") or "").strip() or None
@@ -112,12 +137,14 @@ class JobConfig:
             model_config=model_config,
             job_run_id=(e.get("DATABRICKS_JOB_RUN_ID") or "").strip() or None,
             app_url=app_url.rstrip("/") if app_url else None,
-            app_token=(e.get("DBX_APP_TOKEN") or "").strip() or None,
+            oauth_secret_scope=(e.get("DBX_OAUTH_SECRET_SCOPE") or "").strip() or None,
+            oauth_client_id_key=(e.get("DBX_OAUTH_CLIENT_ID_KEY") or "").strip() or None,
+            oauth_secret_key=(e.get("DBX_OAUTH_SECRET_KEY") or "").strip() or None,
+            workspace_host=(e.get("DATABRICKS_HOST") or e.get("DBX_WORKSPACE_HOST") or "").strip()
+            or None,
             catalog=e.get("DBX_CATALOG", "main"),
             schema=e.get("DBX_SCHEMA", "dbx_leaning"),
-            results_table=(e.get("DBX_RESULTS_TABLE") or "").strip() or None,
-            writer=e.get("DBX_WRITER", "auto"),
-            local_root=e.get("DBX_LOCAL_ROOT", ".delta-local"),
+            telemetry_root=e.get("DBX_TELEMETRY_VOLUME", "/Volumes/main/dbx_leaning/telemetry"),
             flush_max_bytes=_env_int(e, "DBX_FLUSH_MAX_BYTES", 1_000_000),
             flush_max_age_s=_env_float(e, "DBX_FLUSH_MAX_AGE_S", 30.0),
             flush_tick_s=_env_float(e, "DBX_FLUSH_TICK_S", 1.0),
@@ -133,9 +160,8 @@ class JobConfig:
     def ws_url(self) -> str | None:
         if not self.app_url:
             return None
-        base = self.app_url.replace("https://", "wss://").replace("http://", "ws://")
-        return f"{base}/ws/job/{self.run_id}"
+        # Delegated, so a notebook driving `run_local` and a deployed job
+        # cannot derive different URLs from the same app.
+        from .ws import ws_url_for
 
-    @property
-    def push_url(self) -> str | None:
-        return f"{self.app_url}/api/runs/{self.run_id}/push" if self.app_url else None
+        return ws_url_for(self.app_url, self.run_id)

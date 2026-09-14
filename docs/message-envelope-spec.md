@@ -1,13 +1,15 @@
-# Message envelope — spec only, no code yet
+# Message envelope — the wire contract
 
-This is a contract, not an implementation. The first session to touch
-`shared/` implements this as real (Pydantic) code; every other track —
-models, job, app, frontend — builds against this document until then.
+This is the contract in prose. It is implemented, in Pydantic, in
+`shared/envelope.py`, and published as JSON Schema under `schema/` — so if
+this file and `shared/envelope.py` ever disagree, the code is right and this
+file is stale; say so and fix it here. Every track — models, job, app,
+frontend — builds against this shape.
 
 **Do not let a model-building track invent its own message shape.** If this
 spec is ambiguous or missing something a model needs, that is a reason to
 update this file (and flag it), not to improvise locally — a shape invented
-inside `models/gurobi_scheduling/` and copied nowhere else is exactly how v1
+inside `job/models/gurobi_scheduling/` and copied nowhere else is exactly how v1
 ended up with drift between what the socket sent and what the table stored.
 
 ## Why one envelope
@@ -77,9 +79,13 @@ render a minimally useful progress view with zero model-specific frontend
 code. `payload` is where a model earns a richer, model-specific view later
 without changing the envelope.
 
-Known sentinel to handle explicitly per model: Gurobi reports `±1e100` for
-the incumbent before the first solution is found — store that as `null`,
-never raw, or it poisons a chart's axis.
+Known sentinel: Gurobi reports `±1e100` for the incumbent and bound before
+the first solution is found, and that must reach the envelope as `null`,
+never raw, or it poisons a chart's axis. A Gurobi model does not have to
+remember this — `job/drivers/gurobi.py` holds it as `GUROBI_SENTINEL` and
+nulls it on the way out. It is called out here because the value is *finite*,
+so `shared.envelope.sanitize_metric` (which only catches inf/NaN) cannot see
+it: anything else emitting a magic large number has to null it itself.
 
 ## `status`
 
@@ -91,6 +97,22 @@ that update, not the record of truth.
 |---|---|---|
 | `status` | enum | `QUEUED` \| `RUNNING` \| `SUCCEEDED` \| `FAILED` \| `CANCELLED` \| `INFEASIBLE` (extend per model family only if genuinely needed — prefer reusing these) |
 | `detail` | string, optional | Free text, e.g. `"run complete"`, an error summary |
+
+`INFEASIBLE` has turned out to be less solver-specific than it looks, which
+is worth recording because it is the argument for reusing these six rather
+than growing the enum. `job/models/panel_fit/` returns it when *every* group in
+a panel failed to fit: not `SUCCEEDED`, because zero fits is not a success
+and `row_count` cannot disambiguate it (failures are recorded as rows, so an
+all-failed run has a healthy-looking count); not `FAILED`, because nothing
+went wrong — the run completed, the results are correct and durable, and a
+retry would produce the same thing deterministically. "It ran, and the answer
+is that there isn't one" is exactly what a MILP means by the word.
+
+The same model is why per-unit outcomes need no envelope change either. A run
+where 9 of 48 units failed is a `SUCCEEDED` run whose `progress.payload`
+carries `groups_fitted` / `groups_failed` / `failure_counts` on every message
+— free-form by design, and a client can tell it apart from a healthy run
+without the envelope having a concept of a unit.
 
 ## `result`
 
@@ -114,13 +136,17 @@ nothing.
 A model that produces results in chunks (a rolling-origin backtest, chunked
 batch inference) emits one `result` message **per chunk**, each with its own
 `chunk_index` and its own `row_count` — that chunk's count, never a running
-total. `models/streaming_results/` is the model that exercises this, and its
-tests fail loudly if the harness stops supporting it.
+total. `job/models/streaming_results/` is the model this was added for, and its
+tests fail loudly if the harness stops supporting it. It is no longer the
+only one: `job/models/panel_fit/` emits a chunk every `chunk_size` groups, which
+is what keeps a 48-group run from being silent until the end. Two
+independent users of a field is roughly where "a feature one model needed"
+becomes "part of the contract", so treat it as the latter.
 
 The rows themselves never travel on the message. A model calls
 `emit("result", rows=[...])` and the harness writes them to the model's
 results table, counts what it wrote into `row_count`, and builds the bounded
-`preview`. See `models/README.md`.
+`preview`. See `job/models/README.md`.
 
 Per-model result **tables** are separate from this envelope — each model
 family has its own results schema in Unity Catalog, governed by its own UC
@@ -128,6 +154,47 @@ grants, because different models serve different audiences. The `result`
 *message* is only ever a summary/pointer/preview; the full data lives in
 that model's own table and is read directly, not replayed through this
 envelope.
+
+## The schema, generated
+
+The tables above are the contract in prose; `schema/envelope.schema.json` is
+the same contract a machine can read, generated from `shared/envelope.py` by
+`scripts/export_schema.py` and checked against the models in CI-shaped tests
+so it cannot drift.
+
+```bash
+uv run python scripts/export_schema.py          # regenerate
+uv run python scripts/export_schema.py --check  # verify
+```
+
+It is a JSON Schema 2020-12 discriminated union keyed on `type`, with the
+enums (`LogLevel`, `RunStatus`) published as string enums — so a frontend gets
+a union it can narrow on and string-literal types for the enums, rather than
+retyping either by hand and going stale the first time one gains a member.
+
+**The frontend does not generate from it, and that was a deliberate call.**
+`json-schema-to-typescript` produced output nobody could read — `RunId1`,
+`Seq1`, `Type1`, one alias per property occurrence — and carrying none of the
+reasoning that makes the contract usable. So `app/client/src/lib/envelope.ts`
+is hand-written, and the cost of that (it can silently fall behind
+`shared/envelope.py`) is paid by a drift test rather than by discipline:
+`app/client/src/lib/envelope.contract.test.ts` checks both directions against
+this generated schema — every property and enum member the server can emit is
+declared in TypeScript, and nothing declared in TypeScript is absent from the
+server or fails to validate against the schema's own
+`additionalProperties: false`. Generating instead is still a legitimate
+choice; if you take it, pick a filename other than `protocol.ts`. The
+frontend already has a `src/transport/protocol.ts` and it is a different
+thing entirely — the page↔worker protocol, describing what the transport is
+doing rather than what a run emitted.
+
+The app also serves it at `GET /api/schema` (`?kind=envelope|control|protocol`),
+and reports `protocol_schema_version` on `/healthz`, so a cached client bundle
+and a redeployed server can notice they disagree instead of failing silently
+somewhere further downstream.
+
+**Serialization mode, deliberately:** the schema describes what actually goes
+out, not what the server is willing to accept.
 
 ## Encoding (not part of the contract — this is a delivery detail)
 
@@ -161,7 +228,7 @@ it — do not improvise locally.
 
 ### 2026-08-22 — `result.chunk_index` and `result.final`
 
-Added while implementing `shared/`. `models/streaming_results/` needs to emit
+Added while implementing `shared/`. `job/models/streaming_results/` needs to emit
 results repeatedly during one run, and the spec had no way to say which chunk
 a message was, or whether more were coming. `seq` cannot serve: it counts
 every message of every type, so consecutive chunks are not consecutive seqs.
