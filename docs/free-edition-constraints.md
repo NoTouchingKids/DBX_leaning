@@ -11,7 +11,7 @@ Free Edition's feature set changes.
 |---|---|---|
 | Databricks Apps per account | 3 | Not a constraint at this scale |
 | App lifetime | Runs up to 24h after start/update/redeploy | There is no "always-on" WS relay. In practice this app runs ~8 business hours/day and stops; jobs must be fully independent of app uptime |
-| Concurrent job tasks | **5 per account** | Hard ceiling on run concurrency across *all* models combined |
+| Concurrent job tasks | **5 per account** | Hard ceiling on run concurrency across *all* models combined. Databricks enforces this itself — every job resource sets `queue.enabled`, so a 6th concurrent run queues at the platform level. v4 does not pre-emptively gate against this number in application code; an earlier design that did (`PostgresRunStore.claim_slot()`, a count-and-claim transaction) is dead code today. See `docs/v4-rewrite-plan.md`'s "Run state" section and `docs/architecture-diagram.md` |
 | SQL warehouse | One, 2X-Small cluster size only | Confirms: warehouse is for reads/backfill, not the write path |
 | Compute | Serverless only | No custom cluster configs |
 | Outbound internet | Restricted to trusted domains (expandable via LinkedIn verification) | Blocks anything needing arbitrary egress — see Gurobi below |

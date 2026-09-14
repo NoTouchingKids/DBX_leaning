@@ -110,13 +110,17 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
   every model environment.
 - **Run state lives in Lakebase (Postgres); telemetry lives in Delta.**
   `run_status` is the one OLTP-shaped thing here — one row per run, updated on
-  every transition, point-looked-up, counted against the concurrency ceiling.
-  Delta is poor at all three and reading it costs warehouse *uptime*. Postgres
-  also buys what Delta structurally cannot: a primary key on `run_id`, and a
-  transaction around the count-and-claim so the 5-task ceiling is real rather
-  than advisory. Everything append-only — logs, progress, events, results —
-  stays in Delta. See `app/server/store.py`; the warehouse-backed store remains as
-  the unconfigured default so a deploy is never blocked on provisioning.
+  every transition, point-looked-up. Delta is poor at that shape and reading
+  it costs warehouse *uptime*. Postgres also buys what Delta structurally
+  cannot: a primary key on `run_id`, so `set_status()`'s upsert creates the
+  row on first write and updates it on every one after. **This does not
+  enforce the account's concurrency ceiling** — an earlier design had a
+  count-and-claim transaction do that at launch; it's dead code today
+  (nothing calls it — see `routes/runs.py::trigger_run()`'s own docstring
+  and `docs/v4-rewrite-plan.md`'s "Run state" section). Every job resource
+  sets `queue.enabled`, so Databricks itself queues a run past the ceiling
+  instead of this app tracking or refusing it. Everything append-only —
+  logs, progress, events, results — stays in Delta. See `app/server/store.py`.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -391,11 +395,16 @@ Full procedure: `deploy/README.md`.
 ## Docs index
 
 - `docs/architecture.md` — why, condensed from the full design conversation
+- `docs/v4-rewrite-plan.md` — the decision record this rewrite is built from
+  (written 2026-08-30). More precise than this file on several points it
+  summarizes, including run state ("the job writes it, and there are two
+  kinds") and why v3's concurrency-ceiling transaction was retired
 - `docs/architecture-diagram.md` — what talks to what, as Mermaid diagrams
   (component/data-flow + a run's lifecycle sequence), drawn from the built
   code rather than the target layout above. Also sketches a proposed,
   not-yet-built change: the harness writing `run_status` in Lakebase
-  directly, distinct from the Databricks job's own `life_cycle_state`
+  directly over the Data API, distinct from the Databricks job's own
+  `life_cycle_state`
 - `docs/free-edition-constraints.md` — verified platform facts + sources
 - `docs/message-envelope-spec.md` — the wire contract, in full
 - `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order

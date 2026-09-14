@@ -30,13 +30,13 @@ flowchart TB
         subgraph Hub["ServiceHub (app.state, built once in lifespan)"]
             Broadcaster["Broadcaster<br/>InProcessBroadcaster<br/>RunSnapshot per run_id"]
             JobConn["JobConnections<br/>live WS per run_id + pending RPC futures"]
-            Store["PostgresRunStore<br/>claim_slot / set_status / non_terminal"]
+            Store["PostgresRunStore<br/>set_status() upsert · list_runs() · get()<br/>no launch-time gating — see notes"]
             JobsApiC["JobsApi client<br/>run_now / get_run / terminal_status()"]
             OAuthC["OAuthTokenProvider<br/>M2M client-credentials"]
         end
     end
 
-    subgraph JobTask["Databricks Job task — one serverless task per run<br/>max 5 concurrent, account-wide"]
+    subgraph JobTask["Databricks Job task — one serverless task per run<br/>5-concurrent account ceiling: Databricks' own queue.enabled holds it"]
         Harness["Harness (job/harness.py)<br/>3 threads: main / roller / socket"]
         Loader["loader.py<br/>importlib.metadata entry point<br/>DBX_MODEL name -&gt; class/object"]
         Model["Model (duck-typed, models/*)<br/>heartbeat, annealing, ...<br/>no imports from job/ or shared/"]
@@ -66,12 +66,12 @@ flowchart TB
     SPA -.->|"GET /healthz, /whoami, /api/schema"| Meta
 
     %% ---- app internals ----
-    RunsRoute --> Store
+    RunsRoute -.->|"list_runs() / get(): read-only,<br/>for GET /api/runs and GET /api/runs/{id}"| Store
     RunsRoute --> JobsApiC
     RpcRoute --> JobConn
     JobConn --> Broadcaster
     Broadcaster -->|"fan out to every SSE<br/>subscriber of this run_id"| StreamRoute
-    RpcRoute -.->|"ingest(): mirrors the latest status into run_status —<br/>a best-effort CACHE for fast point-lookups &amp; the<br/>concurrency ceiling. NOT authoritative: run_events is"| Store
+    RpcRoute -.->|"ingest(): mirrors the latest status into run_status<br/>via an upsert — a best-effort CACHE for fast<br/>point-lookups &amp; listing. NOT authoritative: run_events<br/>is. Creates the row lazily; nothing reserves it at launch"| Store
 
     %% ---- app -> job, via the Jobs REST API (not drawn as its own system —<br/>       it's a plain Databricks API call, same as any other) ----
     JobsApiC ==>|"run_now(job_id, job_parameters) via Jobs API<br/>-&gt; starts a new serverless task<br/>DATABRICKS_HOST as a task parameter"| Harness
@@ -80,7 +80,7 @@ flowchart TB
     JobsApiC -.-> OAuthC
 
     %% ---- app <-> lakebase ----
-    Store <-->|"parameterised SQL, bound params<br/>claim_slot: advisory-lock txn = real 5-task ceiling"| RunStatus
+    Store <-->|"parameterised SQL, bound params<br/>set_status(): INSERT ... ON CONFLICT DO UPDATE —<br/>the upsert that creates a row on first write"| RunStatus
 
     %% ---- job internals ----
     Harness --> Loader --> Model
@@ -150,11 +150,21 @@ Reading it:
   through the same unconditional telemetry path as everything else
   (`PartWriter` → `Spark write_batch()`), whether or not the app is listening.
   `run_status` only exists because `run_events` is the wrong *shape* for what
-  the app needs live — a point lookup by `run_id` and an atomic
-  count-and-claim against the 5-task ceiling — so the app keeps its own
-  one-row-per-run mirror, best-effort, updated when a WS status message
-  happens to arrive. The job has no Postgres/Lakebase code at all
-  (`app/shared/tables.py` says this outright); it never writes that mirror.
+  the app needs live — a point lookup by `run_id` for listing and reading runs
+  — so the app keeps its own one-row-per-run mirror, best-effort, updated when
+  a WS status message happens to arrive. The job has no Postgres/Lakebase code
+  at all (`app/shared/tables.py` says this outright); it never writes that
+  mirror.
+- **Nothing on this diagram enforces the account's 5-concurrent-task ceiling
+  — and that's correct, not an omission.** An earlier design had
+  `PostgresRunStore.claim_slot()` do an atomic count-and-claim before every
+  launch; it is dead code today (nothing calls it — confirmed by grep, and
+  `routes/runs.py::trigger_run()`'s own docstring says so: *"this is the
+  change from v3... The ceiling still holds; Databricks holds it. Every job
+  file sets `queue.enabled`, so a sixth concurrent task waits instead of
+  failing."*). Every `resources/*.job.yml` does set `queue: enabled`. See
+  `docs/v4-rewrite-plan.md`'s "Run state: the job writes it, and there are two
+  kinds" for the fuller reasoning this retired.
 - **The Jobs API and the OIDC token endpoint aren't drawn as boxes.** Both are
   plain Databricks REST calls the app happens to make (`run_now`/`get_run`,
   and the M2M token exchange) — treating them as their own "control plane"
@@ -179,44 +189,38 @@ sequenceDiagram
     participant D as Delta tables (UC)
 
     U->>A: POST /api/runs {model}
-    A->>P: claim_slot() — advisory-lock txn:<br/>count active vs ceiling(5), insert QUEUED
-    alt ceiling already taken
-        P-->>A: SlotDenied
-        A-->>U: 409, wait for a slot
-    else slot claimed
-        A->>J: run_now(job_id, job_parameters) via Jobs API<br/>starts a new serverless task
-        A->>P: attach_job_run(job_run_id)
-        Note over J: Harness loads Model by entry point,<br/>spawns roller + socket threads.<br/>Main thread blocks running the model — exactly as a solver wants to be.
-        par best-effort, may never succeed
-            J->>A: WS connect + hello(seq=last committed)
-            A-->>U: SSE: status RUNNING (if a browser is subscribed)
-        and always, regardless of the WS above
-            loop model runs
-                M->>J: emit(log / progress / result)
-                J->>V: append to part-NNNNN.jsonl
-            end
-        end
-        opt WS is connected
-            J-->>A: telemetry notifications (msgpack, batched)
-            A-->>U: SSE events (JSON)
-        end
-        Note over V,D: a part is durable only once CLOSED —<br/>roll fires on size≥1MB OR age≥30s OR end-of-run
-        V->>D: Spark write_batch() on every roll
-        opt user cancels, and a live channel exists
-            U->>A: WS cancel (never a warehouse poll)
-            A->>J: RPC cancel via JobConnections
-            J->>M: CancellationToken.set()
-            M-->>J: stops at next checkpoint, keeps its incumbent result
-        end
-        J->>V: final result + terminal status, part closed
-        V->>D: last flush: run_events gets the terminal<br/>status row. THIS is authoritative, regardless<br/>of anything below.
-        opt WS still connected
-            J-->>A: status message (terminal)
-            A->>P: set_status(run_id, terminal_status)<br/>— refresh the app's cache, nothing more
-            A-->>U: SSE: status terminal
+    Note over A,P: trigger_run() does not touch the store at all —<br/>no slot claimed, no row inserted. If the account is already<br/>at the concurrency ceiling, Databricks queues this task itself<br/>(every job resource sets queue.enabled) instead of the app<br/>refusing the request.
+    A->>J: run_now(job_id, job_parameters) via Jobs API<br/>starts a new serverless task
+    Note over J: Harness loads Model by entry point,<br/>spawns roller + socket threads.<br/>Main thread blocks running the model — exactly as a solver wants to be.
+    par best-effort, may never succeed
+        J->>A: WS connect + hello(seq=last committed)
+        A-->>U: SSE: status RUNNING (if a browser is subscribed)
+    and always, regardless of the WS above
+        loop model runs
+            M->>J: emit(log / progress / result)
+            J->>V: append to part-NNNNN.jsonl
         end
     end
-    Note over A,J: If the WS was never up, or dropped and stayed down,<br/>none of the opt-WS-is-connected steps happen — P's cache goes stale.<br/>The run still finishes and D still has the true terminal status either way,<br/>the job never depended on the app to make its own status authoritative.<br/>JobsApi.get_run()/terminal_status() can also answer did-it-finish<br/>on demand from the Jobs API, which cannot go stale by construction.
+    opt WS is connected
+        J-->>A: telemetry notifications (msgpack, batched)
+        A-->>U: SSE events (JSON)
+    end
+    Note over V,D: a part is durable only once CLOSED —<br/>roll fires on size≥1MB OR age≥30s OR end-of-run
+    V->>D: Spark write_batch() on every roll
+    opt user cancels, and a live channel exists
+        U->>A: WS cancel (never a warehouse poll)
+        A->>J: RPC cancel via JobConnections
+        J->>M: CancellationToken.set()
+        M-->>J: stops at next checkpoint, keeps its incumbent result
+    end
+    J->>V: final result + terminal status, part closed
+    V->>D: last flush: run_events gets the terminal<br/>status row. THIS is authoritative, regardless<br/>of anything below.
+    opt WS still connected
+        J-->>A: status message (terminal)
+        A->>P: set_status(run_id, terminal_status)<br/>— an upsert: creates the row if this is the<br/>first message the app ever saw for this run
+        A-->>U: SSE: status terminal
+    end
+    Note over A,J: If the WS was never up, or dropped and stayed down,<br/>none of the opt-WS-is-connected steps happen — P may never even<br/>learn this run existed. The run still finishes and D still has the<br/>true terminal status either way,<br/>the job never depended on the app to make its own status authoritative.<br/>JobsApi.get_run()/terminal_status() can also answer did-it-finish<br/>on demand from the Jobs API, which cannot go stale by construction.
 ```
 
 Reading it:
@@ -234,11 +238,22 @@ Reading it:
 - `run_now` is drawn straight from the app to the job task: the Jobs API is
   the mechanism by which Databricks starts that task, not a separate system
   worth its own lane on this diagram.
+- **There used to be a `claim_slot()`/`SlotDenied` step here, and it's gone
+  because it was never actually called.** `routes/runs.py::trigger_run()`
+  launches a run without touching the store at all — confirmed by grep,
+  nothing in `app/server/` calls `claim_slot()`, `attach_job_run()`, or
+  `release_slot()`. Its docstring says this is deliberate: a scheduled run
+  never passes through the app, so a ceiling checked only on this one route
+  was already counting the wrong number, and every job resource's
+  `queue.enabled` makes Databricks itself the thing that queues a run past
+  the account ceiling. `docs/v4-rewrite-plan.md` has the fuller argument.
 - The terminal `set_status()` call into `P` (Lakebase) is labelled as a cache
   refresh, not a source of truth — because it isn't one. The job's own write
   into `D`'s `run_events`, one step earlier, is what makes the terminal status
   real; it happens whether or not the app, the WS, or Lakebase are anywhere
-  in the picture.
+  in the picture. One consequence worth knowing: since nothing calls
+  `attach_job_run()` any more, `run_status.job_run_id` is never populated —
+  the column exists but nothing currently writes it.
 - The final note is deliberately hedged: `JobsApi.get_run()` and
   `terminal_status()` exist and can answer "did this finish?" for a
   `job_run_id` on demand, but as of this writing `app/server/main.py`'s
@@ -248,7 +263,7 @@ Reading it:
   otherwise; check `app/server/main.py` and `app/server/services.py` before
   relying on automatic reconciliation existing.
 
-## Proposed: job-authored `run_status` (not yet built)
+## Proposed: job-authored `run_status`, over the Lakebase Data API (not yet built)
 
 Everything above is the shipped design: the app writes `run_status` from a
 WS status message it happens to receive (`services.py::_persist_status`),
@@ -256,43 +271,74 @@ and `job/` has no Postgres code at all. This section is a **proposal**,
 kept deliberately separate from the two diagrams above so neither one
 misrepresents what's actually running on `v4-plan` today.
 
-**The trigger for this change is that there are two entirely separate
-status vocabularies, and the current design blurs them:**
+**This isn't a new idea — it's already the decision record.**
+`docs/v4-rewrite-plan.md`'s "Run state: the job writes it, and there are two
+kinds" section worked this out on 2026-08-30: *"A scheduled run never
+touches the app, so the app cannot be the writer of run state — it would be
+absent for exactly the runs that most need recording... The job maintains
+run state in Lakebase, and keeps it current."* What follows restates that
+plan against the diagrams above, with one mechanism updated (Lakebase Data
+API instead of a Postgres driver) and one open question narrowed.
 
-| | Databricks job/task status | Our run status |
+### Three status concepts, not two
+
+The plan doc's own table is the clearer cut than a Databricks-vs-ours split:
+
+| | Job status | Model status |
 |---|---|---|
-| Values | `life_cycle_state` / `result_state` (`RUNNING`, `TERMINATED`, `INTERNAL_ERROR`, `SUCCESS`, ...) | `QUEUED` / `RUNNING` / `SUCCEEDED` / `FAILED` / `CANCELLED` / `INFEASIBLE` + `detail` |
-| Means | did the container start, run, and exit cleanly | what the **model** concluded |
-| Owned by | Databricks itself — needs no write from us | the harness — only it can know this |
-| Read via | `GET /api/2.2/jobs/runs/get` (`JobsApi.get_run()`), any time, never stale | `run_events` (Delta, always) and, in this proposal, `run_status` (Lakebase) |
+| What it is | The platform lifecycle: `QUEUED`/`RUNNING`/`SUCCEEDED`/`FAILED`/`CANCELLED`/`INFEASIBLE` + `detail` | Where *this particular model* thinks it is — its own categorical stages |
+| Defined by | The platform. Fixed, small, shared by every model | The model. Varies per model by design |
+| Wire shape today | `shared/envelope.py`'s `status: RunStatus` | Still open — see below |
 
-`INFEASIBLE` is the sharpest illustration: a Gurobi task can exit with
-Databricks `result_state=SUCCESS` — the container ran fine — while the
-*model* concluded there's no feasible solution, which is a fact Databricks
-has no vocabulary for at all. Only the harness can produce that value, which
-is the argument for the harness writing `run_status` directly rather than
-the app inferring it from a channel (WS) that might never have been up.
+...and a third question that neither row answers, because it isn't about
+`run_status` at all: **"is the container still alive?"** — that's
+`life_cycle_state`/`result_state`, Databricks' own concept, needing no write
+from us, read straight from `GET /api/2.2/jobs/runs/get`
+(`JobsApi.get_run()`) whenever it's actually asked. The plan doc states the
+three-way split on "reading it back" directly: *"Is it running? → the Jobs
+API. Not a table, not a count... What is it doing right now? → the app's
+in-memory cache, fed by the live stream... What has it been doing? →
+Postgres."*
+
+`INFEASIBLE` is the sharpest illustration of why *job status* has to be
+harness-authored: a Gurobi task can exit with Databricks
+`result_state=SUCCESS` — the container ran fine — while the model concluded
+there's no feasible solution, a fact Databricks has no vocabulary for at
+all. Only the harness can produce that value.
+
+**Narrowed, not fully closed:** the plan doc left "where does *model*
+status live on the wire" explicitly open. It's narrowed now — model status
+is tracked in Lakebase, not left to ride `progress.payload` alone — but the
+exact shape (a `model_status` column? a separate table?) is still
+undecided. Don't read this section as having settled that part.
 
 ### What changes
 
-- **The app still claims the slot at launch, unchanged.** `claim_slot()`
-  (`app/server/store.py`) does an atomic count-and-claim *before* a job task
-  exists — that has to stay app-side, because it's the only point where
-  refusing a launch is free. Once `run_now()` returns, Databricks has
-  already spent one of the account's 5 concurrent-task slots regardless of
-  what our own Postgres row says; a job that self-checks the ceiling at
-  startup can only find out too late, after burning a real slot to enforce
-  a limit that exists to protect that exact resource.
-- **The harness becomes the sole writer of every transition after
-  `QUEUED`.** `RUNNING` on startup and the terminal status at the end get
-  written into Lakebase's `run_status` directly, alongside the existing
-  unconditional write into Delta's `run_events` — not instead of it.
+- **The launch path is untouched, because it never gated anything to
+  begin with.** `routes/runs.py::trigger_run()` calls `run_now()` directly
+  and touches no store at all — there is no slot to stop reserving. If the
+  account is genuinely at its concurrency ceiling, Databricks' own
+  `queue.enabled` (set on every job resource) queues the excess task; this
+  proposal doesn't add or remove anything on that path.
+- **The harness becomes the sole writer of *job status* after `QUEUED`.**
+  `RUNNING` on startup and the terminal status at the end get written into
+  Lakebase's `run_status` directly, alongside the existing unconditional
+  write into Delta's `run_events` — not instead of it.
+- **The mechanism is the Lakebase Data API, not a Postgres driver.** It's a
+  PostgREST-compatible REST interface — every table becomes
+  `GET`/`POST`/`PATCH`/`DELETE` endpoints, authenticated with an ordinary
+  Databricks OAuth bearer token. The harness already mints exactly that
+  token, for the exact same M2M identity, to authenticate its WS connection
+  to the app — so this needs **no new dependency and no new credential
+  type**, just another `httpx` call. See `docs/v4-rewrite-plan.md`'s
+  updated "cost, stated" for the full reasoning; this replaces an earlier
+  version of this section that proposed `psycopg`.
 - **It has to be best-effort, never blocking the model** — the same
-  contract `job/ws.py`'s socket thread already has. A Lakebase write that
-  fails or hangs must not touch what the model reports or delay it.
-  `run_events` remains the durable record regardless of whether this
-  write lands; it is a better-shaped second mirror of the same fact, not a
-  new source of truth.
+  contract `job/ws.py`'s socket thread already has. A Data API call that
+  fails, times out, or comes back non-2xx must not touch what the model
+  reports or delay it. `run_events` remains the durable record regardless
+  of whether this write lands; it is a better-shaped second mirror of the
+  same fact, not a new source of truth.
 - **The app stops writing `run_status` entirely.** `services.py::ingest()`
   drops its call to `store.set_status()` on a WS status message — two
   writers of one row was the thing worth removing.
@@ -300,55 +346,55 @@ the app inferring it from a channel (WS) that might never have been up.
   `RunSnapshot` (`app/server/broadcaster.py`) already caches the latest
   status/progress per `run_id` in-process precisely so a newly-connecting
   SSE client doesn't need a DB round-trip — untouched, and it becomes the
-  *only* live-status path.
-- **Lakebase reads are for bulk views only** — `list_runs()`/`non_terminal()`
-  in `store.py`, for something like "show every run and its current state,"
-  where there's no single WS to ask and a DB query across many rows is
-  exactly what Postgres is for.
-- **`JobsApi.get_run()`/`terminal_status()` stays a fallback of last
-  resort**, not a live source of our status: it approximates *our*
-  vocabulary from *Databricks'* vocabulary (`jobs_api.py`'s `_RESULT_STATE`
-  table) for the one case the harness itself can't cover — it died before
-  writing a terminal status anywhere at all (e.g. the `sys.exit(0)`
-  failure mode `CLAUDE.md` already documents).
+  *only* live-status path, matching the plan doc's "the app's in-memory
+  cache, fed by the live stream."
+- **Lakebase reads are for bulk views only** — `list_runs()` in `store.py`
+  is the one with a real caller today (`routes/runs.py`'s `GET /api/runs`);
+  `non_terminal()` exists but nothing calls it yet, reserved for a
+  reconciliation feature that was designed, then removed, and hasn't been
+  rebuilt (`app/server/main.py`'s `lifespan` says so directly).
+- **`JobsApi.get_run()`/`terminal_status()` answers a different question
+  than *job status* entirely** — container liveness, not what the model
+  concluded — and stays a fallback of last resort for the one case the
+  harness itself can't cover: it died before writing anything anywhere at
+  all (e.g. the `sys.exit(0)` failure mode `CLAUDE.md` already documents).
 
 ```mermaid
 flowchart TB
     RunsRoute["routes/runs.py<br/>POST run-now"]
-    Store["PostgresRunStore<br/>claim_slot() at launch (unchanged)<br/>list_runs()/non_terminal() — BULK READS ONLY"]
+    Store["PostgresRunStore<br/>set_status() upsert (unchanged)<br/>list_runs() — BULK READS (unchanged)"]
     JobsApiC["JobsApi client"]
     Harness["Harness (job/harness.py)"]
-    LakebaseWriter["NEW: best-effort Lakebase writer<br/>RUNNING at start, terminal at end<br/>needs psycopg + a Lakebase secret in job/"]
-    RunStatusDb[("run_status (Lakebase)<br/>OUR status: QUEUED/RUNNING/SUCCEEDED/<br/>FAILED/CANCELLED/INFEASIBLE + detail")]
+    LakebaseWriter["NEW: best-effort Lakebase Data API writer<br/>RUNNING at start, terminal at end<br/>httpx + the same M2M OAuth bearer token<br/>already used for the WS ingress identity —<br/>no new dependency, no new secret type"]
+    RunStatusDb[("run_status (Lakebase)<br/>JOB STATUS: QUEUED/RUNNING/SUCCEEDED/<br/>FAILED/CANCELLED/INFEASIBLE + detail<br/>(model status shape still open)")]
     RunEvents[("run_events (Delta)<br/>unchanged: append-only, unconditional,<br/>still written regardless of the above")]
     RpcClient["RpcClient (job/ws.py)"]
     Broadcaster["Broadcaster: RunSnapshot<br/>unchanged — the live per-run answer,<br/>no DB round-trip"]
-    DbxStatus["Databricks task status<br/>life_cycle_state / result_state<br/>owned by Databricks, not us"]
+    DbxStatus["Container liveness<br/>life_cycle_state / result_state<br/>owned by Databricks, read on demand,<br/>never stored by us"]
 
-    RunsRoute -->|"claim_slot(): count-and-claim,<br/>before any task exists"| Store
     RunsRoute --> JobsApiC
-    JobsApiC ==>|"run_now()"| Harness
+    JobsApiC ==>|"run_now(): no slot claimed<br/>before or after"| Harness
     Harness --> LakebaseWriter
-    LakebaseWriter -.->|"best-effort UPDATE,<br/>never blocks the model"| RunStatusDb
+    LakebaseWriter -.->|"best-effort PATCH via the<br/>Lakebase Data API (REST),<br/>never blocks the model"| RunStatusDb
     Harness -->|"unconditional, as today"| RunEvents
     Harness --> RpcClient
     RpcClient <-->|"telemetry + cancel/replay/ping<br/>(unchanged)"| Broadcaster
-    JobsApiC -.->|"get_run()/terminal_status():<br/>fallback ONLY, approximates our<br/>status from Databricks' own"| DbxStatus
-    Store -.->|"bulk listing reads<br/>(unchanged shape, job-authored rows)"| RunsRoute
+    JobsApiC -.->|"get_run()/terminal_status():<br/>fallback of last resort,<br/>a different question than job status"| DbxStatus
+    Store -.->|"list_runs(): bulk listing reads<br/>(unchanged shape, job-authored rows)"| RunsRoute
 
     classDef proposed fill:#fff5f5,stroke:#d64545,color:#1a1a1a,stroke-dasharray: 4 2;
     classDef unchanged fill:#f2f2f2,stroke:#888,color:#1a1a1a;
     class LakebaseWriter,RunStatusDb proposed;
-    class RunEvents,Broadcaster,DbxStatus,RpcClient unchanged;
+    class RunEvents,Broadcaster,DbxStatus,RpcClient,Store,RunsRoute,JobsApiC,Harness unchanged;
 ```
 
 Red dashed nodes are new; grey ones are today's behaviour, unchanged.
-Building this needs: `psycopg` (or an equivalent) added to
-`job/requirements.txt`, a Lakebase credential obtained the same way every
-other job secret is (`job/auth.py::read_secret` / `dbutils.secrets.get` —
-never a job parameter or env var, per `CLAUDE.md`'s Secrets rule), and the
-host/schema threaded through as job config. None of this exists yet; treat
-this section as a design note, not a changelog entry.
+Building this needs: the Lakebase instance's Data API endpoint threaded
+through as job config (a name, not a credential — fine as a job parameter
+per `CLAUDE.md`'s Secrets rule), and the harness's existing M2M token
+acquisition (`job/auth.py::M2MTokenProvider`) reused for one more outbound
+call. No new dependency, no new secret type. None of this exists yet;
+treat this section as a design note, not a changelog entry.
 
 ## Where this stands relative to `CLAUDE.md`
 
@@ -358,4 +404,14 @@ target state `CLAUDE.md` describes. The other ten models, the volume→SQL
 ingestion job (Slice 4), and automatic startup reconciliation are not drawn
 here because they don't exist yet — see `CLAUDE.md`'s "Still not done" list.
 The proposed job-authored `run_status` design above is even earlier stage:
-it has no code at all yet, on either side.
+it has no code at all yet, on either side — though it isn't a new idea, it's
+`docs/v4-rewrite-plan.md`'s own decision record, not yet built.
+
+**Also worth naming: this file's earlier revisions got the ceiling wrong.**
+Two prior versions of the diagrams here depicted `PostgresRunStore.claim_slot()`
+and `SlotDenied` as live behaviour, and the first proposal drafted here assumed
+the app still needed to "claim a slot" at launch. Neither was true — that
+machinery is dead code today, and `docs/v4-rewrite-plan.md` had already
+retired it in the plan on 2026-08-30. Kept here as a reminder that this file
+is drawn from the code and the plan record, not re-derived from first
+principles each time.

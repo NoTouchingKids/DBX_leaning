@@ -618,23 +618,38 @@ Reading it back splits three ways, and each has exactly one answer:
 > **record rather than a lock**. Less code, and it stops being wrong the
 > moment a run starts without the app.
 
-**The cost, stated:** the harness gains a Postgres client and a Lakebase
-credential. That is a real dependency and it is worth being precise about what
-kind — `psycopg` is an ordinary database driver, not pyspark, Delta or Unity
-Catalog. A service owning its own state row in a shared database is the normal
-microservice shape; a harness reaching into a lakehouse is not. So the earlier
-claim needs restating: **the harness has no *lakehouse* dependency**, which is
-what makes it portable, and it does have a database one, which is what makes
-it a service.
+**The cost, stated — superseded 2026-09-14: no driver at all.** This
+originally read "the harness gains a Postgres client and a Lakebase
+credential," reasoning that `psycopg` is an ordinary database driver, not
+pyspark, Delta or Unity Catalog, and that owning a state row in a shared
+database is the normal microservice shape even though a harness reaching
+into a lakehouse is not.
 
-> **Open, and the one thing here that is not decided:** where model status
-> lives on the wire. `shared/envelope.py` has `status: RunStatus` — a fixed
-> six-value enum — plus a free-text `detail`. A model-defined categorical
-> status is neither. Cheapest option that keeps Postgres to one row per run:
-> a `model_status` column carrying the latest value, with the *history* riding
+That reasoning was sound and the conclusion is now better: Lakebase exposes
+the **Data API**, a PostgREST-compatible REST interface — every table
+becomes `GET`/`POST`/`PATCH`/`DELETE` endpoints, authenticated with an
+ordinary Databricks OAuth bearer token mapped to a Databricks identity. The
+harness already mints exactly that token, for the exact same M2M
+service-principal identity, to authenticate its WS connection to the app
+(`job/auth.py::M2MTokenProvider`, below). So writing `run_status` needs
+**no new dependency and no new credential type** — one more `httpx` call
+using a token the harness already has, landing on a REST endpoint instead
+of a raw Postgres connection. The restated claim holds even more cleanly
+than before: the harness has no *lakehouse* dependency, and now no
+*database driver* dependency either — every one of its outbound calls,
+Jobs API, WS, and now Lakebase, is `httpx` against a Databricks REST
+surface, authenticated the same way.
+
+> **Partially resolved, 2026-09-14: model status is tracked in Lakebase.**
+> This was open on whether model status lives in Postgres at all; it does.
+> Still open is the exact wire shape: `shared/envelope.py` has
+> `status: RunStatus` — a fixed six-value enum — plus a free-text `detail`.
+> A model-defined categorical status is neither. The cheapest option that
+> keeps Postgres to one row per run is unchanged from before: a
+> `model_status` column carrying the latest value, with the *history* riding
 > the ordinary telemetry stream as `progress` messages, where per-model
-> free-form data already lives in `payload`. That needs deciding before the
-> first real model, not before the heartbeat.
+> free-form data already lives in `payload`. That column-level detail still
+> needs deciding before the first real model, not before the heartbeat.
 
 ### Auth: the SDK, for credentials only
 
