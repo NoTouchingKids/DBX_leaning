@@ -467,8 +467,18 @@ kinds" section worked this out on 2026-08-30: *"A scheduled run never
 touches the app, so the app cannot be the writer of run state — it would be
 absent for exactly the runs that most need recording... The job maintains
 run state in Lakebase, and keeps it current."* What follows restates that
-plan against the diagrams above, with one mechanism updated (Lakebase Data
-API instead of a Postgres driver) and one open question narrowed.
+plan against the diagrams above.
+
+**Correction, 2026-09-18: this section previously claimed a "Lakebase Data
+API" — a PostgREST-compatible REST interface needing no Postgres driver and
+no new credential. That was wrong, and it was wrong in this session, not
+inherited from an old branch.** `docs/dbx_external-apps-manual-api.md`
+describes only a REST flow for *issuing a database credential*; reading or
+writing a row still goes over the Postgres wire protocol. There is no
+table-level REST CRUD endpoint. The mechanism below is corrected to match
+what's actually confirmed: a real Postgres connection, authenticated with an
+OAuth token, exactly what `app/server/store.py` and `app/server/oauth.py`
+already do for the app today.
 
 ### Three status concepts, not two
 
@@ -514,21 +524,30 @@ undecided. Don't read this section as having settled that part.
   `RUNNING` on startup and the terminal status at the end get written into
   Lakebase's `run_status` directly, alongside the existing unconditional
   write into Delta's `run_events` — not instead of it.
-- **The mechanism is the Lakebase Data API, not a Postgres driver.** It's a
-  PostgREST-compatible REST interface — every table becomes
-  `GET`/`POST`/`PATCH`/`DELETE` endpoints, authenticated with an ordinary
-  Databricks OAuth bearer token. The harness already mints exactly that
-  token, for the exact same M2M identity, to authenticate its WS connection
-  to the app — so this needs **no new dependency and no new credential
-  type**, just another `httpx` call. See `docs/v4-rewrite-plan.md`'s
-  updated "cost, stated" for the full reasoning; this replaces an earlier
-  version of this section that proposed `psycopg`.
+- **The mechanism is a real Postgres connection, authenticated with an OAuth
+  token as the password** — `psycopg` (or an async equivalent), the same
+  library and the same "token, not a static password" approach
+  `app/server/store.py::PostgresRunStore._conn()` already uses for the app.
+  **Confirmed 2026-09-18** against a real workspace, from a notebook using
+  M2M client credentials to read a Lakebase table — so the mechanism itself
+  is settled, not proposed.
+- **It needs a new dependency in the job (a Postgres driver) and a second,
+  dedicated credential — not the WS ingress identity reused.** There are two
+  separate service-principal identities in play: whatever "normal" OAuth
+  client id/secret the job already presents to the app's WS ingress, and a
+  **separate `lakebase`-specific client id/secret**, granted its own Postgres
+  role on `dbx_leaning.run_status` (`databricks_create_role(...)` in the
+  Lakebase SQL editor, per `docs/dbx_external-apps-manual-api.md`'s
+  prerequisites table). Job config needs a second scope/key-name triple —
+  mirroring `DBX_OAUTH_SECRET_SCOPE`/`_CLIENT_ID_KEY`/`_SECRET_KEY` but
+  distinct from them, e.g. `DBX_LAKEBASE_OAUTH_SECRET_SCOPE` and friends —
+  not a reuse of the existing three.
 - **It has to be best-effort, never blocking the model** — the same
-  contract `job/ws.py`'s socket thread already has. A Data API call that
-  fails, times out, or comes back non-2xx must not touch what the model
-  reports or delay it. `run_events` remains the durable record regardless
-  of whether this write lands; it is a better-shaped second mirror of the
-  same fact, not a new source of truth.
+  contract `job/ws.py`'s socket thread already has. A Postgres write that
+  fails, times out, or errors must not touch what the model reports or delay
+  it. `run_events` remains the durable record regardless of whether this
+  write lands; it is a better-shaped second mirror of the same fact, not a
+  new source of truth.
 - **The app stops writing `run_status` entirely.** `services.py::ingest()`
   drops its call to `store.set_status()` on a WS status message — two
   writers of one row was the thing worth removing.
@@ -555,7 +574,7 @@ flowchart TB
     Store["PostgresRunStore<br/>set_status() upsert (unchanged)<br/>list_runs() — BULK READS (unchanged)"]
     JobsApiC["JobsApi client"]
     Harness["Harness (job/harness.py)"]
-    LakebaseWriter["NEW: best-effort Lakebase Data API writer<br/>RUNNING at start, terminal at end<br/>httpx + the same M2M OAuth bearer token<br/>already used for the WS ingress identity —<br/>no new dependency, no new secret type"]
+    LakebaseWriter["NEW: best-effort Postgres writer<br/>RUNNING at start, terminal at end<br/>psycopg + a SEPARATE lakebase-scoped<br/>OAuth credential — new dependency,<br/>new dedicated secret, not the WS identity"]
     RunStatusDb[("run_status (Lakebase)<br/>JOB STATUS: QUEUED/RUNNING/SUCCEEDED/<br/>FAILED/CANCELLED/INFEASIBLE + detail<br/>(model status shape still open)")]
     RunEvents[("run_events (Delta)<br/>unchanged: append-only, unconditional,<br/>still written regardless of the above")]
     RpcClient["RpcClient (job/ws.py)"]
@@ -565,7 +584,7 @@ flowchart TB
     RunsRoute --> JobsApiC
     JobsApiC ==>|"run_now(): no slot claimed<br/>before or after"| Harness
     Harness --> LakebaseWriter
-    LakebaseWriter -.->|"best-effort PATCH via the<br/>Lakebase Data API (REST),<br/>never blocks the model"| RunStatusDb
+    LakebaseWriter -.->|"best-effort UPSERT over Postgres<br/>(psycopg, OAuth token as password),<br/>never blocks the model"| RunStatusDb
     Harness -->|"unconditional, as today"| RunEvents
     Harness --> RpcClient
     RpcClient <-->|"telemetry + cancel/replay/ping<br/>(unchanged)"| Broadcaster
@@ -579,12 +598,13 @@ flowchart TB
 ```
 
 Red dashed nodes are new; grey ones are today's behaviour, unchanged.
-Building this needs: the Lakebase instance's Data API endpoint threaded
-through as job config (a name, not a credential — fine as a job parameter
-per `CLAUDE.md`'s Secrets rule), and the harness's existing M2M token
-acquisition (`job/auth.py::M2MTokenProvider`) reused for one more outbound
-call. No new dependency, no new secret type. None of this exists yet;
-treat this section as a design note, not a changelog entry.
+Building this needs: a Postgres driver added to the job's dependency floor
+(`job/requirements.txt`), a second, dedicated Lakebase OAuth credential
+provisioned and granted its own Postgres role (distinct from the WS ingress
+identity), and the harness's existing `M2MTokenProvider` pattern reused —
+same shape, second instance, second secret. The mechanism is confirmed; the
+wiring is not. None of this exists yet; treat this section as a design note,
+not a changelog entry.
 
 ## Where this stands relative to `CLAUDE.md`
 
@@ -605,3 +625,12 @@ machinery is dead code today, and `docs/v4-rewrite-plan.md` had already
 retired it in the plan on 2026-08-30. Kept here as a reminder that this file
 is drawn from the code and the plan record, not re-derived from first
 principles each time.
+
+**A second one, same lesson: the proposed section above named a "Lakebase
+Data API" that doesn't exist as described**, and called it settled
+("no new dependency, no new credential type") without it having been tried.
+It took a real notebook test and a closer read of
+`docs/dbx_external-apps-manual-api.md` to catch — see that section's
+2026-09-18 correction. The mechanism is a Postgres connection with an OAuth
+token as the password, over a second, dedicated credential, not a REST data
+API over the WS ingress identity.

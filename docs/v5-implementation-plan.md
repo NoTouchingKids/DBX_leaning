@@ -28,16 +28,22 @@ someone else's behalf.
 
 ## Phase 0 — validate before building on it
 
-Two things in this plan rest on facts nobody has confirmed against a real
-workspace. Spike both before Phase 2 writes code against them; a design built
-on an unverified REST endpoint is the same mistake the ingress spikes existed
-to avoid.
+One item below is now settled; the rest still gate what they always gated.
+Item 1 was the reason this phase existed at all, and it's resolved — but
+resolving it is what caught the mistake in item 1's own text, so read that
+one for the correction as much as the answer.
 
-1. **The Lakebase Data API, reached from a serverless job task.**
-   Confirm: the endpoint is reachable through the trusted-domain egress list;
-   the existing `M2MTokenProvider` token is accepted by the Data API in the
-   same `Authorization: Bearer` shape it already uses against Postgres; and
-   which service principal needs which grant (see Phase 2, item 2).
+1. **SETTLED, 2026-09-18.** There is no Lakebase "Data API" in the sense
+   earlier drafts of this plan and `docs/architecture-diagram.md` assumed —
+   `docs/dbx_external-apps-manual-api.md` only issues a database credential
+   over REST; it does not expose tables as CRUD endpoints. The real,
+   confirmed mechanism: a normal Postgres connection (`psycopg` or an async
+   equivalent), authenticated with an OAuth token as the password, exactly
+   what `app/server/store.py`/`app/server/oauth.py` already do for the app.
+   Confirmed against a real workspace from a notebook using M2M client
+   credentials to read a Lakebase table. See Phase 2 item 2 for the
+   credential shape this needs on the job side. `docs/architecture-diagram.md`
+   carries the full correction and why the earlier framing was wrong.
 2. **One real cancel and one real replay, on the current build, before the
    thread rewrite.** Both are unit-tested but have never been exercised
    against a live run (CLAUDE.md, "Still not done"). Phase 3 rewrites exactly
@@ -108,12 +114,16 @@ Arrow IPC on the wire:
    of write. Lakebase holds only custom/nuanced status (e.g. `INFEASIBLE`);
    `QUEUED`/`RUNNING`/plain `SUCCEEDED`/`FAILED`/`CANCELLED` stay in the
    Jobs API and are never mirrored here.
-2. **Identity and grant for the harness's Lakebase write — decide, don't
-   assume.** Either the existing shared ingress principal gets a second
-   grant (a Postgres role on `dbx_leaning.run_status`, on top of `CAN_USE` on
-   the app), or a dedicated third credential is provisioned, mirroring
-   `DBX_OAUTH_SECRET_SCOPE`/`_CLIENT_ID_KEY`/`_SECRET_KEY`. Pick one before
-   Phase 0's spike, since the spike needs a real credential to test against.
+2. **SETTLED, 2026-09-18: a dedicated, separate credential, not the shared
+   ingress principal.** Two distinct identities: whatever "normal" OAuth
+   client id/secret the job already presents to the app's WS ingress, and a
+   separate `lakebase`-specific client id/secret granted its own Postgres
+   role on `dbx_leaning.run_status` (`databricks_create_role(...)` in the
+   Lakebase SQL editor). Job config needs a second scope/key-name triple,
+   distinct from `DBX_OAUTH_SECRET_SCOPE`/`_CLIENT_ID_KEY`/`_SECRET_KEY` —
+   e.g. `DBX_LAKEBASE_OAUTH_SECRET_SCOPE` and matching key names — read with
+   the same `dbutils.secrets.get` mechanism `job/auth.py::read_secret`
+   already uses, not a new one.
 3. **Schema migration moves out of both processes.** `store.py::ensure_schema()`
    stops running at app startup; DDL for both Lakebase and Unity Catalog is
    applied out of band, by a human or a separate deploy step, never as a side
@@ -123,7 +133,13 @@ Arrow IPC on the wire:
 4. Harness gains a Lakebase writer, called from `emit()`'s status path,
    queued through the controller thread from Phase 3 rather than blocking
    `emit()` itself — same reasoning as the socket: a slow write must never
-   stall the model.
+   stall the model. This is where item 2's Postgres driver actually gets
+   added — `job/requirements.txt`, the harness floor, gains `psycopg` (or
+   the async equivalent already used in `app/`), the first Postgres
+   dependency the job has ever carried. `job/main.py`'s
+   `_build_client`-style pattern (read the second credential once per run,
+   build one token provider, close over it) is the template to copy, not a
+   new pattern to invent.
 5. Remove the app-side status writer (`services.py::_persist_status`) once
    the harness is the sole writer. Two writers to one row is the bug this
    phase exists to prevent.
@@ -234,13 +250,13 @@ So a future session doesn't re-open these without new information:
 
 ## Sequencing
 
-Phase 0 gates Phase 2 (the Lakebase write needs a confirmed credential and a
-confirmed reachable endpoint) and should happen before Phase 3 touches the
-socket code the baseline cancel/replay run exercises. Phases 1, 4 and 5 have
-no dependency on 0, 2 or 3 and can proceed in parallel with them. Phase 3
-depends on Phase 1's version field existing in `hello` before the
-controller's dispatch table is written, so the two are best done together
-rather than strictly sequentially.
+Phase 0 item 1 (the Lakebase mechanism) no longer gates Phase 2 — it's
+settled. Phase 0 items 2 and 3 (the cancel/replay baseline, the `tests/`
+decision) still gate Phase 3, since that's the rewrite they exist to protect.
+Phases 1, 4 and 5 have no dependency on 0, 2 or 3 and can proceed in parallel
+with them. Phase 3 depends on Phase 1's version field existing in `hello`
+before the controller's dispatch table is written, so the two are best done
+together rather than strictly sequentially.
 
 ## Running this across multiple workers
 
@@ -268,7 +284,7 @@ work across more than one worker without them colliding.
 |---|---|---|---|
 | A — cleanup carried over from this session | Phase 2 items 6–7 | `app/server/store.py`, `app/server/services.py` | Nothing. Safe to start immediately; it's dead-code removal and a log-message fix, already scoped exactly by grep in this session. |
 | B — wire freeze | Phase 1 | `app/shared/envelope.py`, `shared/rpc.py`, `app/server/routes/rpc.py`, `docs/message-envelope-spec.md` | Nothing. |
-| C — run state | Phase 2 items 1–5 | `lakebase_ddl/001_run_status.sql`, `app/server/store.py` (schema/DDL parts, not Track A's dead code), a new job-side Lakebase writer module | Phase 0 items 1, 2, 4. Needs Track A's docstring fix landed first if both touch `store.py`'s header — coordinate or sequence, don't run fully blind in parallel on the same file. |
+| C — run state | Phase 2 items 1, 3–7 | `lakebase_ddl/001_run_status.sql`, `app/server/store.py` (schema/DDL parts, not Track A's dead code), `job/requirements.txt`, a new job-side Lakebase writer module, the second credential's job parameters | Phase 0 item 4 (read the sibling branches first). Item 1 is settled, no longer a gate. Needs Track A's docstring fix landed first if both touch `store.py`'s header — coordinate or sequence, don't run fully blind in parallel on the same file. |
 | D — harness concurrency | Phase 3 | `job/harness.py`, `job/ws.py`, `job/main.py` | Track B's version field (item 3) should land first — the controller's dispatch table is easier to write once, not twice. |
 | E — discovery & cross-team | Phase 4 | `app/server/discovery.py`, `resources/*.job.yml` | Nothing. |
 | F — docs & packaging | Phase 5 | `docs/model-expansion-and-packaging.md`, `docs/architecture-diagram.md` | Best started last — it documents what B–E actually did, not what this plan predicted they'd do. |
