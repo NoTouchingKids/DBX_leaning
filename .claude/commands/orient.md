@@ -6,17 +6,14 @@ Then, before writing or editing anything, state back in your own words:
 1. **What this platform is** — one sentence, plus the three-hop transport
    shape (job→app, app→client, job→UC) and which of those is a fallback vs.
    which is always-on.
-2. **What track you're about to work on.** If the current working directory
-   is a git worktree whose branch name matches one of the tracks in
-   `docs/parallelization-plan.md` (e.g. `feat/model-mcmc`), say which track
-   that is and confirm you've read the matching file in `.claude/agents/`.
-   If it's ambiguous — main repo, unclear branch, or a track not listed —
-   **ask which track you're meant to be working on** rather than guessing.
-   Note that a missing brief is not a missing track: there are eleven models
-   and only five have their own `.claude/agents/model-*.md`, deliberately —
-   `job/models/README.md` and `/new-model` replaced the per-model brief once the
-   contract stopped changing. Read those instead, and do not write a brief to
-   fill the gap.
+2. **What part of the platform you're about to work on.** `.claude/agents/`
+   holds three general briefs — `transport-app.md` (`app/`), `transport-job.md`
+   (`job/`), `frontend.md` (`app/client/`) — read whichever matches. There is
+   no per-model brief on this branch and none is expected: `models/README.md`
+   is the pattern for adding one — no command needed. Only two models live here
+   (`heartbeat`, `annealing`); the other ten are archived on `dev` until the
+   platform is proven without them (`docs/v4-rewrite-plan.md`). If it's
+   ambiguous what you're meant to be working on, ask rather than guessing.
 3. **What has actually run against a real workspace, and what has not.**
    Check for evidence in the repo rather than assuming in either direction —
    this is the question sessions get wrong most often, in both directions.

@@ -36,21 +36,21 @@ don't, so they go first.
 
 ## After the probes pass
 
-`docs/parallelization-plan.md` has the worktree-per-track breakdown. Short
-version: build `shared/` (the message envelope) once, sequentially, then
-fan out — one Claude Code session per track (`app/`, `job/`, and one per
-model in `models/`). The first five model tracks were briefed from a file in
-`.claude/agents/`; once `models/README.md` and `/new-model` existed the
-later six needed no brief at all, which is why there are fewer briefs there
-than models.
+Build `shared/` (the message envelope) once, sequentially — everything else
+depends on its shape. From there, `app/`, `job/` and a model are independent
+enough to build in parallel, one Claude Code session per area, each briefed
+from `.claude/agents/` (`transport-app.md`, `transport-job.md`,
+`frontend.md`). A new model needs no brief at all: `models/README.md` is
+the pattern once `shared/` is frozen — no command needed, and none exists
+on this branch for it.
 
 ## What's here
 
 ```
 CLAUDE.md              Project brief, auto-loaded every session
-docs/                  Architecture rationale, platform constraints, envelope spec, parallel plan
-.claude/agents/        One brief per parallel track
-.claude/commands/      /orient, /spike-ws, /spike-sse, /new-model
+docs/                  Architecture rationale, platform constraints, envelope spec
+.claude/agents/        One brief per area: app/, job/, app/client/
+.claude/commands/      /orient, /spike-ws, /spike-sse
 
 app/shared/            The message envelope + RPC frames. Imported by app/ and
                        job/, never by a model. Canonical here because the app

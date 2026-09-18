@@ -323,11 +323,14 @@ Full procedure: `deploy/README.md`.
    *timings* are still unmeasured; `/spike-ws` and `/spike-sse` are how to
    fill those in. Nothing is blocked on them.
 3. `shared/` (the envelope) was built first and sequentially — it is the one
-   contract every other track depends on — and is frozen. Everything else
-   parallelises. See `docs/parallelization-plan.md` for the worktree-per-track
-   plan and which agent (`.claude/agents/*.md`) owns which track. When a new
-   fan-out comes up, freeze its shared contract before starting it; the
-   frontend did this again for its per-model views.
+   contract every other track depends on — and is frozen. When a new fan-out
+   comes up, freeze its shared contract before starting it; the frontend did
+   this again for its per-model views. The worktree-per-track plan that got
+   the original build here (`docs/parallelization-plan.md`) described a
+   larger tree than this branch carries — eleven models, `tests/deploy/`, a
+   full per-model frontend — most of which was deliberately cut back out (see
+   `docs/v4-rewrite-plan.md`'s delete list) or lives on `dev`. That doc is
+   gone; the one thing worth keeping from it is the rule in this paragraph.
 4. Frontend was explicitly low-priority until `app/`, `job/` and one model
    worked end to end. That gate is met. The client is now `app/dist/index.html`
    — hand-written, committed, served as-is, no build step and no framework.
@@ -412,11 +415,12 @@ Full procedure: `deploy/README.md`.
   `life_cycle_state`
 - `docs/free-edition-constraints.md` — verified platform facts + sources
 - `docs/message-envelope-spec.md` — the wire contract, in full
-- `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order
 - `docs/spike-results.md` — the ingress probes: what they settled, what they didn't
-- `docs/sample-data-inventory.md` — what is really in the `samples` catalog
-- `docs/ml-datasets.md` — what is worth training on, and the three egress-free
-  routes data can arrive by
-- `docs/model-expansion-and-packaging.md` — per-model wheels, and what a next
-  model would be for. Carries a status note: several of its premises are
-  superseded, and it is the one doc to read the header of before the body
+
+Four docs used to be listed here — the worktree-per-track plan, the samples
+inventory, the ML-datasets survey, and the per-model packaging doc. All four
+described the pre-rewrite tree (`docs/v4-rewrite-plan.md`'s delete list) or a
+file that was never written on this branch; none of them exist here now.
+`docs/v5-implementation-plan.md`'s Phase 5 tracks writing a packaging doc
+again, once there's a real second model or a real external consumer to write
+it for — see that phase before starting one from scratch.
