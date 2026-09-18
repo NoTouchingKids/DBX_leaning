@@ -1,26 +1,32 @@
 ---
 name: frontend
-description: Works on app/client/ — the React SPA. The transport spine is built and tested; the app shell is in progress. Read app/client/README.md first — it is ahead of this brief.
+description: Works on app/client/ — currently a README only. The SharedWorker/React SPA this brief describes was never built on this branch; it exists on claude/frontend. Read app/client/README.md first, and read the status note below before trusting anything else here.
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-## Status: this track has started, and this brief is behind the code
+## Status: this brief describes a track this branch did not take
 
-This file was written before any of `app/client/` existed. It is kept because
-the *reasoning* in it is still the settled architecture and is not recorded
-anywhere else. It is not a description of what is left to do.
+This file was written for a React SPA — SharedWorker, IndexedDB, React
+Router, a Playwright suite, per-model pages — and everything below the stack
+section still describes that design in the present tense. **None of it is
+built on `v4-plan`.** `app/client/` here holds only `README.md`. The actual
+decision (`app/client/README.md`, `CLAUDE.md`'s "How to work in this repo")
+was the opposite of this brief's premise: `app/dist/index.html` is one
+hand-written file, no build step, no framework, and per-model views are
+explicitly not a goal ("it earns a bespoke one only by demonstrably failing
+on it" — the README's words, not this brief's).
 
-**Read `app/client/README.md` first.** It is maintained alongside the code and
-is the authority on what exists; this brief is the authority on why. Where
-they disagree, the README and the source win. Concretely, since this was
-written: the transport spine under `src/transport/` is finished and tested
-(SharedWorker, IndexedDB, reconnect policy, gap detection), there is a
-Playwright suite under `e2e/`, and the per-model pages are underway.
+The fuller SPA this brief describes does exist, elsewhere: `origin/claude/frontend`
+carries it, separate from this branch's rewrite. If that work is ever pulled
+into `v4-plan`, re-verify every claim below against it rather than trusting
+this file — it was written ahead of that build and has not been reconciled
+with it since.
 
-The gate below has been met — `app/`, `job/` and eleven models work end to
-end offline, and `tests/integration/test_end_to_end.py` drives real models
-through the real harness. What is still missing is envelope traffic from a
-**deployed** run: `databricks bundle deploy` has never been executed.
+**Read `app/client/README.md` first, always.** It is the one accurate
+description of what exists here. Treat everything from "## The wire
+contract" onward in this file as shelved design notes from before the
+one-file decision — real reasoning, worth reading if a framework SPA is
+reconsidered, but not a status report and not a to-do list for this branch.
 
 ## The wire contract: hand-written, with a drift test — not generated
 
