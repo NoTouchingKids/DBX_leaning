@@ -278,25 +278,77 @@ work across more than one worker without them colliding.
 3. Cut the new branch from this one's current tip, after the doc/cleanup
    commits in this session are pushed.
 
-### Track breakdown
+### Finding the real overlap, not the phase boundary
+
+The six phases above were organized by *why* — run state, threading, the
+wire — not by *which files*. That's the wrong axis to fan workers out on: a
+phase is a reason, a file is where two workers actually collide. Grouping
+tracks by phase number, the first draft of this section did, produced a real
+bug — Phase 2 items 6 and 7 ended up double-claimed by two different tracks,
+both touching the same lines of `app/server/store.py` and
+`app/server/services.py`. Fixed below by finding every file more than one
+phase item touches, and pulling all of them into one pass first.
+
+**Every file this plan's items touch more than once:**
+
+| File | Touched by | Why it collides |
+|---|---|---|
+| `app/server/store.py` | Phase 2 items 1, 3, 6 | Column shape, `ensure_schema()` removal, and dead-code removal are three edits to the same module header and the same class. |
+| `app/server/services.py` | Phase 2 items 5, 7 | Item 7 fixes `_persist_status`'s log message now; item 5 deletes the whole method later, once the harness is confirmed as sole writer. Sequential on the same lines, not parallel-safe. |
+| `job/harness.py` | Phase 2 item 4; Phase 3 items 1, 2, 3, 5 | The Lakebase writer call and the four-thread restructure are not two changes, they're one change described from two angles. |
+| `job/main.py` | Phase 2 item 4 (new credential wiring); Phase 3 item 5 (named-slot wiring) | Both need to change how `main()` assembles the harness's dependencies. |
+| `resources/*.job.yml` + `app/server/routes/runs.py::JOB_PARAMETER_NAMES` | Phase 2 item 2 (new Lakebase credential params); Phase 4 item 3 (task-scoped run id param) | Same YAML blocks, same frozenset, two unrelated features adding parameters to both at once. |
+
+### Track 0 — lay the seams first, before anything else
+
+One pass, mechanical, no open design decision in any of it — it exists to
+turn the five collisions above into hand-offs instead of races:
+
+1. `app/server/store.py`: the dead-code removal and docstring fix (item 6)
+   only — not item 1's column shape, which still needs sign-off and is a
+   real design decision, not a seam.
+2. `app/server/services.py`: item 7's log-message fix. Item 5's full removal
+   of `_persist_status` comes later, from whichever track lands the
+   harness's Lakebase writer — once that writer is live, deleting the
+   app-side one is a one-line-context change, not a fresh investigation.
+3. `job/harness.py`: item 5's named-slot restructure **only** — writer,
+   channel, cancel token, sequence counter, model handle as named slots on
+   the object, with the thread model and the Lakebase writer call still
+   doing exactly what they do today, just reached through a slot instead of
+   a private attribute. No new thread, no new behavior. This is what turns
+   "two tracks racing on one file" into "one track builds the socket into a
+   slot that already exists, another plugs a database write into a slot
+   that already exists."
+4. `job/main.py`: extract `_build_client`'s "read a scope/id-key/secret-key
+   triple, build one token provider, close over it for the run" into a
+   function any second credential can call — so the Lakebase writer's setup
+   is one call to an existing helper, not a second hand-rolled copy living
+   next to the first.
+5. `resources/*.job.yml` + `JOB_PARAMETER_NAMES`: land the full parameter
+   list both Phase 2 and Phase 4 need — the Lakebase credential's
+   scope/id-key/secret-key names and the task-scoped run id parameter — in
+   one commit, even though the tracks that *use* them land later. Both
+   `app/server/routes/runs.py` and every `resources/model_*.job.yml` change
+   together, once, instead of twice by two different tracks.
+
+Nothing past this point is a design decision — it's the same code that would
+get written anyway, just written once, ahead of time, at exactly the five
+places workers would otherwise collide.
+
+### Track breakdown (after the seams land)
 
 | Track | Phase(s) | Files it owns | Depends on |
 |---|---|---|---|
-| A — cleanup carried over from this session | Phase 2 items 6–7 | `app/server/store.py`, `app/server/services.py` | Nothing. Safe to start immediately; it's dead-code removal and a log-message fix, already scoped exactly by grep in this session. |
-| B — wire freeze | Phase 1 | `app/shared/envelope.py`, `shared/rpc.py`, `app/server/routes/rpc.py`, `docs/message-envelope-spec.md` | Nothing. |
-| C — run state | Phase 2 items 1, 3–7 | `lakebase_ddl/001_run_status.sql`, `app/server/store.py` (schema/DDL parts, not Track A's dead code), `job/requirements.txt`, a new job-side Lakebase writer module, the second credential's job parameters | Phase 0 item 4 (read the sibling branches first). Item 1 is settled, no longer a gate. Needs Track A's docstring fix landed first if both touch `store.py`'s header — coordinate or sequence, don't run fully blind in parallel on the same file. |
-| D — harness concurrency | Phase 3 | `job/harness.py`, `job/ws.py`, `job/main.py` | Track B's version field (item 3) should land first — the controller's dispatch table is easier to write once, not twice. |
-| E — discovery & cross-team | Phase 4 | `app/server/discovery.py`, `resources/*.job.yml` | Nothing. |
-| F — docs & packaging | Phase 5 | `docs/model-expansion-and-packaging.md`, `docs/architecture-diagram.md` | Best started last — it documents what B–E actually did, not what this plan predicted they'd do. |
+| A — run-status schema | Phase 2 item 1 | `lakebase_ddl/001_run_status.sql`, `app/server/store.py` (the column-shape parts) | Track 0. Needs sign-off on the column shape before the DDL is written. |
+| B — wire freeze | Phase 1 | `app/shared/envelope.py`, `shared/rpc.py`, `app/server/routes/rpc.py`, `docs/message-envelope-spec.md` | Nothing. Start immediately. |
+| C — Lakebase writer | Phase 2 items 2, 4, (later) 5 | `job/requirements.txt`, a new job-side Lakebase writer module, plugged into the slot Track 0 item 3 created | Track 0 (the harness slot and the `job/main.py` credential helper). Track A's column shape, to know what it's writing. |
+| D — harness threading | Phase 3 items 1–4 | `job/harness.py` (thread model), `job/ws.py` | Track 0 item 3 (the slot restructure) and Track B's version field — write the controller's dispatch table once, with `hello`'s version already in it. |
+| E — discovery & cross-team | Phase 4 items 1, 2 (item 3's param is already in from Track 0) | `app/server/discovery.py` | Nothing beyond Track 0. |
+| F — docs & packaging | Phase 5 | `docs/model-expansion-and-packaging.md`, `docs/architecture-diagram.md` | Best started last — it documents what A–E actually did. |
 
-**The one real file collision: Track C and Track D both change `job/harness.py`.**
-Phase 2 item 4 calls for the Lakebase writer to be invoked from `emit()`'s
-status path, queued through the controller thread Phase 3 item 5 creates.
-That is not two disjoint changes to the same file, it is one change that
-happens to be described in two phases. Either run C and D as one worker, or
-sequence them: D lands the named-slot restructure first (item 5), then C
-plugs a writer into the slot it creates. Don't run them as two independent
-workers against `job/harness.py` at the same time.
+Every remaining cross-track dependency here is a genuine sequencing need
+(sign-off, a version field existing before it's dispatched on), not a file
+two workers would otherwise fight over — that's what Track 0 bought.
 
 ### Running it
 
@@ -304,14 +356,13 @@ Same two options CLAUDE.md's now-deleted `parallelization-plan.md` used, and
 for the same reasons:
 
 - **One worktree and branch per track**, each its own Claude Code session —
-  true parallelism, no file contention as long as the table above is
-  respected.
+  true parallelism, no file contention once Track 0 has landed.
 - **One orchestrating session**, dispatching each track as a subagent — fine
-  for tracks B, E and F, which touch disjoint files; use worktrees for A/C/D
-  once C and D are actually running concurrently with anything else, since
-  that's the one place a shared-file collision is real rather than
+  for every track in the table above, precisely because Track 0 already
+  removed the one place a shared-file collision was real rather than
   theoretical.
 
-Merge order follows the phase dependencies above: B and E merge whenever
-ready; A anytime, ideally first since nothing depends on it; C and D merge
-together (or D then C); F last, once it has something true to document.
+Merge order: Track 0 first, always — nothing else starts before it merges.
+After that, B and E merge whenever ready; A, C and D follow their own
+dependencies above, in any order relative to each other; F last, once it has
+something true to document.
