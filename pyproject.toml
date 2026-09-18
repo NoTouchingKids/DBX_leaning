@@ -6,6 +6,25 @@ build-backend = "setuptools.build_meta"
 name = "dbx-leaning"
 version = "0.1.0"
 description = "Modelling application platform on Databricks Free Edition"
+# >=3.11, NOT ==3.12.*, because this repo deploys to TWO runtimes on two
+# different Python versions:
+#
+#   serverless jobs   3.12   environment_version 5, per
+#                            [tool.databricks.environment] below
+#   Databricks Apps   3.11   FIXED, and not by choice — an app with a
+#                            `requirements.txt` is installed with pip, and a
+#                            pip-based app is Python 3.11. Only a uv-based app
+#                            (pyproject.toml + uv.lock, and NO
+#                            requirements.txt) can pick its own version.
+#
+# `databricks environments setup-local --serverless-version 5` writes
+# `==3.12.*` here, which is right for the jobs and wrong for the app: one
+# lockfile feeds both, and a resolution valid only on 3.12 produces an
+# `app/requirements.txt` that pip may not be able to install on 3.11.
+#
+# So the floor is 3.11 and the constraint block below still pins the versions
+# serverless actually ships. If a future `setup-local` run resets this line,
+# `tests/deploy/test_bundle.py` fails and says why.
 requires-python = ">=3.11"
 
 # Core = what shared/ needs, and nothing else. shared/ is imported by both
@@ -13,60 +32,128 @@ requires-python = ">=3.11"
 # artefact. Keep it to the envelope's own needs.
 dependencies = [
     "pydantic>=2.7,<3",
-    "msgpack>=1.0,<2",
 ]
 
 [project.optional-dependencies]
-# --- transport tracks -------------------------------------------------
-# No databricks-sdk on either side: both the Statement Execution API and the
-# Jobs API are reached over plain REST with httpx, which CLAUDE.md allows and
-# which keeps every model environment that much smaller.
+# Two extras, because there are two deployable units and no model needs one.
+#
+# The per-model extras that used to be here — gurobi, forecasting, mcmc,
+# bayesian, nn, scenario, streaming, annealing, ortools, panel, and the
+# `models` aggregate — are on `dev` with the models they scoped. That split was
+# the good part of v3's packaging and it comes back with them.
+#
+# `annealing` came back first and did NOT bring its extra, which is the whole
+# reason it was ported first: the extra in v3 was an empty list, so the model
+# that reads Unity Catalog and writes a Delta table still adds nothing to any
+# environment. A model that needs a solver declares it in its own
+# `models/<name>/pyproject.toml` now, not here.
+#
+# The SDK note that used to sit here has changed, and v4 reverses half of it:
+# `databricks-sdk` is adopted for TOKEN ACQUISITION AND REFRESH, because
+# hand-rolling that cost 343 lines and two deploy bugs. The Jobs API stays
+# plain httpx — a few REST calls do not justify the weight in every model
+# environment. See docs/v4-rewrite-plan.md, "Auth: the SDK, for credentials
+# only". Neither is wired up yet.
 app = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "httpx>=0.27",
+    "psycopg[binary]>=3.2",
 ]
 job = [
     "websockets>=12",
     "httpx>=0.27",
-]
-# delta-rs is the *preferred* write_batch implementation; Spark is the
-# fallback and needs no pin — on Databricks serverless a session already
-# exists (docs/free-edition-constraints.md).
-delta = [
-    "deltalake>=0.18",
-    "pyarrow>=15",
-]
-
-# --- model tracks -----------------------------------------------------
-# gurobipy: the bundled restricted licence has a FIXED EXPIRY PER RELEASE
-# and fails hard, not gracefully, once past it (docs/free-edition-constraints.md).
-#
-#   PINNED:  gurobipy 13.x
-#   BUNDLED LICENCE EXPIRY:  2027-11-29  (verified 2026-08-22 against 13.0.2)
-#
-# Re-verify whenever this pin moves:  python scripts/check_gurobi_licence.py
-gurobi = ["gurobipy>=13,<14"]
-forecasting = ["numpy>=1.26", "scikit-learn>=1.4"]
-mcmc = ["numpy>=1.26", "emcee>=3.1"]
-scenario = ["numpy>=1.26"]
-# Rolling-origin backtest: numpy's lstsq, deliberately nothing heavier.
-# The platform value here is the chunked result path, not the modelling.
-streaming = ["numpy>=1.26"]
-models = [
-    "dbx-leaning[gurobi,forecasting,mcmc,scenario,streaming]",
+    "databricks-sdk>=0.30",
 ]
 
 [dependency-groups]
 # PEP 735 group, not an extra: `uv sync` installs these by default for
 # development, and nothing that installs the package can pull them in.
 dev = [
+    # The models this branch has, installed editable so the suite can drive
+    # them. They are DEV dependencies and must stay ones: the platform does not
+    # depend on any particular model — the harness finds whatever is installed
+    # by entry point — and, concretely, the job environment installs this
+    # repo's root with pip, which cannot resolve `dbx-model-heartbeat` from
+    # PyPI. Only `[tool.uv.sources]` below knows where it lives, and only uv
+    # reads that. A model in `[project.dependencies]` fails the deploy.
+    #
+    # Two of them now, and the second is the one that proves the rule rather
+    # than following it: `dbx-model-annealing` is a real model — it reads Unity
+    # Catalog and writes a results table — and its own `dependencies` list is
+    # still empty. Nothing about being a model costs an environment anything.
+    "dbx-model-heartbeat",
+    "dbx-model-annealing",
+    # The shared model template. A DEV dependency here for the same reason the
+    # heartbeat is one: on Databricks it is provided by the serverless
+    # environment, not resolved from an index, so it must not appear in
+    # `[project.dependencies]` where pip would go looking for it.
+    "dbx-modelkit",
+    # Follows the serverless environment rather than leading it. The
+    # `constraint-dependencies` block below is generated by
+    # `databricks environments setup-local` and pins jsonschema to ~=4.23.0,
+    # so asking for >=4.26 here made the workspace unresolvable. Where the
+    # environment has an opinion, take it — that is the whole point of
+    # resolving against it locally.
+    "jsonschema>=4.23",
+    # Embedded Postgres for tests/app/test_run_store.py, and the one dependency
+    # here that does not exist everywhere: it publishes wheels for linux x86_64,
+    # macOS, and Windows amd64, and none for aarch64 Linux. Unmarked, `uv sync`
+    # is unsatisfiable on an ARM Linux box — which includes a Databricks
+    # machine, so a deploy driven from inside the workspace failed on a test
+    # dependency it had no reason to install:
+    #
+    #   × No solution found when resolving dependencies:
+    #   ╰─▶ Because pgserver==0.1.4 has no wheels with a matching platform tag
+    #       (e.g., `manylinux_2_39_aarch64`)
+    #
+    # The marker makes it absent rather than fatal there. The test already
+    # `pytest.importorskip`s it, so the suite reports a skip and everything
+    # else runs.
+    "pgserver>=0.1.4; (sys_platform == 'linux' and platform_machine == 'x86_64') or sys_platform == 'darwin' or (sys_platform == 'win32' and platform_machine == 'AMD64')",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "pyyaml>=6.0.3",
     "ruff>=0.4",
     "ty>=0.0.1a1",
+    # Added by `databricks environments setup-local`, and MARKED because it
+    # requires Python >=3.12,<3.13 — which makes the whole workspace
+    # unresolvable once `requires-python` drops to >=3.11 for the app:
+    #
+    #   Because the requested Python version (>=3.11) does not satisfy
+    #   Python>=3.12,<3.13 and databricks-connect depends on
+    #   Python>=3.12,<3.13, we can conclude that ... cannot be used.
+    #
+    # The marker confines it to the version local dev and the jobs actually
+    # run on, so the 3.11 split resolves without it. Nothing in this repo
+    # imports it: SQL goes through the Statement Execution REST API over httpx,
+    # and the job writes JSONL part files rather than using Spark. Pass
+    # `--constraints-only` to setup-local to skip adding it at all.
+    "databricks-connect~=18.0.0 ; python_version >= '3.12'",
 ]
+
+[tool.uv.workspace]
+# Every model is its own distribution, and this is what makes `uv sync` install
+# them all editable in one go. A model added under `models/` is picked up by
+# the glob; nothing central lists them, which is the point — the harness finds
+# them by entry point, not by a registry that has to be kept in agreement.
+members = ["models/*", "libs/*"]
+
+[tool.uv.sources]
+# All three are workspace members, and this block is what makes `uv sync`
+# install them from the tree instead of looking on PyPI, where none of them
+# exists. Commenting it out makes `uv sync` fail outright, which is the good
+# failure — the bad one would be a silent fall through to an index.
+# `editable` is not spelled here: a workspace member is installed editable
+# already, and uv >=0.8 rejects both keys together.
+#
+# `[tool.uv.workspace] members` globs `models/*`, so a new model is FOUND
+# without editing anything. It is still listed here and in the dev group above,
+# because being a workspace member says where a package lives, not that
+# anything installs it.
+dbx-model-heartbeat = { workspace = true }
+dbx-model-annealing = { workspace = true }
+dbx-modelkit = { workspace = true }
 
 [tool.uv]
 # One resolution covering every extra, so the lockfile describes a single
@@ -74,12 +161,296 @@ dev = [
 # subset of it (--extra job --extra gurobi), never a different resolution.
 default-groups = ["dev"]
 
+# One place naming every model and the extra that carries its libraries.
+# Both scripts/export_requirements.py and scripts/build_model_wheel.py read
+# this, because they were each keeping their own copy of the same fact — and
+# a model registered in one but not the other deploys with the wrong
+# dependencies rather than failing.
+#
+# Directory names and extra names do not all match, which is exactly why this
+# is explicit rather than inferred.
+# `[tool.dbx-leaning.models]` — the model name -> dependency extra map — is
+# gone with the models. It was read through `scripts/_registry.py` by the
+# requirements exporter and the wheel builder, and it existed because those two
+# had each kept their own copy and could disagree. Restore all three together
+# or none: a registry with one reader is just a dict in the wrong file.
+# managed by databricks environments setup-local — do not edit
+constraint-dependencies = [
+    "aiohappyeyeballs~=2.4.4",
+    "aiohttp~=3.11.10",
+    "aiosignal~=1.2.0",
+    "annotated-doc~=0.0.4",
+    "annotated-types~=0.7.0",
+    "anyio~=4.7.0",
+    "argon2-cffi~=21.3.0",
+    "argon2-cffi-bindings~=21.2.0",
+    "arro3-core~=0.6.5",
+    "arrow~=1.3.0",
+    "asttokens~=3.0.0",
+    "astunparse~=1.6.3",
+    "async-lru~=2.0.4",
+    "attrs~=24.3.0",
+    "azure-common~=1.1.28",
+    "azure-core~=1.37.0",
+    "azure-identity~=1.20.0",
+    "azure-mgmt-core~=1.6.0",
+    "azure-mgmt-web~=8.0.0",
+    "azure-storage-blob~=12.28.0",
+    "azure-storage-file-datalake~=12.22.0",
+    "babel~=2.16.0",
+    "beautifulsoup4~=4.12.3",
+    "black~=24.10.0",
+    "bleach~=6.2.0",
+    "boto3~=1.40.45",
+    "botocore~=1.40.45",
+    "cachetools~=5.5.1",
+    "certifi~=2025.4.26",
+    "cffi~=1.17.1",
+    "chardet~=4.0.0",
+    "charset-normalizer~=3.3.2",
+    "click~=8.1.8",
+    "cloudpickle~=3.0.0",
+    "comm~=0.2.1",
+    "contourpy~=1.3.1",
+    "cryptography~=44.0.1",
+    "cycler~=0.11.0",
+    "cython~=3.1.5",
+    "databricks-agents~=1.9.1",
+    "databricks-sdk~=0.67",
+    "dataclasses-json~=0.6.7",
+    "debugpy~=1.8.11",
+    "decorator~=5.1.1",
+    "defusedxml~=0.7.1",
+    "deltalake~=1.1.4",
+    "deprecated~=1.2.18",
+    "docstring-to-markdown~=0.11",
+    "executing~=1.2.0",
+    "facets-overview~=1.1.1",
+    "fastapi~=0.128.0",
+    "fastjsonschema~=2.21.1",
+    "filelock~=3.17.0",
+    "fonttools~=4.55.3",
+    "fqdn~=1.5.1",
+    "frozenlist~=1.5.0",
+    "fsspec~=2023.5.0",
+    "gitdb~=4.0.11",
+    "gitpython~=3.1.43",
+    "google-api-core~=2.28.1",
+    "google-auth~=2.47.0",
+    "google-cloud-core~=2.5.0",
+    "google-cloud-storage~=3.7.0",
+    "google-crc32c~=1.8.0",
+    "google-resumable-media~=2.8.0",
+    "googleapis-common-protos~=1.65.0",
+    "grpcio~=1.67",
+    "grpcio-status~=1.67",
+    "h11~=0.16.0",
+    "hf-xet~=1.2.0",
+    "httpcore~=1.0.9",
+    "httpx~=0.28.1",
+    "huggingface-hub~=1.2.4",
+    "idna~=3.7",
+    "importlib-metadata~=8.5.0",
+    "iniconfig~=1.1.1",
+    "ipyflow-core~=0.0.209",
+    "ipykernel~=6.29.5",
+    "ipython~=8.30.0",
+    "ipython-genutils~=0.2.0",
+    "ipywidgets~=7.8.1",
+    "isodate~=0.7.2",
+    "isoduration~=20.11.0",
+    "jedi~=0.19.2",
+    "jinja2~=3.1.6",
+    "jiter~=0.12.0",
+    "jmespath~=1.0.1",
+    "joblib~=1.4.2",
+    "json5~=0.9.25",
+    "jsonpatch~=1.33",
+    "jsonpointer~=3.0.0",
+    "jsonschema~=4.23.0",
+    "jsonschema-specifications~=2023.7.1",
+    "jupyter-client~=8.6.3",
+    "jupyter-core~=5.7.2",
+    "jupyter-events~=0.12.0",
+    "jupyter-lsp~=2.2.5",
+    "jupyter-server~=2.15.0",
+    "jupyter-server-terminals~=0.5.3",
+    "jupyterlab~=4.3.4",
+    "jupyterlab-pygments~=0.3.0",
+    "jupyterlab-server~=2.27.3",
+    "jupyterlab-widgets~=1.1.11",
+    "kiwisolver~=1.4.8",
+    "langchain-core~=1.2.6",
+    "langchain-openai~=1.1.6",
+    "langsmith~=0.6.1",
+    "litellm~=1.75.9",
+    "markdown-it-py~=2.2.0",
+    "markupsafe~=3.0.2",
+    "marshmallow~=3.26.2",
+    "matplotlib~=3.10.0",
+    "matplotlib-inline~=0.1.7",
+    "mccabe~=0.7.0",
+    "mdurl~=0.1.0",
+    "mistune~=3.1.2",
+    "mlflow-skinny~=3.8.1",
+    "mmh3~=5.2.0",
+    "msal~=1.34.0",
+    "msal-extensions~=1.3.1",
+    "multidict~=6.1.0",
+    "mypy-extensions~=1.0.0",
+    "nbclient~=0.10.2",
+    "nbconvert~=7.16.6",
+    "nbformat~=5.10.4",
+    "nest-asyncio~=1.6.0",
+    "nodeenv~=1.10.0",
+    "notebook~=7.3.2",
+    "notebook-shim~=0.2.4",
+    "numpy~=2.1.3",
+    "openai~=2.14.0",
+    "opentelemetry-api~=1.39.1",
+    "opentelemetry-proto~=1.39.1",
+    "opentelemetry-sdk~=1.39.1",
+    "opentelemetry-semantic-conventions~=0.60b1",
+    "orjson~=3.11.5",
+    "overrides~=7.4.0",
+    "packaging~=24.2",
+    "pandas~=2.2.3",
+    "pandocfilters~=1.5.0",
+    "parso~=0.8.4",
+    "pathspec~=0.10.3",
+    "patsy~=1.0.1",
+    "pexpect~=4.8.0",
+    "pillow~=11.1.0",
+    "plotly~=5.24.1",
+    "pluggy~=1.5.0",
+    "prometheus-client~=0.21.1",
+    "prompt-toolkit~=3.0.43",
+    "propcache~=0.3.1",
+    "proto-plus~=1.27.0",
+    "protobuf~=5.29.4",
+    "psutil~=5.9.0",
+    "psycopg2~=2.9.11",
+    "ptyprocess~=0.7.0",
+    "pure-eval~=0.2.2",
+    "py4j~=0.10.9.9",
+    "pyarrow~=21.0.0",
+    "pyasn1~=0.4.8",
+    "pyasn1-modules~=0.2.8",
+    "pyccolo~=0.0.71",
+    "pycparser~=2.21",
+    "pydantic~=2.10.6",
+    "pydantic-core~=2.27.2",
+    "pyflakes~=3.2.0",
+    "pygments~=2.19.1",
+    "pyiceberg~=0.10.0",
+    "pyjwt~=2.10.1",
+    "pyodbc~=5.2.0",
+    "pyparsing~=3.2.0",
+    "pyright~=1.1.394",
+    "pyroaring~=1.0.3",
+    "pytest~=8.3.5",
+    "python-dateutil~=2.9.0.post0",
+    "python-dotenv~=1.2.1",
+    "python-json-logger~=3.2.1",
+    "python-lsp-jsonrpc~=1.1.2",
+    "python-lsp-server~=1.12.2",
+    "pytoolconfig~=1.2.6",
+    "pytz~=2024.1",
+    "pyyaml~=6.0.2",
+    "pyzmq~=26.2.0",
+    "referencing~=0.30.2",
+    "regex~=2024.11.6",
+    "requests~=2.32.3",
+    "requests-toolbelt~=1.0.0",
+    "rfc3339-validator~=0.1.4",
+    "rfc3986-validator~=0.1.1",
+    "rich~=13.9.4",
+    "rope~=1.13.0",
+    "rpds-py~=0.22.3",
+    "rsa~=4.9.1",
+    "s3transfer~=0.14.0",
+    "scikit-learn~=1.6.1",
+    "scipy~=1.15.3",
+    "seaborn~=0.13.2",
+    "send2trash~=1.8.2",
+    "shellingham~=1.5.4",
+    "six~=1.17.0",
+    "smmap~=5.0.0",
+    "sniffio~=1.3.0",
+    "sortedcontainers~=2.4.0",
+    "soupsieve~=2.5",
+    "sqlparse~=0.5.5",
+    "stack-data~=0.6.3",
+    "starlette~=0.50.0",
+    "strictyaml~=1.7.3",
+    "tenacity~=9.0.0",
+    "terminado~=0.17.1",
+    "threadpoolctl~=3.5.0",
+    "tiktoken~=0.12.0",
+    "tinycss2~=1.4.0",
+    "tokenize-rt~=6.1.0",
+    "tokenizers~=0.22.2",
+    "tomli~=2.0.1",
+    "tornado~=6.5.1",
+    "tqdm~=4.67.1",
+    "traitlets~=5.14.3",
+    "typer-slim~=0.21.1",
+    "types-python-dateutil~=2.9.0.20251115",
+    "typing-extensions~=4.12.2",
+    "typing-inspect~=0.9.0",
+    "tzdata~=2024.1",
+    "ujson~=5.10.0",
+    "uri-template~=1.3.0",
+    "urllib3~=2.3.0",
+    "uuid-utils~=0.12.0",
+    "uvicorn~=0.40.0",
+    "wcwidth~=0.2.5",
+    "webcolors~=25.10.0",
+    "webencodings~=0.5.1",
+    "websocket-client~=1.8.0",
+    "whatthepatch~=1.0.2",
+    "whenever~=0.7.3",
+    "widgetsnbextension~=3.6.6",
+    "wrapt~=1.17.0",
+    "yapf~=0.40.2",
+    "yarl~=1.18.0",
+    "zipp~=3.21.0",
+    "zstandard~=0.23.0",
+]
+# end managed by databricks environments setup-local
+
 [tool.setuptools]
-packages = ["shared", "app", "job", "models"]
+# Subpackages are listed, not globbed: `package-dir` maps two of these out of
+# `app/`, and setuptools' `find` directive does not see through that cleanly.
+# `server.routes` missing here was silent — nothing outside `app/` imports it —
+# but the metadata said the distribution carried `server` when it carried half.
+packages = ["shared", "server", "server.routes", "job"]
+# `models` is absent on purpose: each model is its own distribution under
+# `models/`, installed as a uv workspace member, and this package must not
+# carry any of them. See models/heartbeat/pyproject.toml.
+#
+# `server` AND `shared` are mapped out of `app/` because that folder is the
+# deployed app and nothing above it travels with it. `shared` living there is
+# the part that looks wrong and is not: Databricks Apps is handed `app/` as
+# its `source_code_path`, so the envelope has to be INSIDE it or the app
+# cannot import what it parses. Putting the canonical copy there and mapping
+# it back is what lets the job have the same module without a second copy —
+# the job installs this distribution and setuptools puts `shared` on its path
+# like any other package.
+#
+# The alternative, and what v3 did, was a tracked copy at `app/shared/` plus a
+# sync script plus a test that failed when they drifted. One directory in a
+# slightly odd place is the cheaper half of that trade.
+package-dir = { server = "app/server", shared = "app/shared" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# The repo root for `job`; `app/` for `server` and `shared`, which is exactly
+# where the deployed app finds them. There is no longer a second copy for the
+# order to matter against — the copies, the sync script and the drift test all
+# went when the units started installing packages instead of syncing files.
+pythonpath = [".", "app"]
 filterwarnings = ["error::DeprecationWarning:shared.*"]
 markers = [
     "requires_gurobi: needs gurobipy installed (bundled restricted licence)",
@@ -92,6 +463,13 @@ markers = [
 line-length = 100
 target-version = "py311"
 
+[tool.ty.environment]
+# `app/` is a source root, not just a folder: `server` and `shared` both live
+# under it (see the package-dir note above), which is exactly what
+# `[tool.pytest.ini_options] pythonpath` says and what the deployed app sees.
+# Without this, every `from shared.x import ...` reads as unresolved.
+extra-paths = ["app"]
+
 [tool.ty.src]
 # Source only. The test suite is excluded deliberately, not because it is
 # exempt from care: its fixtures splat dicts into dataclasses, inject
@@ -99,7 +477,10 @@ target-version = "py311"
 # one of which a static checker objects to and none of which is a defect.
 # Contorting them to satisfy the checker would cost readability and buy
 # nothing. Scoped this way, `uv run ty check` is a signal that sits at zero.
-include = ["app", "job", "models", "shared", "scripts"]
+# `app/server`, not `app` — `app/client` is TypeScript and `app/dist` is the
+# built bundle. `models/` is out too: a model is an independent distribution
+# and is checked in its own right, not as part of the platform.
+include = ["app/server", "app/shared", "job", "libs/modelkit", "scripts"]
 
 [tool.ty.rules]
 # ty is pre-1.0, so it runs advisory (`uv run ty check`) rather than as a CI
@@ -111,9 +492,26 @@ include = ["app", "job", "models", "shared", "scripts"]
 # for exactly that reason (docs/free-edition-constraints.md).
 unresolved-import = "warn"
 
+[tool.ruff.lint.per-file-ignores]
+# Databricks notebook source files. They are valid Python — that is the format
+# the workspace syncs and how they stay diffable — but they are read top to
+# bottom by a person, so an import belongs beside the cell that needs it. E402
+# (imports not at top) and F821 (`dbutils`, injected by the runtime) are the
+# notebook format showing through, not defects.
+"notebooks/*.py" = ["E402", "F821"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # `class X(str, Enum)` rather than StrEnum, deliberately: the envelope's enums
-# are serialised by Pydantic, msgpack and JSON, and the explicit str mixin is
+# are serialised by Pydantic and JSON, and the explicit str mixin is
 # the form every one of those handles identically across versions.
 ignore = ["UP042"]
+
+[tool.ruff.lint.isort]
+# `server` lives at `app/server`, not at the repo root, so ruff's automatic
+# first-party detection misses it and sorts it in with third-party imports.
+# Everything here is ours; say so rather than let the import blocks churn.
+known-first-party = ["server", "shared", "job", "scripts"]
+
+[tool.databricks.environment]
+environment_version = "5"

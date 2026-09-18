@@ -5,18 +5,62 @@ Apply in order. Idempotent — every statement is `IF NOT EXISTS`.
 ```bash
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/001_core_tables.sql
 databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/002_model_results.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/003_app_volume.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/004_telemetry_volume.sql
 ```
 
-| File | What |
-|---|---|
-| `001_core_tables.sql` | `run_status`, `run_events`, `run_logs`, `run_progress`, `run_results_meta` |
-| `002_model_results.sql` | One results table per model family |
+| File | What | Skipping it costs |
+|---|---|---|
+| `001_core_tables.sql` | `run_status`, `run_events`, `run_logs`, `run_progress`, `run_results_meta` | Every durable write fails at the end of a run |
+| `002_model_results.sql` | One results table per model family | That model's results are lost; its telemetry still lands |
+| `003_app_volume.sql` | `app_store`, the app's durable filesystem | `/healthz` reports `volume` degraded; nothing on the run path is affected |
+| `004_telemetry_volume.sql` | `telemetry`, the job's own volume — **v4 only** | v4's durable path has nowhere to write. Nothing in v3 reads or writes it |
 
-Two things worth knowing before changing anything here:
+001 is mandatory for v3. 002 costs you a model's results; 003 is genuinely
+optional and degrades cleanly — see `resources/app.yml` for the grants that go
+with it.
+
+**004 belongs to v4** (`docs/v4-rewrite-plan.md`) and is inert for v3 — nothing
+deployed today touches it. It is here rather than on a branch of its own
+because a volume is cheap, idempotent, and needed before Slice 0's probe can
+run. Read its header before applying: **it carries placeholder principals that
+must be filled in**, and the fact that the app gets no grant on it is the
+design, not an omission.
+
+**Do not add a deployment-status claim to this file.** An earlier version said
+these had never been executed; the Aug 25–27 history shows otherwise, and the
+line survived long enough to mislead. Status belongs in git and in the
+workspace — see the rule at the top of `docs/v4-rewrite-plan.md`. What is fair
+to say is narrower and stays true: nothing here is exercised by the test
+suite, so a syntax error surfaces on a workspace and nowhere else. Read
+changes carefully rather than trusting that what is committed works.
+
+Four things worth knowing before changing anything here:
 
 - **Column shapes mirror `shared/tables.py`.** `to_row()` produces exactly
   these keys. Change one, change both — a mismatch surfaces at write time on a
   real workspace and nowhere in the test suite.
+- **The per-model tables mirror each model's result rows, and nothing checks
+  that.** Not one column is compared anywhere. The two failure modes are not
+  symmetric: a column no model writes is harmless clutter, but **a row key with
+  no column is a silently dropped field**. Diff them by hand when you touch
+  either side.
+  **What to diff against changed in v4.** A model no longer hands rows to the
+  harness — `job/delta.py` is gone, and each model writes its own table in
+  `poststep` through Spark. So the thing to compare a table with is the model's
+  own row builder and the schema tuple it writes with, e.g.
+  `models/annealing/annealing/model.py::RESULT_SCHEMA`, which names every
+  column and its SQL type in order. `run_id` and `chunk_index` are part of that
+  now: `job/emitter.py` used to stamp them and no longer exists, so a model
+  that does not supply them writes nulls into two NOT NULL columns.
+  (v3 audit, across all eleven models on 2026-08-25: no mismatches, and no NOT
+  NULL column received a null on any path. Only `results_annealing` has been
+  re-checked against a v4 model.)
+- **`main.dbx_leaning` is hardcoded here and is `${var.catalog}` /
+  `${var.schema}` everywhere else.** These files are applied by hand and
+  `databricks sql query --file` does no substitution, so retargeting a
+  deployment means editing both files in the same commit that changes the
+  variable. See the header of `001_core_tables.sql`.
 - **JSON `STRING` columns, not `VARIANT`.** VARIANT support in the Python
   `deltalake` bindings lags the Rust kernel (delta-rs #3637). CLAUDE.md rates
   VARIANT nice-to-have; this is the documented fallback.
@@ -34,12 +78,16 @@ ALTER TABLE main.dbx_leaning.results_forecasting
                data_rows BIGINT, data_fallback_reason STRING);
 ```
 
-This matters more for the Spark writer than for delta-rs: delta-rs writes with
-`schema_mode="merge"` and would add the column itself, while Spark's
-`saveAsTable` append fails on a column the table does not have. Since the
-writer is chosen at startup by what is importable, the same code can succeed on
-one deployment and fail on another — so treat the DDL as the authority and keep
-it ahead of the models.
+There is no writer that papers over this. An earlier version of this file said
+delta-rs would add the column itself with `schema_mode="merge"`, so the
+outcome depended on which writer a deployment happened to select. That is no
+longer true and was never a safety net: **Spark is the only durable write
+path**, `saveAsTable` append fails on a column the table does not have, and
+`DeltaRsWriter` raises `NotImplementedError` rather than doing anything
+(`job/delta.py` — it takes a storage URI, not a UC name, and given a
+three-part name it would write to a local directory without erroring). So the
+DDL is the authority unconditionally: keep it ahead of the models, and apply
+the `ALTER TABLE` wherever it has already run.
 
 Grants are deliberately not in these files: the per-model results tables exist
 separately *so* they can be granted separately, and who should see what is a

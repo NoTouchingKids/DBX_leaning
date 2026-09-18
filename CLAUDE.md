@@ -7,10 +7,14 @@ map, not the territory. If something here conflicts with a file in `docs/`,
 ## What this is
 
 A reusable internal platform on **Databricks Free Edition**: a React SPA +
-async FastAPI app triggers and observes long-running analytical models
-(Gurobi optimisation, scenario modelling, ML forecasting, MCMC, one more)
-that run as independent Databricks Jobs. Live progress/logs/results stream
-back to the browser. Durable state lands in Unity Catalog via Delta.
+async FastAPI app triggers and observes long-running analytical models —
+eleven of them today: two Gurobi MILPs (scheduling, routing), an OR-Tools
+CP-SAT job shop, scenario modelling, ML forecasting, MCMC, a conjugate
+Bayesian A/B comparison, a small torch classifier, a chunked rolling
+backtest, a simulated-annealing knapsack and a bank of per-group curve fits
+over panel data — that run as independent Databricks Jobs. Live progress,
+logs and results stream back to the browser. Durable state lands in Unity
+Catalog via Delta.
 
 This is a **rewrite**, not the first attempt. Two earlier builds exist in
 this project's history (a Flask+Streamlit polling POC, then a FastAPI+
@@ -36,8 +40,13 @@ sources. Design against them; do not build past them speculatively.
   default 10). This is why writes go through Delta, not the warehouse.
 - **Outbound internet restricted to trusted domains.** This is why Gurobi
   uses the bundled restricted licence, not WLS (WLS needs to reach
-  `token.gurobi.com`).
-- Lakebase (managed Postgres) **is** available — the fallback fan-out
+  `token.gurobi.com`). It is also why a model **cannot fetch data over the
+  internet at run time**: the `samples`-only restriction was lifted on
+  2026-08-24 and external data is welcome, but it has to be landed in Unity
+  Catalog first — a volume, Marketplace, or Delta Sharing. See
+  `docs/free-edition-constraints.md`, "Getting data in from outside".
+- Lakebase (managed Postgres) **is** available, and is used: it holds
+  `run_status` (see Conventions), and it is also the fallback fan-out
   mechanism if this ever needs more than one app worker.
 
 ## Transport architecture (settled — do not redesign without reading `docs/architecture.md` first)
@@ -75,8 +84,8 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **Results are not best-effort.** Write results whenever the code reaches
   that point in execution, regardless of terminal status — a cancelled run
   keeps its incumbent. But a run must not report `SUCCEEDED` if its result
-  write itself failed; track `result_row_count` so "zero results" is
-  distinguishable from "didn't get that far."
+  write itself failed; the `result` message's `row_count` is what makes "zero
+  results" distinguishable from "didn't get that far."
 - **Packing:** msgpack job→app and in the Delta buffer; JSON on the SSE
   stream to the browser (native, readable in devtools, already compressed by
   the transport). Validation is Pydantic, kept **outside** the wire format —
@@ -93,9 +102,25 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **ruff for lint, ty for types — ty advisory, not a gate.** ty is pre-1.0;
   run it, fix what it finds, do not fail a build on a young checker's opinion.
   It is scoped to source, not tests (see the note in `pyproject.toml`).
-- **Async-first FastAPI.** SQL via the Databricks SDK / REST API, not
-  `databricks-sql-connector`, not Spark from the app. `httpx` for non-blocking
-  HTTP.
+- **Async-first FastAPI.** SQL via the Statement Execution REST API over
+  `httpx` — not `databricks-sql-connector`, not Spark from the app, and not
+  the `databricks-sdk` either: it is deliberately absent from every
+  dependency set, because the two APIs this needs (Statement Execution and
+  Jobs) are a few plain REST calls and the SDK's weight would be paid by
+  every model environment.
+- **Run state lives in Lakebase (Postgres); telemetry lives in Delta.**
+  `run_status` is the one OLTP-shaped thing here — one row per run, updated on
+  every transition, point-looked-up. Delta is poor at that shape and reading
+  it costs warehouse *uptime*. Postgres also buys what Delta structurally
+  cannot: a primary key on `run_id`, so `set_status()`'s upsert creates the
+  row on first write and updates it on every one after. **This does not
+  enforce the account's concurrency ceiling** — an earlier design had a
+  count-and-claim transaction do that at launch; it's dead code today
+  (nothing calls it — see `routes/runs.py::trigger_run()`'s own docstring
+  and `docs/v4-rewrite-plan.md`'s "Run state" section). Every job resource
+  sets `queue.enabled`, so Databricks itself queues a run past the ceiling
+  instead of this app tracking or refusing it. Everything append-only —
+  logs, progress, events, results — stays in Delta. See `app/server/store.py`.
 - **No ORM.** Plain parameterised SQL text, bound parameters always —
   untyped parameters get compared as strings server-side (`"2" > "12"`), a
   bug the first build hit twice.
@@ -107,38 +132,166 @@ read back from Delta. Full spec: `docs/message-envelope-spec.md`.
 - **Gurobi: bundled restricted licence only for this build.** No WLS. Cap is
   2000 variables / 2000 constraints (200 quadratic) — size models to fit.
   The bundled licence has **a fixed expiry per gurobipy release**; whatever
-  version is pinned, record its expiry next to the pin.
-- **Delta writes: delta-rs preferred, Spark fallback**, behind one
-  `write_batch(table, rows)` interface, implementation chosen once at
-  startup. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
+  version is pinned, record its expiry next to the pin. A problem that will
+  not fit has somewhere to go: `models/ortools_jobshop` (on `dev`) is CP-SAT,
+  Apache-2.0, with no licence file, no expiry and no size cap at all.
+- **Delta writes go through Spark**, behind one `write_batch(table, rows)`
+  interface, implementation chosen once at startup. delta-rs remains the
+  target but is **not implemented and must not be selected**: it takes a
+  storage URI, not a UC name, and given a three-part name it writes to a
+  local directory without erroring — a run would report SUCCEEDED with its
+  telemetry in a container that is about to disappear. It raises
+  `NotImplementedError` rather than doing that. Building it needs credential
+  vending; see `job/delta.py`. Flush on **size ≥ 1 MB OR age ≥ 30s (configurable) OR
   end-of-run** — the age bound is what caps data loss on a crash; size alone
   is not a durability guarantee.
+- **Secrets are read with `dbutils.secrets.get`, in the job.** Never a job
+  parameter — those come back from `databricks jobs get-run` and are shown in
+  the run UI — and never an environment variable, which a serverless task has
+  no field for anyway (`spark_python_task` takes only `parameters`,
+  `python_file`, `source`). A job parameter may carry the scope and key NAMES,
+  which are not credentials. `job/auth.py::read_secret` is the one place that
+  does this; its Secrets-API fallback exists solely because `run_local` runs
+  off-platform, where there is no `dbutils`. **The app is the exception and
+  cannot follow the rule:** an Apps container is not a Databricks runtime, so
+  its only route is a declared secret resource surfaced as an env var.
 - **VARIANT is nice-to-have, not required.** Fall back to a JSON string
   column if the environment doesn't support it cleanly.
-- **A model is a plain Python object, not a class implementing an ABC.**
-  Duck-typed discovery (look for a known set of method/attribute names) over
-  an inheritance hierarchy — see `docs/architecture.md` for why. A model
-  emits envelope-shaped messages to a callback it's handed; it does not know
-  about WebSockets, Delta, or FastAPI.
+- **A model is discovered structurally, never by its base class.** The
+  harness looks for a known set of method names — see `docs/architecture.md`
+  for why duck typing beat an inheritance hierarchy. A model emits
+  envelope-shaped messages to a callback it's handed; it does not know about
+  WebSockets, Delta, or FastAPI.
+- **`libs/modelkit` is a template, and templates are optional.** This rule
+  used to read "not a class implementing an ABC", and `modelkit.Model` IS an
+  ABC — so read the rule as it was meant: nothing about being a model depends
+  on inheriting anything. `job/loader.py` does not import `modelkit` and never
+  will. Subclassing gets you the run loop, cancel polling, progress arithmetic
+  and an interruptible sleep for free; overriding `run()` or ignoring the
+  template entirely leaves you just as much a model.
+- **The template ships as a serverless ENVIRONMENT dependency, not a model
+  dependency.** Every model environment installs `libs/modelkit`; no model
+  declares it. That is the pattern in
+  `docs/docs-databricks-com-aws-en-compute-serverless-dependencies.md`
+  ("Create common tools to share across your workspace") and the same rule
+  `pyspark` already follows here — which is why `models/heartbeat` still says
+  `dependencies = []`.
 
 ## Repo layout (target)
 
 ```
-app/            FastAPI application (async, SSE, ServiceHub, whoami)
-job/            Job harness (WS client, HTTP push, Delta writer, model loader)
-models/         One package per model — gurobi_scheduling/, scenario/,
-                forecasting/, mcmc/, streaming_results/
-shared/         The message envelope + protocol helpers, imported by both
-                app/ and job/ (and indirectly by models/ via the callback
-                they're handed — models never import shared/ directly)
-frontend/       React SPA (back burner until app/job/one model works)
-uc_ddl/         Unity Catalog DDL
-entrypoints/    What a Databricks job runs (workspace-file sync, not a wheel)
-resources/      One job definition per model — see below
-deploy/         Generated per-model requirements, and the deployment guide
+app/            THE DEPLOYED APP — everything it needs, nothing else. This
+                whole folder is `source_code_path`; see the note below
+  server/       FastAPI application (async, SSE, ServiceHub, whoami)
+  client/       React SPA source. Never deployed — `vite.config.ts` writes
+                `../dist` and the bundle excludes `app/client/**` wholesale
+  dist/         The built SPA. COMMITTED, because a deploy driven from inside
+                Databricks has no Node runtime and sees only tracked files
+  shared/       THE message envelope + RPC frames. The canonical copy, not a
+                copy of one — it lives here because the app deploys alone and
+                cannot reach outside this folder. The job gets the same module
+                by installing the repo; see the note below
+  app.yaml      Command + env read by the RUNTIME. `resources/app.yml` says
+                the same to the BUNDLE. A deploy that is not `bundle deploy`
+                reads this and nothing else — without it, "No command to run"
+  requirements.txt  App deps, where Databricks Apps looks for them
+job/            THE HARNESS. Loads a model, drives it, gets its messages onto
+                the durable and live paths. Carries no model
+  run_model.py  What a Databricks task runs — 41 lines, no path machinery
+  local.py      `run_local(model, **config)` — the same harness, no Databricks
+  (harness)     WS/RPC client, telemetry part-file writer, model loader, auth
+  requirements.txt  The harness floor, and the whole environment. A model's
+                libraries are the model's own business
+libs/           SHARED LIBRARIES INSTALLED INTO THE SERVERLESS ENVIRONMENT,
+                not into any one model
+  modelkit/     The model template: implement `step`, get a Databricks job.
+                Stdlib-only, so every environment carries it for nothing.
+                Nested one level because a top-level `modelkit/` would shadow
+                the installed package as an empty namespace package
+models/         ONE INSTALLABLE PACKAGE PER MODEL, each its own distribution
+                with its own dependency list and ONE entry point. Discovered
+                by `importlib.metadata`, not by a registry — so a model in
+                another repository works identically. See models/README.md.
+                `heartbeat/` and `annealing/` here; the other ten are on `dev`
+notebooks/      Databricks notebook source (`# COMMAND ----------` cells).
+                `heartbeat.py` is the answer to "how do I work on a model from
+                a notebook": %pip install three paths, then ordinary imports.
+                tests/test_notebook.py RUNS its code cells, so it cannot rot
+uc_ddl/         Unity Catalog DDL (telemetry volume + results tables)
+lakebase_ddl/   Postgres DDL (run_status), applied at app startup
+schema/         Generated JSON Schema for the wire protocol
+scripts/        Requirements/schema export, licence + sample probes
+resources/      One job definition per model, plus the app — see below
+deploy/         The deployment guide
+tests/          Offline; nothing here needs a Databricks connection. The
+                packaging claims that a container tier used to check are now
+                checked against the real workspace instead — see below
 docs/           Everything referenced from this file
 .claude/        Agents and commands — see below
 ```
+
+**Each deployable unit installs packages; nothing is synced as loose files.**
+
+That sentence replaces the v3 rule it reads like ("each unit is a folder that
+carries everything it needs"), and the change is worth understanding because a
+surprising amount of machinery existed only to serve the old one.
+
+v3 synced `job/` into the workspace as plain files, which are on nobody's
+`sys.path`. So `job/*.py` imported `.shared` — relative, from its own generated
+copy — `run_model.py` searched four ways for a repo root, `scripts/sync_shared.py`
+made two copies of `shared/`, `databricks.yml` ran it from a preinit hook, and
+`tests/deploy/test_shared_copy.py` failed when the copies drifted. A fresh
+checkout could not `import job` until the copy had been made. Worse, `job.shared.envelope`
+and `shared.envelope` were byte-identical source but **distinct types**, so
+`MessageType.LOG is MessageType.LOG` was False across them.
+
+All of it is gone. The job environment installs `${workspace.file_path}` — this
+repo, as a distribution — plus the model's own package, and Python finds an
+installed package the ordinary way. There is no root to find, no copy to make,
+no hook, no drift test, and no second `MessageType`.
+
+**Where `shared/` lives, and why it looks wrong.** `resources/app.yml` hands
+Databricks Apps `../app` as its `source_code_path` and **nothing outside that
+folder travels** — an app can also be deployed with no bundle at all, from the
+Apps UI or `databricks apps deploy --source-code-path ...`. So the envelope has
+to be physically inside `app/` or the app cannot import what it parses. It is
+therefore canonical at `app/shared/`, and `[tool.setuptools] package-dir` in
+`pyproject.toml` maps it back out so the job gets the same module. One
+directory in a slightly odd place, instead of two copies and a script.
+
+A symlink would not do: **the workspace export rejects symlinks** and fails on
+the first one it meets — the same rule that keeps `.venv` and
+`app/client/node_modules` out of the sync.
+
+`tests/deploy/test_app_is_self_contained.py` is what keeps this honest. Deleting
+`app/shared/` as apparent duplication broke the deployed app and the suite
+stayed green, because pytest has the repo root on its path and the workspace
+does not. That test walks `server/`'s imports and fails if one resolves to
+something outside `app/`.
+
+There was briefly a Docker tier that ran the same check for real — the app
+built from `app/` as the build context, so the repo was absent from the disk
+rather than merely unused. **It is gone, and what replaced it is better:** the
+Databricks CLI is available in this workspace, so the deployable shapes can be
+checked against a real workspace rather than against a local imitation of one.
+A container proved the app could start without the repo; a deploy proves it
+starts on the platform, which is the claim that actually matters.
+
+The static check stays because it is instant and catches the same class of
+thing before a deploy is worth attempting.
+
+**A model depends on nothing here.** `models/heartbeat/pyproject.toml` has an
+empty `dependencies` list, and that is the proof rather than an accident of a
+trivial model: a model imports neither `job` nor `shared`, and reaches the
+platform only through the `emit` callback it is handed. Discovery is by entry
+point (`[project.entry-points."dbx_leaning.models"]`), so `DBX_MODEL` is a
+NAME — `heartbeat` — not an import path, and a model that moves to its own
+repository is found the same way.
+
+One rule that does not follow from the above and still holds: a model must not
+appear in `[project.dependencies]`. `[tool.uv.sources]` marks it a workspace
+member, which **only uv reads** — and the job environment installs this repo
+with pip, which would go looking on PyPI and fail the deploy.
 
 ## Deployment shape: a model is a microservice
 
@@ -153,7 +306,7 @@ duplication is what lets them diverge.
 - **Dependencies are exported from `uv.lock`** by
   `scripts/export_requirements.py`, never re-resolved — what deploys is what
   the tests ran against, and `tests/deploy/` fails if that stops being true.
-- **Job parameters are a contract with `app/routes/runs.py`.** Databricks
+- **Job parameters are a contract with `app/server/routes/runs.py`.** Databricks
   rejects a `run-now` parameter a job has not declared, so both sides are
   pinned to `JOB_PARAMETER_NAMES` and tested against each other.
 
@@ -164,20 +317,110 @@ Full procedure: `deploy/README.md`.
 1. Run `/orient` at the start of any session before writing code. It reads
    this file and the docs, and states back what it understood before
    touching anything.
-2. **Nothing below is buildable until the two ingress probes pass.**
-   Run `/spike-ws` and `/spike-sse` first. Both are small and answer real
-   platform questions — everything else has a documented fallback, these two
-   don't.
-3. After the probes: build `shared/` (the envelope) first, sequentially — it
-   is the one contract every other track depends on. Then everything else
-   parallelises. See `docs/parallelization-plan.md` for the worktree-per-track
-   plan and which agent (`.claude/agents/*.md`) owns which track.
-4. Frontend is explicitly low-priority until `app/`, `job/`, and one model
-   work end to end.
+2. **The two ingress probes gated everything, and both have passed** —
+   WebSocket and SSE each survive the Databricks Apps ingress, confirmed
+   against a real workspace on 2026-08-23 (`docs/spike-results.md`). Their
+   *timings* are still unmeasured; `/spike-ws` and `/spike-sse` are how to
+   fill those in. Nothing is blocked on them.
+3. `shared/` (the envelope) was built first and sequentially — it is the one
+   contract every other track depends on — and is frozen. When a new fan-out
+   comes up, freeze its shared contract before starting it; the frontend did
+   this again for its per-model views. The worktree-per-track plan that got
+   the original build here (`docs/parallelization-plan.md`) described a
+   larger tree than this branch carries — eleven models, `tests/deploy/`, a
+   full per-model frontend — most of which was deliberately cut back out (see
+   `docs/v4-rewrite-plan.md`'s delete list) or lives on `dev`. That doc is
+   gone; the one thing worth keeping from it is the rule in this paragraph.
+4. Frontend was explicitly low-priority until `app/`, `job/` and one model
+   worked end to end. That gate is met. The client is now `app/dist/index.html`
+   — hand-written, committed, served as-is, no build step and no framework.
+   `app/client/` holds only the README explaining why that is a decision
+   rather than a placeholder: v3's SPA was 36,700 lines, 20,117 of them
+   per-model views, against an envelope spec whose stated thesis was zero
+   model-specific frontend code.
+5. **Confirmed against a real workspace, 2026-09-04 — Slice 1 is done.** A
+   tick reaches a browser from a deployed run: model → harness → part files on
+   the telemetry volume → WebSocket → app → SSE → UI. Also confirmed on the
+   way there, each the hard way:
+
+   - `bundle deploy` and `bundle run` both work. **They are two commands, and
+     that is a trap:** `deploy` uploads the app's files but creates no
+     deployment, so an app can exist, be started, and still serve 503 until
+     `bundle run` is issued.
+   - `environment_version: "5"` (Python 3.12), NOT `client: "3"`. The bundle
+     schema's whole description of `client` is "Use `environment_version`
+     instead", and they are not spellings of the same thing — each version
+     pins its own Python.
+   - The heartbeat runs as a `modelkit.Model` subclass with `libs/modelkit`
+     installed as a shared serverless environment dependency, and the entry
+     point resolving `DBX_MODEL=heartbeat` to a class.
+   - Telemetry lands as rolling part files and reads back complete, in order,
+     with one terminal status.
+   - The M2M ingress identity: `dbutils.secrets.get` for both halves, a plain
+     `httpx` POST to `/oidc/v1/token`, and the app's proxy accepting the
+     result.
+
+   **Still not done:** there is no CI. `scripts/probe_sample_data.py` has never
+   been run end to end. **Slices 2 (cancel) and 3 (replay) are built and
+   unit-tested but have never been exercised against a real run** — the RPC
+   methods, the routes and the job-side handlers all exist, which is not the
+   same as knowing they work. Slice 4 (the volume → SQL ingestion job) does not
+   exist at all.
+
+   The earlier confirmations still stand: WebSocket and SSE each survive the
+   Apps ingress (2026-08-23, `docs/spike-results.md`), the `samples` catalog's
+   table list, and column listings for seven of its tables
+   (`docs/sample-data-inventory.md`).
+
+6. **Four failures that only a deploy could have found**, kept here because
+   each was invisible locally and each cost a round trip. The pattern is worth
+   more than the list: *nothing raised in any of them.*
+
+   - `sys.exit(0)` FAILS a serverless task. It runs inside an ipykernel, which
+     treats `SystemExit` as an exception — so a run that emitted all 65
+     messages, wrote its part files and recorded SUCCEEDED was reported
+     RUN_EXECUTION_ERROR, with `SystemExit: 0` the only clue.
+   - The job sent BINARY WebSocket frames because `shared/rpc.py`'s builders
+     returned `bytes`. The app reads `receive_text()`, so it died on
+     `KeyError: 'text'` on its first read of every run. Neither test suite
+     caught it: each side was tested against a stand-in more lenient than the
+     real counterpart.
+   - A serverless task is not told which workspace it is in. Without
+     `DATABRICKS_HOST` the M2M exchange had nowhere to send its request, so
+     every run went unobserved with a perfectly healthy durable path — the
+     hardest failure to see. It arrives as
+     `DATABRICKS_HOST={{workspace.url}}`, a task positional.
+   - An EMPTY bundle variable drops the `value` key entirely rather than
+     resolving to `""`, so the entry reaches the Apps API with no source and
+     `bundle run` refuses it. `validate` and `deploy` both pass; only `run`
+     fails, three commands downstream of the cause.
 
 ## Docs index
 
 - `docs/architecture.md` — why, condensed from the full design conversation
+- `docs/v4-rewrite-plan.md` — the decision record this rewrite is built from
+  (written 2026-08-30). More precise than this file on several points it
+  summarizes, including run state ("the job writes it, and there are two
+  kinds") and why v3's concurrency-ceiling transaction was retired
+- `docs/v5-implementation-plan.md` — the phased plan for what v4 left open:
+  who writes run state, the harness's thread model, what the wire promises a
+  fork, and moving schema migration fully out of both app and job (written
+  2026-09-18). Marks each item SETTLED or PROPOSED — the latter still need
+  sign-off before their code is written
+- `docs/architecture-diagram.md` — what talks to what, as Mermaid diagrams
+  (component/data-flow + a run's lifecycle sequence), drawn from the built
+  code rather than the target layout above. Also sketches a proposed,
+  not-yet-built change: the harness writing `run_status` in Lakebase
+  directly over the Data API, distinct from the Databricks job's own
+  `life_cycle_state`
 - `docs/free-edition-constraints.md` — verified platform facts + sources
 - `docs/message-envelope-spec.md` — the wire contract, in full
-- `docs/parallelization-plan.md` — worktree strategy, track ownership, merge order
+- `docs/spike-results.md` — the ingress probes: what they settled, what they didn't
+
+Four docs used to be listed here — the worktree-per-track plan, the samples
+inventory, the ML-datasets survey, and the per-model packaging doc. All four
+described the pre-rewrite tree (`docs/v4-rewrite-plan.md`'s delete list) or a
+file that was never written on this branch; none of them exist here now.
+`docs/v5-implementation-plan.md`'s Phase 5 tracks writing a packaging doc
+again, once there's a real second model or a real external consumer to write
+it for — see that phase before starting one from scratch.

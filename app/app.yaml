@@ -1,0 +1,135 @@
+# What Databricks Apps runs, and with what.
+#
+# THIS FILE IS WHY A HAND DEPLOY WORKS. `resources/app.yml` declares the same
+# command and env to the bundle, but that only applies when the BUNDLE creates
+# or updates the app. Point the app at this folder any other way — the Apps
+# UI, or `databricks apps deploy --source-code-path ...` — and the bundle is
+# never consulted. The runtime reads this file instead, and without it says:
+#
+#   No command to run and no Python file found.
+#   Please add a 'command' field to your app.yml file.
+#
+# `tests/deploy/test_app_yaml.py` asserts this file and `resources/app.yml`
+# agree, so the two ways of deploying cannot drift into behaving differently.
+#
+# Note the spelling difference, which is real and bites every time:
+#   this file (the runtime reads it)  -> valueFrom   (camelCase)
+#   resources/app.yml (the bundle)    -> value_from  (snake_case)
+
+command:
+  - uvicorn
+  - server.main:app
+  - --host
+  - 0.0.0.0
+  - --port
+  # NOT a hardcoded 8000. Databricks Apps assigns the port and passes it here;
+  # binding anything else means the platform's health check never connects and
+  # the deployment is marked failed with the app process running fine.
+  - $DATABRICKS_APP_PORT
+
+env:
+  # The built SPA. `app/client/` is the source and never deploys;
+  # `app/client/vite.config.ts` writes `../dist`, so the bundle lands beside
+  # `server/`. `server/config.py` resolves this against the app root.
+  - name: DBX_FRONTEND_DIST
+    value: dist
+
+  # These mirror the defaults in `databricks.yml`'s `variables:` block. They
+  # are literals here because this file cannot interpolate — a hand deploy has
+  # no bundle to interpolate from. The test named above fails if a default
+  # changes there and not here.
+  - name: DBX_CATALOG
+    value: main
+  - name: DBX_SCHEMA
+    value: dbx_leaning
+  - name: DBX_APP_PUBLIC_URL
+    value: https://dbx-leaning-7474655945367403.aws.databricksapps.com
+
+  # Where run_status lives inside the Lakebase database. Deliberately not
+  # `public`: since PostgreSQL 15 that schema grants no CREATE to PUBLIC, so a
+  # service principal that does not own the database cannot create a table
+  # there. The app creates this schema itself at startup.
+  - name: DBX_LAKEBASE_SCHEMA
+    value: dbx_leaning
+
+  # The app's durable filesystem — uc_ddl/003_app_volume.sql. Absent or
+  # ungranted, /healthz reports `volume` degraded and nothing on the run path
+  # is affected.
+  - name: DBX_APP_VOLUME
+    value: /Volumes/main/dbx_leaning/app_store
+
+
+  # Who the app authenticates AS — one service principal for the Postgres
+  # password (an OAuth token; Lakebase takes nothing else unless
+  # `enable_pg_native_login` was turned on), the Statement Execution API and
+  # the Jobs API. `server/oauth.py` exchanges these at `/oidc/v1/token`.
+  #
+  # The id is not a credential. The secret is, so it comes from the secret
+  # scope like the ingress token does.
+  #
+  # Set together, 2026-09-09, and they must stay that way: an empty client id
+  # with a real secret is worse than neither, because the app falls back to its
+  # own injected principal while looking configured.
+  #
+  # `dbx-leaning lakebase` — a principal created for this one job. Proven end
+  # to end on 2026-09-09: the client-credentials exchange returns a Bearer
+  # token, and that token works DIRECTLY as the Postgres password —
+  # `SELECT current_user` comes back as this id. So the second exchange in
+  # docs/dbx_external-apps-manual-api.md (`/api/2.0/postgres/credentials`) is
+  # NOT needed on this instance, and there is no endpoint id to configure.
+  #
+  # THEY LIVE HERE RATHER THAN ONLY IN `resources/app.yml` ON PURPOSE. The
+  # bundle's app-config update currently fails — the CLI (v1.15.0) sends
+  # `forward_user_access_token` in its update mask and the API rejects the
+  # whole call — so `bundle deploy` exits non-zero on the app and any env it
+  # carries never lands. This file travels with the SOURCE sync, which does
+  # work. The `resources:` entry `valueFrom` needs was registered out of band
+  # with `databricks apps update --json`.
+  #
+  # `valueFrom` names an app RESOURCE, not a scope key. It is
+  # `lakebase-client-secret`, not `oauth-client-secret` — that second key is
+  # the shared job INGRESS identity, a different principal.
+  - name: DBX_OAUTH_CLIENT_ID
+    value: 1560db44-c718-40b6-9ebf-70386cfa7165
+  - name: DBX_OAUTH_CLIENT_SECRET
+    valueFrom: lakebase-client-secret
+
+  # The Lakebase instance. Empty means no run store at all on v4 — the
+  # warehouse-backed fallback was deleted with the app's warehouse path.
+  - name: DBX_LAKEBASE_HOST
+    value: ep-cool-fog-d8vyaasx.database.us-east-2.cloud.databricks.com
+  - name: DBX_LAKEBASE_USER
+    value: 1560db44-c718-40b6-9ebf-70386cfa7165
+  - name: DBX_LAKEBASE_DATABASE
+    value: databricks_postgres
+
+# DBX_JOB_IDS IS DELIBERATELY ABSENT, and it no longer costs a hand deploy
+# anything — which is a change from v3, where it was this file's one real gap.
+#
+# v3 could not have it: the map is model name -> job id, those ids do not exist
+# until the bundle creates the jobs, and only `resources/app.yml` can
+# interpolate them. So a hand-deployed app answered /api/models with an empty
+# list and could trigger nothing.
+#
+# v4 does not need it. The app discovers its jobs from the workspace by their
+# `project: dbx-leaning` tag (app/server/discovery.py), which works the same
+# whether this app was deployed by the bundle, from the Apps UI, or by hand.
+# Set DBX_JOB_IDS only to NARROW what the app may trigger — it is an
+# allow-list, and nothing produces it.
+#
+# What discovery does NOT give the app is permission to run what it finds.
+# CAN_MANAGE_RUN on each job is a separate grant, and since v4's jobs need not
+# come from this bundle, it is applied by whoever owns them. Without it a
+# trigger returns the workspace's own 403 verbatim.
+#
+# There is no DBX_WAREHOUSE_ID here either, and that is not an omission: v4's
+# app queries no SQL warehouse. `var.warehouse_id` in the bundle survives only
+# for applying uc_ddl/ by hand.
+#
+# Deploying through the bundle is still TWO commands, because `bundle deploy`
+# uploads this folder without creating an app deployment from it:
+#
+#   databricks bundle deploy -t dev
+#   databricks bundle run    dbx_leaning -t dev
+#
+# `dbx_leaning` is the resource key in resources/app.yml, not the app's name.

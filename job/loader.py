@@ -102,13 +102,42 @@ class ModelHandle:
         self.obj.should_cancel = should_cancel
 
 
-def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
-    """Import ``spec`` and discover the model object it produces.
+#: The entry-point group every model package declares.
+ENTRY_POINT_GROUP = "dbx_leaning.models"
 
-    ``spec`` is ``"models.scenario"`` (a factory is looked for by convention)
-    or ``"models.scenario:build_model"`` (an explicit attribute).
+
+def installed_models() -> dict[str, str]:
+    """Every model installed in this environment, by name.
+
+    This is the whole model registry. `[tool.dbx-leaning.models]` in
+    `pyproject.toml`, `scripts/_registry.py`, and a dotted module path in
+    `DBX_MODEL` are all replaced by asking importlib.metadata what declares
+    the `dbx_leaning.models` entry point — so a model in another repository is
+    discovered exactly as one in this one is, and nothing central has to be
+    kept in agreement with anything.
+    """
+    from importlib.metadata import entry_points
+
+    return {ep.name: ep.value for ep in entry_points(group=ENTRY_POINT_GROUP)}
+
+
+def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
+    """Load a model by NAME, or by an import path.
+
+    ``spec`` is normally a plain name — ``"heartbeat"`` — resolved through the
+    entry points above. An import path (``"mypkg.thing"`` or
+    ``"mypkg.thing:build_model"``) still works, because a model being developed
+    in a notebook may not be installed yet and should not have to be.
     """
     config = dict(config or {})
+
+    # An installed model wins, but a spec that is not one is still tried as an
+    # import path. A model being written in a notebook is not installed yet and
+    # should not have to be — insisting on the entry point would make the
+    # framework something you have to package before you can run it once.
+    installed = installed_models()
+    spec = installed.get(spec, spec)
+
     module_name, _, attr = spec.partition(":")
 
     try:
@@ -117,7 +146,10 @@ def load_model(spec: str, config: dict[str, Any] | None = None) -> ModelHandle:
         raise ModelLoadError(
             f"could not import model module {module_name!r}: {exc}\n"
             f"  spec given: {spec!r}\n"
-            f"  expected an importable package under models/, e.g. 'models.scenario'"
+            f"  installed models: {', '.join(sorted(installed)) or '(none)'}\n"
+            f"  a model is installed by adding it under models/ and running "
+            f"`uv sync`, or from anywhere by declaring a "
+            f"{ENTRY_POINT_GROUP!r} entry point"
         ) from exc
 
     factory = _resolve_factory(module, module_name, attr)

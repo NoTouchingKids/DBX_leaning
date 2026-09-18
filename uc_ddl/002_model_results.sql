@@ -2,132 +2,87 @@
 --
 -- One per model family, deliberately separate from each other and from the
 -- core tables: different models serve different audiences, so they get
--- different Unity Catalog grants. Every one carries run_id and chunk_index,
--- stamped by the harness (job/emitter.py) rather than by the model.
+-- different Unity Catalog grants. That is also why grants are not in this file
+-- — who should see a model's results is a decision for whoever owns that
+-- model's audience, not a default.
+--
+-- ---------------------------------------------------------------------------
+-- WHO WRITES THESE ROWS CHANGED IN v4, AND THE COLUMNS DID NOT.
+--
+-- In v3 a model returned rows from `results()` and the HARNESS wrote them,
+-- stamping `run_id` and `chunk_index` on the way through (`job/emitter.py`).
+-- There is no such writer any more: `job/delta.py` was deleted outright, the
+-- harness owns telemetry and comms and nothing else, and each model reads its
+-- own inputs and writes its own results table through Spark. So every column
+-- below — including the two the harness used to stamp — is filled by the model
+-- itself, in `poststep`.
+--
+-- The practical consequence for anyone changing a table here: the dict to diff
+-- against is the one the model builds and its own schema tuple, e.g.
+-- `models/annealing/annealing/model.py::RESULT_SCHEMA`. Nothing checks the two
+-- against each other, and the two directions are not symmetric — a column no
+-- model fills is harmless clutter, while a row key with no column is a
+-- silently dropped field.
+--
+-- `main.dbx_leaning` is HARDCODED here and is `${var.catalog}` / `${var.schema}`
+-- everywhere else. These files are applied by hand and `databricks sql query
+-- --file` does no variable substitution, so retargeting a deployment means
+-- editing this file in the same commit that changes the variable. See the
+-- header of 001_core_tables.sql.
+--
+-- ONE TABLE ON THIS BRANCH. The other ten went to `dev` with the models they
+-- belong to and come back with them, one at a time, as each is ported.
+-- ---------------------------------------------------------------------------
 
--- The data_* columns are the demand curve's provenance, carried on every row:
--- coverage is derived from real hourly volumes in the `samples` catalog when
--- the job can read it, and from a deterministic synthetic curve when it
--- cannot. A reader six months later must be able to tell those apart without
--- going back to the run's logs.
-CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_gurobi_scheduling (
-    run_id               STRING  NOT NULL,
-    chunk_index          INT     NOT NULL,
-    staff                STRING  NOT NULL,
-    day                  INT     NOT NULL,
-    shift                STRING  NOT NULL,
-    cost                 DOUBLE,
-    preferred            BOOLEAN,
-    demand               INT,
-    data_source          STRING,
-    data_synthetic       BOOLEAN,
-    data_rows            BIGINT,
-    data_fallback_reason STRING
-)
-USING DELTA
-COMMENT 'One row per staff/day/shift assignment.';
-
-CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_scenario (
-    run_id         STRING NOT NULL,
-    chunk_index    INT    NOT NULL,
-    scenario_index INT    NOT NULL,
-    -- What the sweep varied: multipliers on the observed baseline below.
-    demand_multiplier    DOUBLE,
-    capacity_multiplier  DOUBLE,
-    unit_cost_multiplier DOUBLE,
-    -- The absolute quantities those multipliers produced.
-    demand         DOUBLE,
-    capacity       DOUBLE,
-    unit_cost      DOUBLE,
-    served         DOUBLE,
-    shortfall      DOUBLE,
-    idle           DOUBLE,
-    objective      DOUBLE,
-    -- The observed baseline the sweep varied around (models/_data).
-    baseline_demand       DOUBLE,
-    baseline_peak_demand  DOUBLE,
-    baseline_capacity     DOUBLE,
-    baseline_unit_cost    DOUBLE,
-    -- Provenance of that baseline. A run on real `samples` rows and a run
-    -- that fell back to the deterministic generator must not look identical
-    -- after the fact.
-    data_source            STRING,
-    data_synthetic         BOOLEAN,
-    data_rows              BIGINT,
-    data_fallback_reason   STRING
-)
-USING DELTA
-COMMENT 'One row per evaluated scenario.';
-
-CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_forecasting (
-    run_id         STRING NOT NULL,
-    chunk_index    INT    NOT NULL,
-    step           INT    NOT NULL,
-    -- The hour being forecast, epoch ms. NULL only when the caller supplied a
-    -- bare series with no timestamps.
-    ts             BIGINT,
-    forecast       DOUBLE NOT NULL,
-    val_mae        DOUBLE,
-    val_rmse       DOUBLE,
-    epochs_trained INT,
-    -- Provenance of the training data (models/_data). A run on real `samples`
-    -- rows and a run that fell back to the deterministic generator must not
-    -- look identical after the fact.
-    data_source            STRING,
-    data_synthetic         BOOLEAN,
-    data_rows              BIGINT,
-    data_fallback_reason   STRING
-)
-USING DELTA
-COMMENT 'One row per forecasted timestep.';
-
-CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_mcmc (
-    run_id      STRING  NOT NULL,
-    chunk_index INT     NOT NULL,
-    parameter   STRING  NOT NULL,
-    mean        DOUBLE,
-    sd          DOUBLE,
-    q05         DOUBLE,
-    q50         DOUBLE,
-    q95         DOUBLE,
-    rhat        DOUBLE,
-    draws_used  BIGINT,
-    -- False when the run was cancelled: a partial posterior is still usable,
-    -- but a reader must be able to tell.
-    complete    BOOLEAN,
-    -- What was fitted, e.g. 'fare_amount ~ trip_distance'.
-    model       STRING,
-    -- Provenance of the observations. A posterior fitted to real sample-catalog
-    -- trips and one fitted to the offline synthetic fallback must stay
-    -- distinguishable here, not only in the run's logs (models/_data).
-    data_source           STRING,
-    data_synthetic        BOOLEAN,
-    data_rows             BIGINT,
-    -- Null on the real path; why the fallback ran otherwise.
-    data_fallback_reason  STRING
-)
-USING DELTA
-COMMENT 'Posterior summary statistics per parameter.';
-
-CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_streaming (
+-- The annealed shift: one row per trip taken, with the solution repeated on
+-- every row. Flat on purpose — these tables are read flat, and a shift total
+-- is what a reader wants next to a trip rather than one join away.
+--
+-- A cancelled run lands here too. The incumbent of a stopped search is still a
+-- shift, and discarding it because someone pressed stop would be the wrong
+-- behaviour; `cancelled` and the two iteration columns are how a reader tells
+-- that case apart afterwards.
+CREATE TABLE IF NOT EXISTS main.dbx_leaning.results_annealing (
     run_id      STRING NOT NULL,
-    -- Which backtest window this row came from. Written as each window
-    -- completes, not at the end of the run.
     chunk_index INT    NOT NULL,
-    origin      INT    NOT NULL,
-    step        INT    NOT NULL,
-    predicted   DOUBLE,
-    actual      DOUBLE,
-    abs_error   DOUBLE,
-    -- Where the backtested series came from. Carried on every row, not only
-    -- logged, so a run against `samples.nyctaxi.trips` and one that fell back
-    -- to synthetic data stay distinguishable from the results table alone.
+    -- The chosen trips, ranked by value density (fare per minute) — the order
+    -- the preview curve is built in, not the search order.
+    rank         INT    NOT NULL,
+    item_index   INT    NOT NULL,
+    value        DOUBLE,   -- fare for this trip
+    weight       DOUBLE,   -- minutes it consumes of the shift
+    distance     DOUBLE,
+    value_density DOUBLE,
+    -- The solution this row belongs to.
+    objective    DOUBLE,
+    total_value  DOUBLE,
+    total_weight DOUBLE,
+    items_selected INT,
+    -- Planned vs run: a cancelled search stops early and still writes its
+    -- incumbent, so these two disagreeing is the record of that.
+    iterations_run     INT,
+    iterations_planned INT,
+    cancelled          BOOLEAN,
+    -- The seed is part of the result, not a footnote: without it a
+    -- stochastic search is not reproducible and the row cannot be checked.
+    seed         BIGINT,
+    -- What random-greedy shift-filling achieved on the same instance. The
+    -- column that answers "was the search worth its iterations?" without
+    -- re-running anything.
+    baseline_objective            DOUBLE,
+    improvement_over_baseline_pct DOUBLE,
+    -- The instance the search ran on.
+    items_offered        INT,
+    capacity_minutes     DOUBLE,
+    total_weight_offered DOUBLE,
+    total_value_offered  DOUBLE,
+    -- Provenance of the trips (annealing/data.py). A run over real `samples`
+    -- rows and one that fell back to the deterministic generator must not look
+    -- identical after the fact.
     data_source          STRING,
     data_synthetic       BOOLEAN,
     data_rows            BIGINT,
-    -- Null when the real table was read. Always present, so the schema does
-    -- not depend on whether a given run happened to fall back.
     data_fallback_reason STRING
 )
 USING DELTA
-COMMENT 'Rolling-origin backtest over sample hourly demand, written incrementally.';
+COMMENT 'One row per trip in the annealed shift; solution-level columns repeat per row.';

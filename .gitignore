@@ -7,20 +7,37 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+#
+# Anchored to the repo root, deliberately. The stock Python .gitignore leaves
+# these unanchored, and `lib/` then matches at ANY depth — which silently
+# excluded `frontend/src/lib/`, i.e. the entire wire contract, from two
+# commits that claimed to add it. `git add -A` says nothing when a path is
+# ignored.
+#
+# `dist/` is gone from this list. It used to be unanchored on purpose, to
+# catch `frontend/dist` as well as sdist output — but the built SPA now lives
+# at `app/dist` and is COMMITTED (see app/client/.gitignore for why), and an
+# unanchored `dist/` would silently ignore it.
+# `scripts/build_model_wheel.py` writes to `build/wheels`, which `/build/`
+# above already covers, so nothing else wants this name.
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/build/
+/develop-eggs/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+
+# The built SPA, at the app root — see app/client/.gitignore for why it is
+# tracked at all. Sourcemaps are the one part that is not: 5.1 MB against
+# 1.2 MB for the bundle, regenerated on every build.
+/app/dist/**/*.map
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -216,3 +233,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# `/job/shared/` and `/app/shared/` used to be listed here, one ignored and
+# one tracked, because each deployable unit was synced as loose files and had
+# to carry a copy of everything it imported. Both units now install this repo
+# as a package, so there is one `shared/` and nothing to ignore.
+.vscode/settings.json
+
+# `databricks environments setup-local` writes one of these before it rewrites
+# pyproject.toml, timestamped, every run. They accumulate and they contain a
+# stale copy of the dependency set, which is the last thing that should be
+# committed next to a real one.
+#
+# Worth knowing WHY they appear: that command resets `requires-python` to
+# `==3.12.*` and strips the `python_version >= '3.12'` marker off
+# databricks-connect, both of which break the app's 3.11 runtime. See the note
+# on `requires-python` in pyproject.toml.
+# `tests/deploy/test_requirements.py` fails when it happens, which is how the
+# 2026-09-04 re-run was caught.
+pyproject.toml.*.bak

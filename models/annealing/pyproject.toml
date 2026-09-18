@@ -1,0 +1,50 @@
+# The annealing knapsack, as its own distribution.
+#
+# One model, one package, one dependency list — and this is the one whose
+# dependency list is the POINT. Every other model on `dev` carries a solver, a
+# framework or numpy; this one carries nothing, so a deploy of it that breaks
+# is the platform's fault and not a library's. It is the control case for the
+# microservice split, which is why it is the first model ported to v4.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbx-model-annealing"
+version = "0.1.0"
+description = "Simulated annealing over a knapsack of taxi trips. Depends on nothing."
+requires-python = ">=3.11"
+
+# Deliberately empty, and THREE things are not missing from it.
+#
+#   modelkit   the model template. A SHARED SERVERLESS ENVIRONMENT DEPENDENCY,
+#              installed once into the environment rather than once per model.
+#              See libs/modelkit/pyproject.toml and the Databricks doc it
+#              cites. Declaring it here would say nothing pip can resolve — the
+#              kit is not on an index — and would misstate where it comes from.
+#
+#   pyspark    provided by the serverless runtime, for the same reason and by
+#              the same rule. `annealing/data.py` imports it inside the two
+#              functions that touch Unity Catalog, so importing this package
+#              off a workspace loads none of it.
+#
+#   anything   the search is `random`, `math` and `statistics`. That is not a
+#   else       simplification waiting to be outgrown: it is what makes this
+#              model the evidence that a job really does deploy with the
+#              harness's own transport and nothing else.
+
+dependencies = []
+
+[project.entry-points."dbx_leaning.models"]
+# The CLASS, not a factory function. `modelkit.Model.__init__` already takes
+# both a config dict and keywords, so there is nothing left for a factory to
+# do. `build_model` still exists in the module for anyone who prefers it, and
+# because it is the first name `job/loader.py` looks for.
+#
+# The key is what DBX_MODEL carries: a NAME, resolved through
+# importlib.metadata, never an import path.
+annealing = "annealing:Annealing"
+
+[tool.setuptools]
+packages = ["annealing"]

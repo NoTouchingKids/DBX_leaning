@@ -8,7 +8,7 @@
 # the duplication is what lets them diverge.
 #
 # Code reaches the workspace by **file sync**, not as a wheel. Each job runs
-# entrypoints/run_model.py from the synced tree. When that changes to a wheel
+# job/run_model.py from the synced tree. When that changes to a wheel
 # later, the task definition changes and nothing else does.
 
 bundle:
@@ -28,19 +28,171 @@ variables:
     description: >-
       SQL warehouse for the app's READ path only (backfill, reconciliation).
       Free Edition allows one, 2X-Small. Nothing writes through it.
-    default: ""
+
+      This was "7474655945367403" until 2026-08-26, which is the WORKSPACE
+      number that also appears in app_public_url — not a warehouse id at all.
+      It had never been exercised: the app reports `sql` degraded and keeps
+      streaming when the read path is unavailable, so a wrong id here looks
+      exactly like no id at all.
+    default: "e4a96cfb1f5b262b"
+  app_volume:
+    description: >-
+      Unity Catalog volume giving the app a durable filesystem — exports,
+      uploads, cached artefacts. An App's own disk is not storage: it stops
+      after at most 24h and a redeploy replaces the container. Created by
+      uc_ddl/003_app_volume.sql.
+    default: app_store
+  oauth_client_id:
+    description: >-
+      Application id of the service principal the app authenticates as —
+      against Postgres, Unity Catalog and the Jobs API alike. An id, not a
+      credential; the matching secret is a SECRET (`oauth-client-secret` in
+      the scope below), never a variable. Empty falls back to the service
+      principal Databricks Apps injects for the app itself.
+
+      Set 2026-09-09 to `dbx-leaning lakebase`, a service principal created for
+      this one purpose. Its OAuth secret is the `lakebase-client-secret` key in
+      `app_secret_scope`, declared as an app resource in `resources/app.yml`.
+      Keep this equal to `lakebase_user` below — Lakebase names its Postgres
+      role after whoever the token belongs to.
+    default: "1560db44-c718-40b6-9ebf-70386cfa7165"
   app_secret_scope:
-    description: Secret scope holding the token a job presents to the app.
+    description: >-
+      Workspace secret scope holding the ingress service principal's OAuth
+      secret. A WORKSPACE scope — a flat namespace, not Unity Catalog — so
+      `dbx-leaning` here is not the `dbx_leaning` schema, and the one-character
+      difference is the whole trap.
     default: dbx-leaning
+  job_ingress_scope:
+    description: >-
+      Workspace secret scope holding the shared ingress identity. Defaults to
+      the same scope as the app's, because there is one to manage; a target may
+      point at another.
+    default: dbx-leaning
+  job_ingress_client_id_key:
+    description: >-
+      Key within `job_ingress_scope` holding the ingress service principal's
+      application id.
+
+      A client id is an identifier rather than a credential, so it COULD be a
+      plain variable. It is a secret here because both halves of one identity
+      belong in one place: rotating the principal then means editing the scope
+      and nothing else, with no bundle change and no redeploy.
+    default: oauth-client-id
+  job_ingress_secret_key:
+    description: >-
+      Key within `job_ingress_scope` holding that principal's OAuth secret.
+
+      Read at run time with `dbutils.secrets.get`, never a job parameter —
+      parameters come back from `jobs get-run` and are shown in the run UI. The
+      job's own principal therefore needs READ on the scope.
+    default: oauth-client-secret
   app_public_url:
     description: >-
       The app's externally reachable URL, handed to each job so it knows where
       to attach. Empty is valid and normal — the run proceeds unobserved and
       stays fully durable. Fill this in after the first deploy, once the app
       has a URL.
-    default: ""
+    default: "https://dbx-leaning-7474655945367403.aws.databricksapps.com"
 
-# The workspace sync is the deployment mechanism, so what it excludes matters.
+  # --- Lakebase (managed Postgres): where run_status lives ---------------
+  #
+  # `run_status` is the one OLTP-shaped thing in this platform — one row per
+  # run, point-looked-up, updated on every transition, and counted against
+  # the 5-concurrent-task ceiling. Postgres gives it what Delta structurally
+  # cannot: a primary key on run_id, and a transaction around the
+  # count-and-claim so that ceiling is enforced rather than merely observed
+  # (app/server/store.py, `pg_advisory_xact_lock`).
+  #
+  # Leaving `lakebase_host` empty is a SUPPORTED but DEGRADED deploy: the app
+  # falls back to WarehouseRunStore, whose `release_slot` is a no-op that
+  # relies on reconciliation to correct it. Everything still works; the
+  # ceiling becomes advisory and each check costs warehouse uptime. Prefer
+  # Lakebase. /healthz says which one is live.
+  lakebase_host:
+    description: >-
+      Lakebase instance hostname, e.g.
+      instance-name.database.cloud.databricks.com. Empty falls back to the
+      warehouse-backed run store — see the note above.
+    default: "ep-cool-fog-d8vyaasx.database.us-east-2.cloud.databricks.com"
+  lakebase_database:
+    description: Database within the Lakebase instance.
+    default: databricks_postgres
+  lakebase_port:
+    description: Lakebase port. TLS is required and assumed.
+    default: "5432"
+  lakebase_schema:
+    description: >-
+      Postgres schema `run_status` lives in.
+
+      NOT `public`: since PostgreSQL 15 that schema grants no CREATE to
+      PUBLIC, so a service principal that does not own the database gets
+      `permission denied for schema public` the first time the app applies
+      its DDL, and /healthz reports `lakebase` degraded for a reason nobody
+      expects. The app creates this schema itself at startup
+      (lakebase_ddl/001_run_status.sql is the same DDL, reviewable).
+    default: dbx_leaning
+  # There is deliberately NO lakebase_password variable, and there never will
+  # be one. An instance created with `enable_pg_native_login: false` — the
+  # default, and what this deployment has — accepts only a short-lived
+  # Databricks OAuth token as its password. `app/server/oauth.py` fetches one
+  # per connection. A static credential could not work here even if a variable
+  # were the right place for it, which it is not: variables land in the
+  # deployment state.
+  lakebase_user:
+    description: >-
+      Postgres role the app connects as.
+
+      When `oauth_client_id` is set this MUST be the same application id.
+      Lakebase authenticates with an OAuth token and the role Databricks
+      provisions is named after the principal that token belongs to, so
+      connecting as one principal while presenting another's token fails as
+      an ordinary authentication error — which reads as a bad password and
+      sends you looking at the secret. `tests/deploy/test_bundle.py` refuses
+      the mismatch, and `/healthz` reports it at run time.
+
+      Empty means NO run store at all on v4 — the warehouse-backed fallback
+      this used to name was deleted with the rest of the app's warehouse path.
+      The app still triggers and streams; listing and reading past runs 503.
+
+      MUST equal `oauth_client_id` above, and does: both are the
+      `dbx-leaning lakebase` principal, 1560db44-c718-40b6-9ebf-70386cfa7165.
+      It was briefly the app's OWN injected principal
+      (f48cf783-…, from `databricks apps get`) — which is the right answer only
+      when `oauth_client_id` is empty and the app authenticates as itself.
+      Once an explicit principal is named, connecting as one identity while
+      presenting another's token fails as a plain authentication error.
+    default: "1560db44-c718-40b6-9ebf-70386cfa7165"
+
+# The workspace sync is what puts the tree in the workspace;
+# `resources/app.yml` then hands Databricks Apps the `app/` subfolder of it,
+# and each job task runs `job/run_model.py` out of the same tree.
+#
+# Two of these excludes are not tidiness. The App export rejects symlinks and
+# fails on the FIRST one it meets, so the count is beside the point: `.venv/bin`
+# is full of them, and `app/client/node_modules` carries bin shims whatever
+# installs it — 22 under bun, thousands under pnpm's symlink-per-package store.
+# Either directory reaching the workspace fails the whole deploy.
+#
+# `app/client/**` goes wholesale: the React source has no business in a
+# workspace with no Node runtime, and the build output is not in that
+# directory anyway — `vite.config.ts` writes `../dist`, i.e. `app/dist`, which
+# is committed and syncs like any other tracked file.
+# There is no preinit hook, and its absence is the change that made this
+# branch simpler rather than an omission.
+#
+# It used to run `scripts/sync_shared.py`, which copied the repo root's
+# `shared/` into `job/shared/` before every sync, because `job/` was synced as
+# loose files that were on nobody's `sys.path` and had to carry a copy of
+# everything it imported. The hook itself had to be `python3` and stdlib-only
+# — not `uv run` — because a deploy driven from inside Databricks runs on
+# aarch64, where the dev group's `pgserver` publishes no wheel and the deploy
+# died resolving a test dependency it had no reason to install.
+#
+# The job now installs `${workspace.file_path}` as a package (see
+# `resources/model_heartbeat.job.yml`), so Python finds `shared` the ordinary
+# way. No copy, no script, no hook, and nothing to keep in agreement.
+
 sync:
   exclude:
     - .venv/**
@@ -48,8 +200,7 @@ sync:
     - "**/__pycache__/**"
     - "**/.pytest_cache/**"
     - .ruff_cache/**
-    - .delta-local/**
-    - frontend/**
+    - app/client/**
     - tests/**
 
 targets:

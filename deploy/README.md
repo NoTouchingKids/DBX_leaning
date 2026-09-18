@@ -1,8 +1,9 @@
 # Deploying
 
-One Databricks Asset Bundle: **five jobs and one app**. Each model is its own
-job with its own serverless environment and its own dependency list — the MCMC
-job does not carry gurobipy, and a model that later needs GPU compute changes
+One Databricks Asset Bundle: **eleven jobs and one app**. Each model is its
+own job with its own serverless environment and its own dependency list — the
+MCMC job does not carry gurobipy, the ten jobs that need neither torch nor
+ortools carry neither, and a model that later needs GPU compute changes
 its own file and nothing else.
 
 ```
@@ -11,32 +12,693 @@ resources/model_<name>.job.yml       one file per model — the microservice bou
 resources/app.yml                    the observer, plus DBX_JOB_IDS wiring
 deploy/requirements/<name>.txt       GENERATED per-model deps, exported from uv.lock
 requirements.txt                     GENERATED app deps (Databricks Apps reads this path)
-entrypoints/run_model.py             what every job actually runs
+job/run_model.py             what every job actually runs
 ```
 
 ## Before the first deploy
 
-**1. The tables.** Apply the DDL once — `uc_ddl/README.md`.
+Four things, in this order. Only the first two are required.
 
-**2. The ingress secret.** The token a job presents to the app. The app reads
-it from a secret; the job never stores it at all — the app passes it per run
-as a job parameter at trigger time.
+**1. The Unity Catalog side — tables and the volume.** Apply the DDL once,
+in order; every statement is `IF NOT EXISTS`, so re-running is safe.
 
 ```bash
-databricks secrets create-scope dbx-leaning
-databricks secrets put-secret dbx-leaning app-token --string-value "$(openssl rand -hex 32)"
+export DBX_WAREHOUSE_ID=7474655945367403          # matches databricks.yml's default
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/001_core_tables.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/002_model_results.sql
+databricks sql query --warehouse-id "$DBX_WAREHOUSE_ID" --file uc_ddl/003_app_volume.sql
 ```
+
+`001` is the one that matters: it is where every run's telemetry lands, and
+without it a run fails at the end, after doing all the work. `002` is per-model
+results, `003` is the app's volume. See `uc_ddl/README.md` for what skipping
+each one costs, and for the `ALTER TABLE` note — `CREATE TABLE IF NOT EXISTS`
+does not add a column to a table that already exists.
+
+**2. The ingress secret.**
+
+> **A workspace secret scope is not a Unity Catalog object.** They are two
+> unrelated stores and only one of them works here. A secret created in UC
+> appears in the catalog tree under a catalog and schema — `main.dbx_leaning`
+> — and the app cannot read it: `resources/app.yml` resolves
+> `secret: { scope, key }` against the **workspace** secret namespace, which
+> is FLAT — a workspace scope literally named `dbx-leaning` is not the
+> `dbx_leaning` schema, and the resemblance between those two names is the
+> whole trap. The Secrets API says so itself: `create-scope
+> --scope-backend-type` takes only `DATABRICKS` or `AZURE_KEYVAULT`. There is
+> no UC backend, and `databricks secrets list-scopes` is the check.
+>
+> **You do not need a scope for this deploy.** There are no declared secrets
+> left: the ingress token is gone (below), and the optional service-principal
+> secret ships commented out. Keep the note because a declared secret is
+> validated at DEPLOY time, so the first one you add fails the whole deploy if
+> it is in the wrong store:
+>
+> ```
+> Invalid secret resource <name>: Secret with scope dbx-leaning and key
+> <name> does not exist. (404 NOT_FOUND)
+> ```
+
+**2. Nothing.** There used to be an ingress token here — a shared secret the
+app checked and handed to each run as a job parameter. It is gone. A job
+authenticates with a Databricks OAuth token and nothing else, which the SDK
+produces from the job's own runtime identity, and the Apps proxy already
+refuses anything without one from a principal holding `CAN_USE`. The app's own
+check sat on top of that and failed open when unset. See
+`app/server/routes/rpc.py`.
 
 **3. A warehouse id**, for the app's read path only (backfill and startup
 reconciliation). Nothing writes through it — see `docs/architecture.md` on why
-the write path bypasses it entirely.
+the write path bypasses it entirely. Free Edition allows one, 2X-Small; its id
+is `databricks.yml`'s `warehouse_id` default and `app/app.yaml`'s
+`DBX_WAREHOUSE_ID`, and `tests/deploy/test_app_yaml.py` keeps those two equal.
+
+**4. Lakebase, optional but wanted** — the Postgres instance holding
+`run_status`. See the Lakebase section below for what leaving it out costs.
+It is a Databricks-side resource this bundle does not create:
+
+```bash
+databricks database create-database-instance dbx-leaning --capacity CU_1
+# waits for AVAILABLE by default; note `read_write_dns` in the output
+databricks database get-database-instance dbx-leaning -o json
+
+psql "host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslmode=require" \
+  -f lakebase_ddl/001_run_status.sql
+```
+
+`databricks database` is Public Preview and its flags may move; check
+`databricks database create-database-instance --help` if the above is refused.
+
+**Choosing the Postgres major version — use the workspace UI.**
+`databricks database create-database-instance` gives you **16**, and there is
+no way to change that from the CLI:
+
+- there is no `--pg-version` flag, and
+- passing `pg_version` in `--json` is ignored. Tried on 2026-08-25 with
+  `"pg_version": "PG_VERSION_18"`; the instance came back
+  `"pg_version": "PG_VERSION_16"` with no error. The field exists on the
+  object because it is returned, not because create accepts it.
+
+The workspace UI (**Compute → Database instances → Create**) offers the
+version. Create it there if you want 18, then carry on with the DNS name and
+the DDL below.
+
+**And it cannot be changed afterwards.** There is no `pg_version` flag on
+`update-database-instance` either. Moving an existing instance to another
+major means deleting it and creating a new one — cheap while it has not
+served a run, since `run_status` is the only table here and `ensure_schema()`
+rebuilds it at startup. No telemetry lives in Postgres; that is all in Delta.
+The DNS name changes, so redeploy with the new `--var="lakebase_host=..."`.
+
+**Nothing here needs a particular version.** `lakebase_ddl/001_run_status.sql`
+uses primary keys, `ON CONFLICT`, advisory locks and a partial index, none of
+which changed between 16 and 18. Rather than assert what a deployment got,
+the app reads it: `PostgresRunStore.ensure_schema()` runs `SHOW
+server_version` on the connection it already has open, and `GET /healthz`
+returns it:
+
+```json
+"store": { "kind": "postgres", "server_version": "16.10" }
+```
+
+`kind` is the other half of that — a deployment that thinks it is on Lakebase
+while silently running on the warehouse store keeps the concurrency race and
+the missing primary key, and this is what makes that visible.
+
+The app applies that schema at startup too, but a deploy that cannot reach the
+instance reports `degraded: lakebase` rather than failing — so do not use
+startup as proof the schema is there.
+
+### `run_status` lives in `dbx_leaning`, not `public`
+
+Both the DDL file and `ensure_schema()` create a schema first:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS dbx_leaning;
+CREATE TABLE IF NOT EXISTS dbx_leaning.run_status (...);
+```
+
+This is not tidiness. **Since PostgreSQL 15, `public` no longer grants CREATE
+to `PUBLIC`**, so a role that does not own the database — which the app's
+service principal generally does not — gets `permission denied for schema
+public` the first time the app applies its DDL. The app would come up
+reporting `degraded: lakebase` for a reason nobody would guess from the
+message. Every statement in `app/server/store.py` qualifies the table too,
+rather than setting a `search_path`: the store opens a connection per
+operation, and a search path that silently reverted to `public` would find a
+*different, empty* table instead of failing.
+
+The name is `databricks.yml`'s `lakebase_schema` (and `DBX_LAKEBASE_SCHEMA` in
+`app/app.yaml`); `tests/deploy/test_app_yaml.py` keeps the two equal.
+
+**Creating a schema needs CREATE on the database**, which Postgres grants to
+the owner and not to `PUBLIC`. If the app reports
+
+    degraded: lakebase — permission denied for database databricks_postgres
+
+then the service principal cannot create it, and the fix is to create it once
+as the instance owner and hand it over:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS dbx_leaning AUTHORIZATION "<sp-application-id>";
+```
+
+Owning the schema is what lets `ensure_schema()` stay idempotent on every
+subsequent start. If handing over ownership is not wanted, grant instead —
+`GRANT USAGE, CREATE ON SCHEMA dbx_leaning TO "<sp-application-id>"` — which
+is enough for the table and index DDL that follows.
+
+The role name is the service principal's **application id**, the same value as
+`lakebase_user` and `oauth_client_id`. Lakebase names the role after the
+principal whose OAuth token is presented, so connecting as one while
+presenting the other's token fails as an ordinary authentication error;
+`/healthz` reports `degraded: lakebase_identity` when those two variables
+disagree, before any connection is attempted.
+
+## Layout: `app/` is the whole app
+
+The shape the [Databricks app template][t] uses — `server/` for the FastAPI
+code, `client/` for the React source, `requirements.txt` at the app root —
+one level down, so the repo can hold the jobs too:
+
+[t]: https://github.com/databricks-solutions/claude-databricks-app-template
+
+```
+DBX_leaning/
+├── app/                 <- source_code_path. Nothing outside it deploys.
+│   ├── server/          the FastAPI package: main.py, routes/, spa.py
+│   ├── client/          the React source. Never deployed.
+│   │   ├── index.html
+│   │   ├── vite.config.ts       build.outDir: "../dist"
+│   │   └── src/
+│   ├── dist/            the built SPA. Committed. server/spa.py serves it.
+│   ├── shared/          THE envelope. Canonical, not a copy — see below.
+│   ├── app.yaml         command + env, read by the RUNTIME — see below
+│   └── requirements.txt where Databricks Apps looks for it
+├── job/                 <- the harness. Installed, not synced. Carries no model
+│   ├── run_model.py     what a task actually runs
+│   ├── local.py         run_local(): the same harness, no Databricks
+│   └── requirements.txt the harness floor, and the whole environment
+├── models/              one installable distribution per model, each with its
+│                        own deps and one entry point. See models/README.md
+└── databricks.yml  resources/  uc_ddl/       the bundle and its DDL
+```
+
+Two consequences, both of which have bitten this repo:
+
+**Nothing is synced as loose files any more, and that is what removed the
+machinery.** A job task installs packages:
+
+```yaml
+dependencies:
+  - -r ${workspace.file_path}/job/requirements.txt
+  - ${workspace.file_path}            # this repo: job/ and shared/
+  - ${workspace.file_path}/models/heartbeat
+```
+
+Python then finds an installed package the ordinary way. What that retired:
+`run_model.py`'s four-way search for a repo root (144 lines to 41),
+`job/shared/` and `app/shared/` as generated copies, `scripts/sync_shared.py`,
+the `experimental.scripts.preinit` hook in `databricks.yml`,
+`tests/deploy/test_shared_copy.py`, and the two distinct `MessageType` enums
+that made `MessageType.LOG is MessageType.LOG` False across them.
+
+**`shared/` lives inside `app/`, and that is deliberate.** Databricks Apps is
+handed `../app` as its `source_code_path` and nothing above it travels — and
+an app can be deployed with no bundle at all, from the Apps UI or
+`databricks apps deploy --source-code-path ...`, which sees only tracked
+files. So the envelope has to be physically in that folder. It is canonical
+there, and `[tool.setuptools] package-dir` maps it back out so the job's
+install of this repo gets the same module rather than a second copy of it.
+
+A symlink would not work: the workspace export rejects them and fails on the
+first one it meets — the same rule that keeps `.venv` and
+`app/client/node_modules` out of the sync.
+
+`tests/deploy/test_app_is_self_contained.py` walks every import in `server/`
+and fails if one resolves outside `app/`. That test exists because deleting
+`app/shared/` as apparent duplication broke the deployed app while the suite
+stayed green — pytest has the repo root on its path and the workspace does not.
+
+One rule that does not follow from any of the above: **a model must never
+appear in `[project.dependencies]`.** `[tool.uv.sources]` marks it a workspace
+member, which only uv reads, and the job installs this repo with **pip** —
+which would go looking for `dbx-model-heartbeat` on PyPI and fail the deploy.
+`tests/deploy/test_app_is_self_contained.py` asserts this too.
+
+**`app/dist/` is committed.** Build output in git is unusual. It is here
+because a deploy driven from *inside* Databricks — a Git folder, a notebook —
+has no Node runtime and sees only tracked files, so a gitignored bundle would
+simply not be there. The cost: **rebuild and commit it whenever the client
+changes**, or the deployed UI is silently stale. Sourcemaps stay out of git —
+5.1 MB against 1.2 MB for the bundle.
+
+**No symlink may reach the workspace.** The App deployment exports its
+`source_code_path` folder and the export rejects symlinks, naming one file:
+
+```
+Failed to export .../DBX_leaning/.venv/bin/python
+INVALID_PARAMETER_VALUE: Path (...) is not an exportable asset. type=symlink
+```
+
+The export fails on the FIRST symlink it meets, so the count is beside the
+point — `.venv/bin` is full of them and `app/client/node_modules` carries
+bin shims (22 under bun; pnpm's symlink-per-package store had thousands).
+Both are in `databricks.yml`'s `sync.exclude`, and
+`tests/deploy/test_bundle.py` asserts it.
+
+**A sync exclude does not clean up what an earlier deploy already uploaded.**
+If a previous run put `.venv` in the workspace, delete it there once:
+
+```bash
+databricks workspace delete /Workspace/Users/<you>/DBX_leaning/.venv --recursive
+```
+
+## How a job reaches the app
+
+Two different authentications happen on one request, and there is only one
+`Authorization` header — which is what made this subtle.
+
+| What | Authenticates | Header |
+| --- | --- | --- |
+| Databricks Apps proxy | *who is calling* — a service principal | `Authorization: Bearer <OAuth>` |
+
+**One credential, on one header, and the platform checks it.** The app sits
+behind the Apps proxy, which lets nothing through without a Databricks OAuth
+token from a principal holding `CAN_USE` on the app. `job/auth.py` gets that
+token from the SDK — no secret to create, rotate, or hand to a run.
+
+There was a second: `X-DBX-App-Token`, the app's own shared secret. It checked
+what the proxy had already checked, cost a secret and a job parameter, and
+failed the wrong way — an unset value meant the app accepted everyone. The
+consequence of removing it, stated plainly: anything that can reach the app can
+open a job socket, which on Databricks is exactly the set of principals granted
+`CAN_USE`. Do not run this app without a proxy in front of it.
+`app/server/routes/ingest.py` still reads `Authorization` as well, so the local dev
+stack (no proxy, no OAuth) works unchanged.
+
+### Which identity the job uses
+
+Any of these, in order, because a job can legitimately have any of them:
+
+1. `DBX_APP_OAUTH_TOKEN` — handed in directly. An escape hatch.
+2. `DBX_OAUTH_CLIENT_ID`/`DBX_OAUTH_CLIENT_SECRET` (or the `DATABRICKS_`
+   spellings), exchanged at `/oidc/v1/token`. **This is the "same principal as
+   the app" case** — the same exchange `app/server/oauth.py` does.
+3. `DATABRICKS_TOKEN`.
+4. **The job's own runtime identity**, via `dbutils`. No secret to distribute
+   anywhere: it is the principal the task already runs as, and it is the
+   option to prefer unless you specifically want app and job to be one
+   identity.
+
+Whichever answers, the job logs which one it was. Nothing here is fatal: a job
+with no Databricks identity runs unobserved, exactly as it does when the app is
+simply down, and the durable path never depended on the app being reachable.
+
+### The grant that makes it work
+
+**That principal needs `CAN_USE` on the app.** Without it the proxy refuses the
+handshake no matter how good the token is:
+
+```bash
+databricks apps set-permissions dbx-leaning --json '{
+  "access_control_list": [
+    {"service_principal_name": "<the principal the job runs as>",
+     "permission_level": "CAN_USE"}
+  ]
+}'
+```
+
+For option 4 that principal is the job's `run_as` — the deploying user by
+default, or whatever `run_as` the bundle sets. For option 2 it is the
+`oauth_client_id` service principal, which needs the same grant even though it
+already has one on the jobs.
+
+If this is missing, the symptom is a run that completes normally with
+`observed=False` in its log and no live telemetry in the UI, while every row
+still lands in Delta. Check the job log for the line naming the credential
+source, then the app's own log for an attach that never arrives.
+
+## Permission to run a job
+
+Knowing a job id is not permission to run it. `DBX_JOB_IDS` tells the app
+*which* job runs which model; without a grant, `POST /api/runs` reaches
+Databricks and is refused:
+
+```
+run-now failed for job 123: HTTP 403 {"error_code": "PERMISSION_DENIED",
+"message": "User ... does not have Manage Run or Owner permissions on job 123"}
+```
+
+`app/server/jobs_api.py` passes that through verbatim, so the 403 is visible
+rather than mysterious — but only once someone presses Run.
+
+**Which principal needs the grant is the whole question**, and it depends on
+one variable:
+
+| `oauth_client_id` | the app authenticates as | grant to it by |
+| --- | --- | --- |
+| empty (default) | the service principal Databricks Apps created for this app | the `job` resources in `resources/app.yml` — nothing else to do |
+| set | that service principal | an explicit grant, below |
+
+### The default: the app's own service principal
+
+Already declared, one per model, in `resources/app.yml`:
+
+```yaml
+- name: job-scenario
+  description: Trigger the scenario model.
+  job:
+    id: ${resources.jobs.model_scenario.id}
+    permission: CAN_MANAGE_RUN
+```
+
+An app resource can only grant to the app's *own* identity, which is what
+makes this the low-friction path: `bundle deploy` creates the job and grants
+the app the right to run it in the same step, and the id is interpolated so it
+cannot go stale. `CAN_MANAGE_RUN` starts and cancels runs; `CAN_MANAGE` would
+also let the app rewrite the job definition, which the bundle owns.
+
+`tests/deploy/test_bundle.py` fails if a model is in `DBX_JOB_IDS` and not in
+this list, or the reverse — the two halves are added together or not at all.
+
+The same block grants `CAN_USE` on the warehouse, for the read path (backfill,
+history, startup reconciliation). Lakebase is there too, commented out: a
+declared resource is validated at *deploy* time, so naming an instance that
+does not exist fails the whole deploy — the trap `oauth-client-secret` fell
+into once. Uncomment it when the instance exists, and note that
+`instance_name` is the instance's **name**, not the `read_write_dns` hostname
+that `lakebase_host` takes. Its `CAN_CONNECT_AND_CREATE` is also what lets
+`ensure_schema()` issue `CREATE SCHEMA`, which Postgres allows the database
+owner alone.
+
+### Running as your own service principal
+
+Setting `oauth_client_id` (and the matching secret) points the app at a
+principal of your own, and **the app resources above stop applying to it** —
+they grant to the app's identity, and it is no longer using that one. Grant
+each job explicitly instead.
+
+Once, from the CLI, per job:
+
+```bash
+SP=<the SP's application id>
+for id in $(databricks jobs list -o json | \
+            jq -r '.[] | select(.settings.tags.project == "dbx-leaning") | .job_id'); do
+  databricks permissions update jobs "$id" --json "{
+    \"access_control_list\": [
+      {\"service_principal_name\": \"$SP\", \"permission_level\": \"CAN_MANAGE_RUN\"}
+    ]
+  }"
+done
+```
+
+Every job carries `tags: {project: dbx-leaning, model: <name>}`, which is what
+makes that selection safe to run in a workspace with other jobs in it.
+
+Or declaratively, so a re-created job keeps the grant — a bundle-level
+`permissions:` block applies to every resource in the bundle:
+
+```yaml
+# databricks.yml, top level
+permissions:
+  - level: CAN_MANAGE_RUN
+    service_principal_name: <the SP's application id>
+```
+
+This is not in the bundle by default because it cannot be conditional: with
+`oauth_client_id` empty there is no principal to name, and an empty
+`service_principal_name` fails the deploy.
+
+That principal needs the rest of what the app does, too — `CAN_USE` on the
+warehouse, `READ VOLUME`/`WRITE VOLUME` on the app volume, and the Lakebase
+role. The Postgres role is named after the principal, which is why
+`lakebase_user` must be the same application id; `/healthz` reports
+`lakebase_identity` when the two disagree, before any connection is attempted.
+
+## Two ways to deploy, two files
+
+`app/app.yaml` and `resources/app.yml` declare the same command and env, and
+which one is read depends on how the app is deployed:
+
+| how | reads |
+| --- | --- |
+| `databricks bundle deploy` | `resources/app.yml` — can interpolate `${var.*}` and job ids |
+| Apps UI, `databricks apps deploy --source-code-path ...` | `app/app.yaml`, out of the source folder |
+
+Deploying the second way without an `app.yaml` fails before the process
+starts:
+
+```
+No command to run and no Python file found.
+Please add a 'command' field to your app.yml file.
+```
+
+`tests/deploy/test_app_yaml.py` compares the two files so they cannot drift
+into behaving differently. Watch the spelling — it differs by file, and both
+are correct in their own:
+
+```
+app/app.yaml       (the runtime reads it)  ->  valueFrom
+resources/app.yml  (the bundle declares)   ->  value_from
+```
+
+**`DBX_JOB_IDS` is only in the bundle.** Job ids do not exist until the bundle
+creates the jobs, so a hand deploy cannot have them, and this is the symptom:
+
+```
+GET /api/models  ->  {"models": [], "default_job_id": null}
+```
+
+`/healthz` names it — `degraded.job_ids`: "no DBX_JOB_IDS configured; no model
+can be triggered from this app" — and everything else (observing runs someone
+else triggered, streaming, history, results) works normally.
+
+The cure is `databricks bundle run dbx_leaning`, not another `bundle deploy`.
+See the next section for why those are two steps.
+
+**Bind `$DATABRICKS_APP_PORT`, never a literal.** Apps assigns the port. Bind
+anything else and the platform's health check never connects, so the
+deployment is marked FAILED while the app process runs fine.
+
+## The app's volume
+
+The app gets a Unity Catalog volume for durable file storage —
+`uc_ddl/003_app_volume.sql` creates it, `resources/app.yml` grants the app
+`READ_VOLUME` and `WRITE_VOLUME` on it and passes the path as
+`DBX_APP_VOLUME`.
+
+It exists because **a Databricks App's own disk is not storage.** The app runs
+at most 24 hours and then stops, taking its container with it; a redeploy does
+the same. A file written beside the code is downloadable until the next
+restart, which is worse than not offering it at all.
+
+```bash
+databricks sql query --file uc_ddl/003_app_volume.sql
+```
+
+Leaving it out is a supported, degraded deploy: `/healthz` reports `volume`
+degraded and anything that would write a file is unavailable. Nothing on the
+run path touches it — the job writes telemetry to Delta and results to their
+own tables.
 
 ## Deploy
 
 ```bash
-databricks bundle validate                     # schema and references
-databricks bundle deploy -t dev
+cd app/client && bun install && bun run build && cd ../..   # only if the SPA changed
+databricks bundle validate                           # schema and references
+databricks bundle deploy -t dev                      # jobs + app SOURCE
+databricks bundle run    dbx_leaning -t dev          # the app DEPLOYMENT
 ```
+
+**Both commands, every time the app changes.** They do different things, and
+the second is the one that is easy to forget:
+
+- `bundle deploy` creates and updates the *resources* — the eleven jobs, and
+  the app object — and uploads `app/` to the workspace. It does not create an
+  app deployment, so the running app keeps serving whatever it was serving.
+- `bundle run <app key>` creates the app deployment from what was uploaded and
+  starts it. `dbx_leaning` is the resource key in `resources/app.yml`, not the
+  app's `name:` (`dbx-leaning`, with a hyphen).
+
+Deploy without run and the app looks deployed: `bundle deploy` reports its
+resources updated, the app answers, and it is running the *previous*
+deployment's code and env. If that previous deployment came from the Apps UI,
+its env came from `app/app.yaml`, which deliberately has no `DBX_JOB_IDS` — so
+`/api/models` is empty and no model can be triggered. `databricks apps get
+dbx-leaning -o json` is how to see it: an absent or stale `active_deployment`
+is exactly this.
+
+The build step is only needed when `app/client/` has changed since `app/dist/`
+was last committed, because `app/dist/` is in git — which is also what makes
+`databricks bundle deploy` work unchanged from inside a Databricks Git folder,
+where there is no Node to run it.
+
+**`bun run build` runs `tsc -b` first**, so a type error fails the build rather
+than shipping a stale bundle. Commit the result: a rebuilt `app/dist/` that is
+not committed deploys the previous UI without saying so.
+
+Skip the build when the SPA has not changed and nothing is lost. Skip it when
+it *has* changed and the deploy succeeds, the API works, and every page serves
+the old bundle — or, on a checkout that never built one, answers 503 with the
+message in `app/server/spa.py::NO_BUNDLE`.
+
+## Local development
+
+Both halves run together, and it is the same code that deploys:
+
+```bash
+uv run python scripts/dev_stack.py     # FastAPI + a real job runner + Postgres
+cd app/client && bun run dev              # Vite, proxying /api, /ws, /healthz
+```
+
+`app/client/vite.config.ts` proxies to `DBX_DEV_API` (default
+`http://127.0.0.1:8000`, matching `dev_stack.py::DEFAULT_APP_PORT`), so the
+browser talks to the real FastAPI app — real SSE, real WebSocket ingress, real
+`Last-Event-ID` resume. See `scripts/dev_stack.py`'s docstring for exactly
+which parts are the shipped code and which are substituted.
+
+To exercise what actually deploys instead — FastAPI serving the built bundle,
+one process, no Vite — build first and open the app's own port:
+
+```bash
+cd app/client && bun run build && cd ../..
+uv run python scripts/dev_stack.py
+```
+
+## Lakebase
+
+`run_status` lives in Postgres, not Delta — one row per run, point-looked-up,
+and counted against the 5-concurrent-task ceiling. Postgres gives it a primary
+key on `run_id` and a transaction around the count-and-claim, so that ceiling
+is enforced rather than observed (`app/server/store.py`, `pg_advisory_xact_lock`).
+
+Point the app at an instance with four variables:
+
+```bash
+databricks bundle deploy -t dev \
+  --var="lakebase_host=<instance>.database.cloud.databricks.com" \
+  --var="lakebase_user=<the app's service principal id>"
+  # lakebase_database and lakebase_port have working defaults
+```
+
+**Leaving `lakebase_host` empty is supported, and degraded.** The app falls
+back to the warehouse-backed store, whose `release_slot` is a documented no-op
+that relies on reconciliation to correct it — so the ceiling becomes advisory
+rather than transactional, and every check costs warehouse uptime. Nothing
+fails; it simply stops being the design in `CLAUDE.md`. `GET /healthz` reports
+which store is live and `app/server/services.py` logs it at startup, which is what
+keeps that from being silent.
+
+Apply `lakebase_ddl/001_run_status.sql` before the first run. The app applies
+it at startup too, but a deploy that cannot reach the instance reports
+`degraded: lakebase` rather than failing, so do not rely on that to tell you
+the schema is there.
+
+### Running as a service principal you granted yourself
+
+By default the app authenticates as the service principal Databricks Apps
+creates for it, and **nothing needs configuring**. Using one you made and
+granted explicitly is opt-in, in three steps that must happen in this order:
+
+```bash
+# 1. The secret must EXIST before the bundle may mention it.
+databricks secrets put-secret dbx-leaning oauth-client-secret \
+  --string-value "<the SP's OAuth secret>"
+
+# 2. Uncomment BOTH blocks in resources/app.yml - the `oauth-client-secret`
+#    resource, and the DBX_OAUTH_CLIENT_SECRET env that reads it.
+
+# 3. Deploy, naming the principal.
+databricks bundle deploy -t dev \
+  --var="oauth_client_id=<the SP's application id>" \
+  --var="lakebase_host=<read_write_dns>" \
+  --var="lakebase_user=<the SP's application id>"
+```
+
+**Why it ships commented out rather than just empty.** A declared secret
+resource is validated when the app is updated, so a bundle that mentions a key
+the scope does not have fails the whole deploy before uploading anything:
+
+```
+Error: cannot update resources.apps.dbx_leaning:
+Invalid secret resource oauth-client-secret: Secret with scope dbx-leaning
+and key oauth-client-secret does not exist. (404 NOT_FOUND)
+```
+
+There is no fallback for a *declared* resource — declaring it makes it
+required. Everything else optional in this platform degrades at run time and
+reports itself on `/healthz`; this one cannot, so it is off until you opt in.
+`tests/deploy/test_bundle.py` fails if it is ever declared by default.
+
+Setting `oauth_client_id` without doing step 2 is inert but not silent:
+`/healthz` reports `oauth` degraded, naming the id it was given, because
+falling back to the app's own principal while a Lakebase role is granted to a
+different one is a failure that otherwise looks like success.
+
+**`lakebase_user` is the SAME application id, and this is the mistake to
+avoid.** Lakebase takes an OAuth token as its password, and the Postgres role
+Databricks provisions is named after the principal that token belongs to.
+Connecting as one principal while presenting another's token fails as a plain
+authentication error — indistinguishable from a wrong secret, so the hour goes
+into the secret scope. `tests/deploy/test_bundle.py` refuses the mismatch in
+the bundle, and `/healthz` reports `lakebase_identity` at run time if the two
+env vars ever disagree.
+
+**The id is a variable, the secret is a secret.** A bundle variable ends up in
+the deployment state, which is readable by a different set of people than the
+secret scope; `tests/deploy/test_bundle.py` fails if any variable's name looks
+like a credential. Grant the principal `READ_VOLUME`/`WRITE_VOLUME` on the
+volume, whatever your models need on the results tables, `CAN_MANAGE_RUN` on
+the jobs, and a Postgres role on the Lakebase instance.
+
+**One token, three uses.** `server/services.py::_token_source` builds a single
+`OAuthTokenProvider` and hands it to the run store, the SQL client and the
+Jobs API, so there is one exchange and one cache rather than three on
+independent refresh schedules.
+
+### The credential is a token, not a setting
+
+An instance created with `enable_pg_native_login: false` — **the default** —
+accepts only a short-lived Databricks OAuth token as its Postgres password.
+There is no password to put in a secret, and none is set.
+
+So the app fetches one, per connection:
+
+```
+DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET   injected by Databricks Apps
+    -> POST {host}/oidc/v1/token, grant_type=client_credentials
+    -> the token becomes the Postgres password for that connection
+```
+
+`server/oauth.py` caches it until shortly before it expires, so the common
+case is a dict lookup and the uncommon one is a single round trip. This is
+also the reason `server/store.py` opens a connection per operation rather than
+pooling.
+
+**The obvious alternative is a bug, and this app had it.** Reading the
+credential once at startup and building a connection string from it works —
+for about an hour. An App runs for up to 24, so a deployment sees every
+Postgres operation succeed through the morning and fail thereafter, with
+nothing in the logs pointing back at startup, which is where the fault is.
+
+Two things about this remain unverified against a real workspace: that the
+Apps runtime injects those two variables under those names, and that
+`scope=all-apis` is granted to an app's service principal. Both are
+overridable — `DBX_OAUTH_CLIENT_ID` and `DBX_OAUTH_CLIENT_SECRET` take
+precedence — and a failed exchange raises `TokenUnavailable` naming the
+endpoint and OAuth's own error code rather than sending an empty password to
+Postgres, which would surface as a password mismatch and send you looking for
+the wrong problem.
+
+**A static password is still supported**, for the local dev stack (embedded
+Postgres, no auth) and for an instance created with native login on: set
+`DBX_LAKEBASE_PASSWORD` — as a **secret**, never a bundle variable, since a
+variable ends up in the deployment state. The YAML is commented in
+`resources/app.yml`, and `tests/deploy/test_bundle.py` fails if a credential
+is ever added as a variable.
+
+## After the first deploy
 
 Then tell the app where it lives, which is only knowable after it has a URL:
 
@@ -52,11 +714,12 @@ designed state, not a broken one.
 
 ## What deploys, and how it gets there
 
-**Code travels by workspace file sync**, not as a wheel. Each job runs
-`entrypoints/run_model.py` from the synced tree, which puts the repo root on
-`sys.path` and hands the harness its parameters. Moving to a wheel later
-changes the task definition and nothing else — the entrypoint contract is the
-same either way.
+**Code is synced, then INSTALLED.** The bundle syncs the repo to
+`${workspace.file_path}`, and each job's environment installs from there:
+this repo (`job/` and `shared/`) and the model's own distribution. The task
+then runs `job/run_model.py`, which arranges nothing — it reads parameters and
+calls the harness, because Python already knows where everything is. Moving to
+published wheels later changes only the `dependencies` list.
 
 **Dependencies are exported from `uv.lock`**, never re-resolved:
 
@@ -70,6 +733,14 @@ What deploys is therefore exactly what the tests ran against.
 lock, if a model's library leaks into another model's environment, or if two
 environments end up pinning different versions of a shared dependency.
 
+**The frontend is the exception to "the sync mirrors the repo".**
+`databricks.yml` excludes `app/client/**` outright — the client source is
+useless in a workspace with no Node runtime, and `node_modules` alone would
+dwarf the rest of the sync. What deploys is `app/dist/`, which is not in that
+directory: `app/client/vite.config.ts` writes `../dist`, so the bundle lands
+at the app root, where `server/config.py::frontend_dist` looks for it by
+default and `resources/app.yml` names it explicitly as `DBX_FRONTEND_DIST`.
+
 ## Parameters
 
 Serverless tasks have no `spark_env_vars`, so parameters travel as `KEY=VALUE`
@@ -82,7 +753,6 @@ arguments and the entrypoint exports them before the harness reads them.
 | `DBX_MODEL_CONFIG` | JSON, handed to the model's factory verbatim |
 | `DBX_CATALOG` / `DBX_SCHEMA` | Where the tables live |
 | `DBX_APP_URL` | Where to attach. Empty = run unobserved |
-| `DBX_APP_TOKEN` | Ingress credential, supplied per run by the app |
 
 A Databricks job **rejects a `run-now` parameter it has not declared**, so
 every job declares exactly the set the trigger endpoint sends.
@@ -97,7 +767,7 @@ Databricks has no per-account setting for that, so:
 - each job bounds only itself (`max_concurrent_runs`: 1, except `scenario`,
   which exists to exercise fan-out),
 - the **app** enforces the account-wide ceiling before triggering and returns
-  429 naming the limit (`app/routes/runs.py`),
+  429 naming the limit (`app/server/routes/runs.py`),
 - jobs `queue` rather than failing if the limit is hit another way.
 
 ## Running a job without the app
@@ -107,12 +777,13 @@ workspace rather than trusting:
 
 ```bash
 databricks jobs run-now <job-id> --json '{
-  "job_parameters": {"DBX_RUN_ID": "manual-1", "DBX_MODEL": "models.scenario"}
+  "job_parameters": {"DBX_RUN_ID": "manual-1", "DBX_MODEL": "heartbeat"}
 }'
 ```
 
 No `DBX_APP_URL`, so nothing is watching. The run should still complete and
-land in `run_logs`, `run_progress`, `run_events` and `results_scenario`.
+write its telemetry part files under the run's directory on the
+telemetry volume.
 
 ## Cancelling
 

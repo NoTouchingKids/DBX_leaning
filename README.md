@@ -1,7 +1,14 @@
 # DBX_leaning
 
-Databricks modelling application platform — v2 rewrite. See `CLAUDE.md` for
-the full brief; this file is just "what do I do first."
+Databricks modelling application platform. See `CLAUDE.md` for the full
+brief; this file is just "what do I do first."
+
+> **This branch is `v4-plan`, and most of this README still describes v3.**
+> The transport, the durable path and the model packaging all changed —
+> `docs/v4-rewrite-plan.md` is the record, `CLAUDE.md` is current, and
+> everything below the "What's here" tree should be read with suspicion until
+> it has been rewritten. The eleven models, the HTTP-push fallback, the Delta
+> writer and the warehouse read path are all on `dev`, not here.
 
 ## First run
 
@@ -29,35 +36,45 @@ don't, so they go first.
 
 ## After the probes pass
 
-`docs/parallelization-plan.md` has the worktree-per-track breakdown. Short
-version: build `shared/` (the message envelope) once, sequentially, then
-fan out — one Claude Code session per track (`app/`, `job/`, and one per
-model in `models/`), each briefed from its file in `.claude/agents/`.
+Build `shared/` (the message envelope) once, sequentially — everything else
+depends on its shape. From there, `app/`, `job/` and a model are independent
+enough to build in parallel, one Claude Code session per area, each briefed
+from `.claude/agents/` (`transport-app.md`, `transport-job.md`,
+`frontend.md`). A new model needs no brief at all: `models/README.md` is
+the pattern once `shared/` is frozen — no command needed, and none exists
+on this branch for it.
 
 ## What's here
 
 ```
 CLAUDE.md              Project brief, auto-loaded every session
-docs/                  Architecture rationale, platform constraints, envelope spec, parallel plan
-.claude/agents/        One brief per parallel track
-.claude/commands/      /orient, /spike-ws, /spike-sse, /new-model
+docs/                  Architecture rationale, platform constraints, envelope spec
+.claude/agents/        One brief per area: app/, job/, app/client/
+.claude/commands/      /orient, /spike-ws, /spike-sse
 
-shared/                The message envelope + protocol. Imported by app/ and job/,
-                       never by models/. Build against this, don't fork it.
-job/                   The harness: model loader, thread->loop crossing, WS client
-                       with HTTP-push fallback, Delta writer, cancellation
-app/                   FastAPI: SSE to browsers, WS ingress for jobs, cancel,
-                       backfill, startup reconciliation, ServiceHub/DI
-models/                Five model packages. See models/README.md for the
-                       duck-typed contract a model has to satisfy.
-uc_ddl/                Unity Catalog DDL, idempotent, apply in order
-databricks.yml         Asset bundle: five jobs (one per model) and the app
+app/shared/            The message envelope + RPC frames. Imported by app/ and
+                       job/, never by a model. Canonical here because the app
+                       deploys alone; the job installs the repo and gets the
+                       same module. Build against this, don't fork it.
+job/                   The harness: model loader, RPC/WS client, telemetry
+                       part-file writer, cancellation, run_local()
+app/                   FastAPI: SSE to browsers, WS/RPC ingress for jobs,
+                       cancel, ServiceHub/DI
+models/                One installable distribution per model, each with its own
+                       dependencies and one entry point. See models/README.md
+                       for the duck-typed contract a model has to satisfy.
+uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
+lakebase_ddl/          Postgres DDL (run state) — applied at startup too
+databricks.yml         Asset bundle: eleven jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide
-entrypoints/           What a Databricks job actually runs
-frontend/              Not started, on purpose — see frontend/README.md
-tests/                 ~220 tests, none needing a Databricks connection
-scripts/               check_gurobi_licence.py — the bundled-licence expiry
+job/run_model.py       What a Databricks job actually runs
+app/                   The deployed app: server/ (FastAPI), client/ (React
+                       source), dist/ (built SPA), shared/ (a tracked copy)
+tests/                 ~790 tests, none needing a Databricks connection
+scripts/               dev_stack.py — the whole platform locally, no workspace
+                       dev_launcher.py — its stand-in for the Jobs API
+                       check_gurobi_licence.py — the bundled-licence expiry
 ```
 
 ## Running it locally
@@ -74,10 +91,12 @@ uv run ruff check .                     # lint
 uv run ty check                         # types (advisory — see below)
 
 # a full run with no app listening — the normal unobserved case
-DBX_MODEL=models.scenario DBX_WRITER=jsonl DBX_ALLOW_LOCAL_WRITER=1 \
-  uv run python -m job.main
+DBX_MODEL=heartbeat uv run python -m job.main
 
-uv run uvicorn app.main:app --reload    # the observer, on :8000
+# or, with nothing to configure at all:
+uv run python -c "from job.local import run_local; print(run_local('heartbeat', seconds=3)[0])"
+
+uv run uvicorn server.main:app --reload    # the observer, on :8000
 ```
 
 Extras are separable, and the lockfile covers all of them from one
@@ -103,6 +122,53 @@ checker objects to and which are not defects. Source sits at zero errors; the
 one standing warning is `pyspark`, deliberately absent from the dependency set
 because the Databricks runtime provides it.
 
+### The whole loop, with no workspace
+
+The commands above run one piece at a time. This runs all of them together —
+trigger a model from the browser and watch its telemetry arrive:
+
+```bash
+uv run python scripts/dev_stack.py      # app + job launcher + registry
+cd frontend && bun run dev                 # in a second terminal
+```
+
+Then click Run on any of the eleven models. That goes through `POST /api/runs`,
+which launches the real `job/` harness in its own OS process, which attaches
+over the real WebSocket ingress and streams real envelope messages back over
+the real SSE endpoint. It is the shipped code, not a mock server and not
+recorded fixtures.
+
+Useful flags: `--models scenario,mcmc` to narrow what is triggerable,
+`--max-concurrent-runs 1` to see the 429 without starting five runs,
+`--reload` for uvicorn autoreload on `app/`, `--reset` to wipe the local
+registry and telemetry. Kill the app process while a run is going and the
+stack restarts it — the job keeps running and reattaches, which is the
+autonomy property the transport design rests on, watchable in one terminal.
+
+**What is real, and what is not.** A dev loop that quietly diverges from
+production is how "works on my machine" gets built, so:
+
+| | Local | Deployed |
+|---|---|---|
+| `app/`, `job/`, `app/shared/`, `models/` | the same code | the same code |
+| Live path | real WS ingress, real HTTP-push fallback, real SSE | same |
+| Run registry | embedded Postgres (`pgserver`) via `PostgresRunStore` | Lakebase, same class |
+| Concurrency ceiling | the app's check is real; nothing enforces it behind that | the account's own 5-task limit too |
+| **Trigger** | `scripts/dev_launcher.py` answers `run-now`/`runs/get` and spawns a subprocess; `DATABRICKS_HOST` points at it | the Jobs API |
+| **Durable writes** | local JSONL under the state dir (`DBX_WRITER=jsonl`) | Delta in Unity Catalog via Spark |
+| **Model environments** | one venv with everything | one serverless environment per model |
+| **Warehouse reads** | none — backfill and `/results` answer 503, startup reconciliation is skipped | the SQL warehouse |
+| Startup latency | milliseconds | tens of seconds for a serverless task |
+
+`GET /healthz` reports `degraded` locally and names the reason; that is
+expected, not a fault. Nothing is written inside the repository — state lives
+under `~/.cache/dbx-leaning/dev-stack` (`--state-dir` to move it), including
+job logs, so a failed run's traceback is a file away.
+
+Each substitution is spelled out again in the docstrings of
+`scripts/dev_stack.py` and `scripts/dev_launcher.py`, next to the code that
+does it.
+
 ## API surface
 
 | Endpoint | What |
@@ -112,10 +178,12 @@ because the Databricks runtime provides it.
 | `GET /api/runs/{id}` | One run's current state |
 | `GET /api/runs/{id}/stream` | SSE. `id:` is the message `seq`, so `EventSource`'s own `Last-Event-ID` resume works unmodified |
 | `GET /api/runs/{id}/messages` | Explicit backfill from Unity Catalog, client-triggered, paged by seq |
+| `GET /api/runs/{id}/results` | The full result set a `result` message only previews — the table its `fetch_hint` points at, paged |
 | `POST /api/runs/{id}/cancel` | Forwards over the job's WebSocket, or 409s naming the CLI escape hatch |
-| `GET /api/models` | What can be triggered — derived from `DBX_JOB_IDS`, not by importing `models/` |
+| `GET /api/models` | What can be triggered — discovered by the `project: dbx-leaning` job tag, not by importing a model |
 | `WS /ws/job/{id}` | The job's ingress, and the only inbound path to a running job |
 | `POST /api/runs/{id}/push` | One-way HTTP fallback ingress |
+| `GET /api/schema` | The wire protocol as JSON Schema — generate the client's types from this |
 | `GET /api/whoami`, `GET /healthz` | Cosmetic identity; health with per-service degradation |
 
 Triggering needs `DBX_JOB_IDS` (a JSON map of model name to Databricks job
@@ -124,13 +192,13 @@ id), `DATABRICKS_HOST`, and — to be observed rather than merely run —
 
 ## State of play
 
-`shared/`, `job/`, `app/` and all five models are built and tested, and
+`shared/`, `job/`, `app/` and all eleven models are built and tested, and
 **WebSocket and SSE are both confirmed working through the Databricks Apps
 ingress** — the question that stayed open across all three builds of this
 platform (`docs/spike-results.md`). The transport in `docs/architecture.md` is
 the one being built, not a hopeful guess.
 
-Deployment exists as an Asset Bundle — five jobs, one per model, each with
+Deployment exists as an Asset Bundle — eleven jobs, one per model, each with
 its own serverless environment and dependency list exported from `uv.lock`.
 See `deploy/README.md`.
 
