@@ -43,6 +43,29 @@ to avoid.
    against a live run (CLAUDE.md, "Still not done"). Phase 3 rewrites exactly
    the code they live in — get a known-good baseline first, or a regression
    after the rewrite has nothing to be compared against.
+3. **Decide what to do about `tests/` before Phase 3 starts, not after.**
+   It does not exist on this branch — commit `c1f19c4`, "droped all Test for
+   now," removed all of it (`tests/app/`, `tests/job/`, `tests/deploy/`). It
+   still exists in full on `origin/main` and `origin/dev`. Meanwhile roughly
+   a dozen files still assert specific test files enforce specific contracts
+   in the present tense — `CLAUDE.md`, `deploy/README.md`, `models/README.md`,
+   `pyproject.toml`, `conftest.py`, `app/server/routes/runs.py`,
+   `.claude/agents/transport-app.md`, `docs/message-envelope-spec.md` among
+   them. None of those claims are enforced right now. Two honest resolutions,
+   not a third: pull a trimmed suite back from `main`/`dev` scoped to what
+   this branch actually has (`heartbeat` + `annealing`, not all eleven
+   models), or accept the gap and correct every one of those claims to say so.
+   Multiple workers changing `job/` and `app/` at once, per the track
+   breakdown below, is exactly the situation this gap makes riskiest — no
+   fast feedback loop means a collision between two tracks' changes is
+   caught by a human reviewer or not at all. Resolve this before, or as,
+   Track A below starts.
+4. **Check the other branches in this repo before building Phase 2 from
+   scratch.** `origin/lakebase-status-history` and
+   `origin/claude/durable-writer-and-results` both sound like they already
+   cover ground this phase needs — a Lakebase status history and a durable
+   writer/results path. Read them first; reconciling with existing work
+   costs less than duplicating it.
 
 ## Phase 1 — freeze the wire
 
@@ -104,12 +127,26 @@ Arrow IPC on the wire:
 5. Remove the app-side status writer (`services.py::_persist_status`) once
    the harness is the sole writer. Two writers to one row is the bug this
    phase exists to prevent.
-6. Remove the dead code in `app/server/store.py`: `claim_slot`, `SlotDenied`,
-   `DuplicateRun`, the ceiling advisory-lock id, and the stale docstring
-   mentioning `WarehouseRunStore`. The app never enforced the 5-task ceiling;
-   Databricks does, via `queue.enabled` on every job resource — confirm that
-   line is already true of every `resources/model_*.job.yml`, not just
-   `annealing`'s.
+6. Remove the dead code in `app/server/store.py` — confirmed zero callers
+   anywhere outside the file itself, via grep, this session: the `RunStore`
+   Protocol in full, `SlotDenied`, `DuplicateRun`, `claim_slot`,
+   `release_slot`, `attach_job_run`, `active_count`, `non_terminal`, and the
+   `_CEILING_LOCK_ID` constant. Also fix the module docstring, which still
+   claims "two implementations behind one interface" and a
+   `:class:`WarehouseRunStore`` that does not exist, and drop the
+   `Protocol`/`runtime_checkable` imports once nothing uses them. The app
+   never enforced the 5-task ceiling; Databricks does, via `queue.enabled` on
+   every job resource — confirm that line is already true of every
+   `resources/model_*.job.yml`, not just `annealing`'s.
+7. Fix `app/server/services.py::_persist_status`'s log message, which
+   currently says a failed write will be picked up by "startup
+   reconciliation" — that mechanism was removed in the v3→v4 cut (the
+   `startup()` method's own comment says so: "What went with it: SqlClient,
+   RunRepository, startup reconciliation..."). It is very likely what
+   `active_count`/`non_terminal` in item 6 were for; both are now provably
+   dead for the same reason. Say plainly that a failed Lakebase write leaves
+   `run_events` in Delta as the only record until this write path is retried,
+   not that it self-heals on next startup.
 
 ## Phase 3 — the harness becomes a composable object
 
@@ -204,3 +241,61 @@ no dependency on 0, 2 or 3 and can proceed in parallel with them. Phase 3
 depends on Phase 1's version field existing in `hello` before the
 controller's dispatch table is written, so the two are best done together
 rather than strictly sequentially.
+
+## Running this across multiple workers
+
+This branch (`v4-plan`) is design and cleanup only — no phase above has been
+implemented. The next step is a new branch, cut from this one once it's
+pushed, where the phases above get built. This section is how to split that
+work across more than one worker without them colliding.
+
+### Before fanning out
+
+1. Resolve Phase 0 item 3 (`tests/`) first. Every track below is easier to
+   verify, and easier to review, with a real test suite to run — and
+   multiple workers touching `job/` and `app/` at once is the situation
+   where "no fast feedback loop" costs the most.
+2. Read `origin/lakebase-status-history` and
+   `origin/claude/durable-writer-and-results` (Phase 0 item 4) before Track C
+   below starts, so it builds on or reconciles with what's there instead of
+   duplicating it.
+3. Cut the new branch from this one's current tip, after the doc/cleanup
+   commits in this session are pushed.
+
+### Track breakdown
+
+| Track | Phase(s) | Files it owns | Depends on |
+|---|---|---|---|
+| A — cleanup carried over from this session | Phase 2 items 6–7 | `app/server/store.py`, `app/server/services.py` | Nothing. Safe to start immediately; it's dead-code removal and a log-message fix, already scoped exactly by grep in this session. |
+| B — wire freeze | Phase 1 | `app/shared/envelope.py`, `shared/rpc.py`, `app/server/routes/rpc.py`, `docs/message-envelope-spec.md` | Nothing. |
+| C — run state | Phase 2 items 1–5 | `lakebase_ddl/001_run_status.sql`, `app/server/store.py` (schema/DDL parts, not Track A's dead code), a new job-side Lakebase writer module | Phase 0 items 1, 2, 4. Needs Track A's docstring fix landed first if both touch `store.py`'s header — coordinate or sequence, don't run fully blind in parallel on the same file. |
+| D — harness concurrency | Phase 3 | `job/harness.py`, `job/ws.py`, `job/main.py` | Track B's version field (item 3) should land first — the controller's dispatch table is easier to write once, not twice. |
+| E — discovery & cross-team | Phase 4 | `app/server/discovery.py`, `resources/*.job.yml` | Nothing. |
+| F — docs & packaging | Phase 5 | `docs/model-expansion-and-packaging.md`, `docs/architecture-diagram.md` | Best started last — it documents what B–E actually did, not what this plan predicted they'd do. |
+
+**The one real file collision: Track C and Track D both change `job/harness.py`.**
+Phase 2 item 4 calls for the Lakebase writer to be invoked from `emit()`'s
+status path, queued through the controller thread Phase 3 item 5 creates.
+That is not two disjoint changes to the same file, it is one change that
+happens to be described in two phases. Either run C and D as one worker, or
+sequence them: D lands the named-slot restructure first (item 5), then C
+plugs a writer into the slot it creates. Don't run them as two independent
+workers against `job/harness.py` at the same time.
+
+### Running it
+
+Same two options CLAUDE.md's now-deleted `parallelization-plan.md` used, and
+for the same reasons:
+
+- **One worktree and branch per track**, each its own Claude Code session —
+  true parallelism, no file contention as long as the table above is
+  respected.
+- **One orchestrating session**, dispatching each track as a subagent — fine
+  for tracks B, E and F, which touch disjoint files; use worktrees for A/C/D
+  once C and D are actually running concurrently with anything else, since
+  that's the one place a shared-file collision is real rather than
+  theoretical.
+
+Merge order follows the phase dependencies above: B and E merge whenever
+ready; A anytime, ideally first since nothing depends on it; C and D merge
+together (or D then C); F last, once it has something true to document.
