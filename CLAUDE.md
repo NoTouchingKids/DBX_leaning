@@ -399,6 +399,11 @@ Full procedure: `deploy/README.md`.
   (written 2026-08-30). More precise than this file on several points it
   summarizes, including run state ("the job writes it, and there are two
   kinds") and why v3's concurrency-ceiling transaction was retired
+- `docs/v5-implementation-plan.md` — the phased plan for what v4 left open:
+  who writes run state, the harness's thread model, what the wire promises a
+  fork, and moving schema migration fully out of both app and job (written
+  2026-09-18). Marks each item SETTLED or PROPOSED — the latter still need
+  sign-off before their code is written
 - `docs/architecture-diagram.md` — what talks to what, as Mermaid diagrams
   (component/data-flow + a run's lifecycle sequence), drawn from the built
   code rather than the target layout above. Also sketches a proposed,
