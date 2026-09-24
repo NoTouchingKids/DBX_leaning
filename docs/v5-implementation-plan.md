@@ -80,7 +80,42 @@ one for the correction as much as the answer.
    fast feedback loop means a collision between two tracks' changes is
    caught by a human reviewer or not at all. Resolve this before, or as,
    Track A below starts.
-4. **Check the other branches in this repo before building Phase 2 from
+4. **SETTLED, 2026-09-24: read, and neither is a base to build on.** Both
+   branches are v3-era trees with no merge base with this branch (v4 was a
+   rewrite), so there is nothing to merge — only ideas to lift.
+
+   - `origin/claude/durable-writer-and-results` (`37cf0a8`) is where
+     `PostgresRunStore`, the `RunStore` Protocol, `claim_slot` and the
+     advisory-locked count-and-claim came from — i.e. the dead code Track 0
+     item 1 deletes. Its delta-rs and results-table work was retired by v4
+     ("Who writes what"), and `main` reverted the branch's merge (`080216d`).
+     Nothing here for Phase 2.
+   - `origin/lakebase-status-history` (`3280f49`, `5c57c33`) built exactly
+     Phase 2's job-side writer — `job/lakebase.py` — but on the mechanism
+     Phase 0 item 1 disproved (a Database REST API), on asyncio (Phase 3
+     item 6 rejects it), and beside an app that still claimed slots. The
+     transport does not carry over. **Three rules do, and Tracks A and C
+     should adopt them rather than rediscover them:**
+     1. *A late write must not move the row backwards.* The upsert's
+        `WHERE run_status.<clock> <= EXCLUDED.<clock>` guard, keyed on the
+        message's own clock and never on `now()` — a late-landing write
+        always carries the later `now()`, which makes the guard inert on
+        exactly the path that needs it. On v5 the clock should be `seq`, not
+        `ts`: it is job-assigned, per run, monotonic by construction, and
+        already in the proposed column list.
+     2. *History, if kept, is a second table, not `run_status` made
+        append-only.* The primary key on `run_id` is what makes the upsert
+        possible at all. That branch's `run_status_history` appended every
+        reported transition, deduped by a partial unique index on
+        `(run_id, seq)`. Whether v5 wants a history table is part of the
+        Phase 2 item 1 sign-off, not a default.
+     3. *Never raise, count instead.* `writes` / `failures` / `last_error` on
+        the writer object, so a best-effort path is observable without being
+        load-bearing.
+
+   Original text follows.
+
+   **Check the other branches in this repo before building Phase 2 from
    scratch.** `origin/lakebase-status-history` and
    `origin/claude/durable-writer-and-results` both sound like they already
    cover ground this phase needs — a Lakebase status history and a durable
