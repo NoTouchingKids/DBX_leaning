@@ -5,7 +5,7 @@ obtained behaves identically to the real thing. Tested against PostgreSQL 16,
 which is what this environment provides AND what the Lakebase instance created
 on 2026-08-25 came back as — the CLI ignores `pg_version` on create, so 18 is
 reachable only through the workspace UI. Nothing used here — primary keys,
-ON CONFLICT, advisory locks, partial indexes — differs between 16 and 18, but
+ON CONFLICT, partial indexes — differs between 16 and 18, but
 that is a claim about the feature set, not a test result. The app asserts
 neither: `ensure_schema()` reads `SHOW server_version` and `/healthz` reports
 what the server actually said.
@@ -13,7 +13,6 @@ what the server actually said.
 
 from __future__ import annotations
 
-import asyncio
 import pathlib
 import tempfile
 
@@ -21,10 +20,7 @@ import pytest
 
 from server.store import (
     DEFAULT_SCHEMA,
-    DuplicateRun,
     PostgresRunStore,
-    RunRecord,
-    SlotDenied,
     UnsafeSchemaName,
     qualified,
 )
@@ -33,23 +29,6 @@ from shared.envelope import RunStatus
 
 def store_table() -> str:
     return qualified(DEFAULT_SCHEMA)
-
-
-class RecordingSql:
-    """Captures the SQL text and bound parameters, and answers nothing.
-
-    The warehouse store's writes are what these tests are about, so the read
-    path never runs — a MERGE is fire-and-forget here.
-    """
-
-    def __init__(self) -> None:
-        self.queries: list[tuple[str, list]] = []
-
-    async def query(self, sql, params=None):
-        self.queries.append((sql, params or []))
-        return []
-
-    async def close(self): ...
 
 
 pgserver = pytest.importorskip("pgserver", reason="needs the dev group")
@@ -81,83 +60,34 @@ async def store(postgres):
     return s
 
 
+async def seed(store: PostgresRunStore, run_id: str, *, model: str) -> None:
+    """A row with a model name, written the way no production path writes one.
+
+    `claim_slot` used to be what set `model`, and it had no callers, so it was
+    removed in v5 — which leaves `set_status`'s upsert, inserting `''`, as the
+    only writer. That is a real gap for Phase 2 of `docs/v5-implementation-plan.md`
+    to close. The listing filters below are still correct SQL worth pinning,
+    so they seed the column directly rather than waiting for that.
+    """
+    conn = await store._conn()
+    try:
+        await conn.execute(
+            f"INSERT INTO {store_table()} (run_id, model, status, started_ts, updated_ts) "
+            "VALUES (%s, %s, %s, 1, 1)",
+            (run_id, model, RunStatus.QUEUED),
+        )
+    finally:
+        await conn.close()
+
+
 async def test_schema_creation_is_idempotent(store):
     await store.ensure_schema()
     await store.ensure_schema()
-    assert await store.active_count() == 0
-
-
-async def test_a_claimed_run_is_registered_as_queued(store):
-    record = await store.claim_slot("r1", model="scenario", ceiling=5, requested_by="kp")
-
-    assert record == RunRecord(
-        run_id="r1",
-        model="scenario",
-        status=RunStatus.QUEUED,
-        started_ts=record.started_ts,
-        updated_ts=record.updated_ts,
-        requested_by="kp",
-    )
-    stored = await store.get("r1")
-    assert stored.status == RunStatus.QUEUED and stored.requested_by == "kp"
-    assert await store.active_count() == 1
-
-
-async def test_a_duplicate_run_id_is_refused(store):
-    """Delta has no primary key, so this silently produced two rows for one
-    run and the reader picked whichever came back first."""
-    await store.claim_slot("r1", model="scenario", ceiling=5)
-    with pytest.raises(DuplicateRun, match="already registered"):
-        await store.claim_slot("r1", model="mcmc", ceiling=5)
-
-    assert (await store.get("r1")).model == "scenario", "the first claim must stand"
-    assert await store.active_count() == 1
-
-
-async def test_the_ceiling_is_refused_with_the_numbers_in_it(store):
-    for i in range(3):
-        await store.claim_slot(f"r{i}", model="scenario", ceiling=3)
-
-    with pytest.raises(SlotDenied) as exc:
-        await store.claim_slot("r-over", model="scenario", ceiling=3)
-
-    assert exc.value.active == 3 and exc.value.ceiling == 3
-    assert "ceiling is 3" in str(exc.value)
-    assert await store.get("r-over") is None, "a denied claim must leave nothing behind"
-
-
-async def test_simultaneous_claims_cannot_both_pass_the_ceiling(store):
-    """The race the warehouse implementation cannot win: count, then insert,
-    with no transaction around the pair. Ten at once against a ceiling of
-    three must yield exactly three."""
-    await asyncio.gather(
-        *(store.claim_slot(f"race-{i}", model="scenario", ceiling=3) for i in range(10)),
-        return_exceptions=True,
-    )
-    assert await store.active_count() == 3
-
-
-async def test_finished_runs_free_their_slot(store):
-    for i in range(3):
-        await store.claim_slot(f"r{i}", model="scenario", ceiling=3)
-    await store.set_status("r0", RunStatus.SUCCEEDED, detail="done")
-
-    assert await store.active_count() == 2
-    await store.claim_slot("r-new", model="scenario", ceiling=3)
-    assert await store.active_count() == 3
-
-
-@pytest.mark.parametrize(
-    "status", [RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.INFEASIBLE]
-)
-async def test_every_terminal_status_frees_a_slot(store, status):
-    await store.claim_slot("r1", model="scenario", ceiling=1)
-    await store.set_status("r1", status)
-    assert await store.active_count() == 0
+    assert await store.list_runs() == []
 
 
 async def test_status_transitions_are_recorded(store):
-    await store.claim_slot("r1", model="mcmc", ceiling=5)
+    await seed(store, "r1", model="mcmc")
     await store.set_status("r1", RunStatus.RUNNING)
     await store.set_status("r1", "SUCCEEDED", detail="all draws done")
 
@@ -174,29 +104,17 @@ async def test_a_status_for_an_unknown_run_creates_it(store):
     assert (await store.get("appeared-from-nowhere")).status == RunStatus.RUNNING
 
 
-async def test_attaching_the_databricks_run_id(store):
-    await store.claim_slot("r1", model="scenario", ceiling=5)
-    await store.attach_job_run("r1", 987654)
-    assert (await store.get("r1")).job_run_id == "987654"
-
-
-async def test_releasing_a_slot_undoes_a_launch_that_failed(store):
-    await store.claim_slot("r1", model="scenario", ceiling=5)
-    await store.release_slot("r1")
-    assert await store.get("r1") is None and await store.active_count() == 0
-
-
-async def test_releasing_never_deletes_a_run_that_already_started(store):
-    """Otherwise a late status write would resurrect a ghost row."""
-    await store.claim_slot("r1", model="scenario", ceiling=5)
-    await store.set_status("r1", RunStatus.RUNNING)
-    await store.release_slot("r1")
-    assert (await store.get("r1")) is not None
+async def test_a_run_id_is_one_row_however_often_it_is_written(store):
+    """The primary key is the one property Postgres was chosen for that is
+    still in use: Delta had none, and produced two rows for one run."""
+    for status in (RunStatus.RUNNING, RunStatus.RUNNING, RunStatus.SUCCEEDED):
+        await store.set_status("r1", status)
+    assert [r.run_id for r in await store.list_runs()] == ["r1"]
 
 
 async def test_listing_is_newest_first_and_filterable(store):
     for i in range(3):
-        await store.claim_slot(f"r{i}", model="scenario", ceiling=5)
+        await store.set_status(f"r{i}", RunStatus.RUNNING)
     await store.set_status("r0", RunStatus.SUCCEEDED)
 
     everything = await store.list_runs(limit=10)
@@ -211,9 +129,9 @@ async def test_listing_is_newest_first_and_filterable(store):
 
 
 async def test_listing_can_be_filtered_by_model(store):
-    await store.claim_slot("m1", model="mcmc", ceiling=5)
-    await store.claim_slot("s1", model="scenario", ceiling=5)
-    await store.claim_slot("m2", model="mcmc", ceiling=5)
+    await seed(store, "m1", model="mcmc")
+    await seed(store, "s1", model="scenario")
+    await seed(store, "m2", model="mcmc")
 
     assert {r.run_id for r in await store.list_runs(model="mcmc")} == {"m1", "m2"}
     assert [r.run_id for r in await store.list_runs(model="scenario")] == ["s1"]
@@ -223,9 +141,9 @@ async def test_listing_can_be_filtered_by_model(store):
 async def test_status_and_model_filters_combine_rather_than_override(store):
     """Two optional filters is where branch-per-filter starts producing the
     wrong SQL: the second filter quietly replaces the first."""
-    await store.claim_slot("m1", model="mcmc", ceiling=5)
-    await store.claim_slot("m2", model="mcmc", ceiling=5)
-    await store.claim_slot("s1", model="scenario", ceiling=5)
+    await seed(store, "m1", model="mcmc")
+    await seed(store, "m2", model="mcmc")
+    await seed(store, "s1", model="scenario")
     await store.set_status("m2", RunStatus.SUCCEEDED)
     await store.set_status("s1", RunStatus.SUCCEEDED)
 
@@ -234,20 +152,12 @@ async def test_status_and_model_filters_combine_rather_than_override(store):
 
 
 async def test_a_model_filter_is_a_bound_value_not_sql(store):
-    await store.claim_slot("m1", model="mcmc", ceiling=5)
+    await seed(store, "m1", model="mcmc")
 
     hostile = "'; DROP TABLE run_status; --"
     assert await store.list_runs(model=hostile) == []
     # The table is still there, which it would not be under interpolation.
     assert [r.run_id for r in await store.list_runs()] == ["m1"]
-
-
-async def test_non_terminal_is_what_reconciliation_reads(store):
-    await store.claim_slot("done", model="scenario", ceiling=5)
-    await store.claim_slot("live", model="scenario", ceiling=5)
-    await store.set_status("done", RunStatus.SUCCEEDED)
-
-    assert [r.run_id for r in await store.non_terminal()] == ["live"]
 
 
 async def test_an_unknown_run_is_none_not_an_error(store):
@@ -359,13 +269,13 @@ async def test_the_table_is_not_in_public(postgres):
 async def test_a_custom_schema_is_honoured(postgres):
     s = PostgresRunStore(postgres, schema="other_place")
     await s.ensure_schema()
-    await s.claim_slot("r1", model="scenario", ceiling=5)
-    assert await s.active_count() == 1
+    await s.set_status("only-in-other-place", RunStatus.RUNNING)
+    assert (await s.get("only-in-other-place")) is not None
 
     # And it really is a separate table, not the default one under a new name.
     default = PostgresRunStore(postgres)
     await default.ensure_schema()
-    assert await default.active_count() == 0
+    assert await default.get("only-in-other-place") is None
 
 
 @pytest.mark.parametrize(

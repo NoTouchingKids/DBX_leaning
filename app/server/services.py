@@ -443,15 +443,20 @@ class ServiceHub:
     def _persist_status(self, run_id: str, msg: StatusMessage) -> None:
         """Reflect a lifecycle transition into ``run_status``.
 
-        The status *message* is a notification; the ``run_status`` row is the
-        record of truth (docs/message-envelope-spec.md). This is what keeps
-        the two in step while the app is up — when it is not, the job's own
-        ``run_events`` carries the truth and startup reconciliation catches up.
+        The ``run_status`` row is a point-lookup mirror, not the record of
+        truth: the job's own ``run_events`` in Delta is, and it is written
+        whether or not this runs. This keeps the mirror current while the app
+        is up and a socket is attached. When either is not, the row simply
+        lags — **nothing repairs it later.** The startup reconciliation that
+        once did was removed in the v3→v4 cut (see ``startup()``), and has
+        not been replaced. Phase 2 of ``docs/v5-implementation-plan.md`` moves
+        this write into the job, which is present for every run, and deletes
+        this method.
 
-        Off the ingest path deliberately: a cold warehouse can take seconds to
-        answer, and blocking the job's socket on that would make the app the
-        thing a run depends on. It is a couple of statements per run
-        (RUNNING, then terminal), not a loop.
+        Off the ingest path deliberately: a Lakebase connection can take
+        seconds to open from cold, and blocking the job's socket on that would
+        make the app the thing a run depends on. It is a couple of statements
+        per run (RUNNING, then terminal), not a loop.
         """
         store = self.store
         if store is None:
@@ -465,8 +470,8 @@ class ServiceHub:
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(
-                    "could not update run_status for %s -> %s; run_events has it and "
-                    "startup reconciliation will pick it up",
+                    "could not update run_status for %s -> %s; run_events in Delta is "
+                    "now the only record of it, and nothing retries this write",
                     run_id,
                     msg.status,
                     exc_info=True,
