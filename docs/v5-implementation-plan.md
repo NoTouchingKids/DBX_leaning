@@ -156,7 +156,20 @@ Arrow IPC on the wire:
 
 ## Phase 2 — run state moves to where it's authoritative
 
-1. **`run_status` column shape — PROPOSED, needs sign-off before the DDL is
+1. **SIGNED OFF 2026-09-24: every transition, plus history.** It replaces the
+   proposal below. One row per run in `run_status`: `run_id` (PK),
+   `job_run_id`, `model`, `status` (free text), `terminal`, `detail`, `seq`,
+   `updated_at`. The harness writes RUNNING and the terminal status for
+   **every** run, not only the nuanced ones, so `GET /api/runs` keeps
+   listing from this table and `model` stops being `''`. The upsert only
+   applies when `EXCLUDED.seq >= run_status.seq`, so a late write cannot
+   move the row backwards (see Phase 0 item 4). Every reported transition
+   is also appended to `run_status_history`, deduped by a unique index on
+   `(run_id, seq)`. That history table is the second table
+   `origin/lakebase-status-history` had, not `run_status` made
+   append-only. The superseded proposal:
+
+   **`run_status` column shape — PROPOSED, needs sign-off before the DDL is
    written:**
    `run_id` (PK), `status` (free text, not an enum — the vocabulary is the
    model's), `terminal` (bool), `detail` (text), `updated_at`, `seq` at time
@@ -224,11 +237,23 @@ Arrow IPC on the wire:
    `sendall` can block indefinitely with no timeout outside the closing
    handshake, which is exactly the stall a model-blocking main thread cannot
    afford to inherit.
-3. **PROPOSED** drop policy: two logical queues, or a type check at the drop
+3. **SIGNED OFF 2026-09-24:** a full live queue drops `log` first, then the
+   oldest `progress`. `status` and `result` travel in a small separate queue
+   with no size cap. That is safe because a run has only a handful of them.
+   The owner's framing, which is the rule to design against: **live delivery
+   is best-effort for everything, and `replay` is how a client catches up.**
+   A dropped live record is never lost: it is in the part files, and
+   `replay(from_seq, to_seq)` serves it from them. So the drop policy
+   decides what a client sees *first*, not what it can *have*. The
+   superseded proposal:
+
+   **PROPOSED** drop policy: two logical queues, or a type check at the drop
    point, so a full queue drops `log` records (best-effort, per the envelope
    spec) and never `status` or `result` (never best-effort, per the same
    spec). Today's single queue drops oldest regardless of type.
-4. **PROPOSED** terminal shutdown sequence, written down before the shutdown
+4. **SIGNED OFF 2026-09-24, as written below.**
+
+   **PROPOSED** terminal shutdown sequence, written down before the shutdown
    code is touched: model's own result write → part files flushed → Lakebase
    status write → `bye`. A crash between any two must leave Delta as the
    floor and Lakebase as at-most-stale, never the reverse.
@@ -251,7 +276,15 @@ Arrow IPC on the wire:
 2. Make `discovery.PROJECT_TAG` configurable per deployment, so a team
    running their own instance of the app can point it at only their own jobs
    without forking `discovery.py`.
-3. **PROPOSED** task-scoped run id convention for chained multi-task jobs —
+3. **OPEN, and possibly not needed. Not landed in Track 0.** The owner's
+   model for a multi-task pipeline: one *main* task centralises the
+   communication for the rest. If only one task per job run hosts the
+   harness, nothing collides and no task-scoped id is needed. The collision
+   below exists only if two or more tasks in the same job run each run the
+   harness under the same `DBX_RUN_ID`. Decide this when a chained job
+   actually exists. The original text:
+
+   **PROPOSED** task-scoped run id convention for chained multi-task jobs —
    today a job parameter is job-level, so every task in a chain gets the
    same `DBX_RUN_ID` and would collide on `runs/<run_id>/` in the telemetry
    volume and on the Lakebase primary key. Exact format (job run id + task
