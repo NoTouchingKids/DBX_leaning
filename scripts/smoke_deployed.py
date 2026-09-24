@@ -73,9 +73,7 @@ TIMEOUT = httpx.Timeout(30.0, read=300.0)
 
 def _cli(*args: str) -> str:
     """Run the Databricks CLI and return stdout, or die with its stderr."""
-    proc = subprocess.run(
-        ["databricks", *args], capture_output=True, text=True, timeout=120
-    )
+    proc = subprocess.run(["databricks", *args], capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
         sys.exit(f"`databricks {' '.join(args)}` failed:\n{proc.stderr.strip()}")
     return proc.stdout
@@ -149,8 +147,9 @@ def probe(client: httpx.Client, base: str) -> int:
 # --------------------------------------------------------------------------
 
 
-def replay_live(client: httpx.Client, base: str, run_id: str,
-                live: dict[int, str], elapsed: float) -> int:
+def replay_live(
+    client: httpx.Client, base: str, run_id: str, live: dict[int, str], elapsed: float
+) -> int:
     """Ask the live job to resend 0..newest-seen-seq; check it is whole.
 
     The durable log is gap-free from seq 0 by construction (the envelope spec),
@@ -159,8 +158,7 @@ def replay_live(client: httpx.Client, base: str, run_id: str,
     must come back with the same type.
     """
     hi = max(live)
-    got = client.get(f"{base}/api/runs/{run_id}/replay",
-                     params={"from_seq": 0, "to_seq": hi})
+    got = client.get(f"{base}/api/runs/{run_id}/replay", params={"from_seq": 0, "to_seq": hi})
     print(f"  [{elapsed:6.1f}s] REPLAY(0,{hi}) -> {got.status_code}")
     if got.status_code != 200:
         print(f"  FAIL: {got.text[:200]}")
@@ -168,8 +166,10 @@ def replay_live(client: httpx.Client, base: str, run_id: str,
     back = {m["seq"]: m.get("type") for m in got.json().get("messages", [])}
     missing = sorted(set(range(hi + 1)) - set(back))
     disagree = sorted(s for s, kind in live.items() if s in back and back[s] != kind)
-    print(f"  replay returned {len(back)} for {hi + 1} expected; "
-          f"missing {len(missing)}, type mismatches {len(disagree)}")
+    print(
+        f"  replay returned {len(back)} for {hi + 1} expected; "
+        f"missing {len(missing)}, type mismatches {len(disagree)}"
+    )
     if missing:
         print(f"  FAIL: replay is missing seqs {missing[:20]}")
     if disagree:
@@ -177,8 +177,15 @@ def replay_live(client: httpx.Client, base: str, run_id: str,
     return int(bool(missing)) + int(bool(disagree))
 
 
-def watch(client: httpx.Client, base: str, run_id: str, *, cancel_after: float | None,
-          replay: bool, replay_at: float | None = None) -> int:
+def watch(
+    client: httpx.Client,
+    base: str,
+    run_id: str,
+    *,
+    cancel_after: float | None,
+    replay: bool,
+    replay_at: float | None = None,
+) -> int:
     """Stream a run to its terminal status, timing every gap along the way.
 
     The gap distribution is the point as much as the messages are: SSE that
@@ -222,8 +229,10 @@ def watch(client: httpx.Client, base: str, run_id: str, *, cancel_after: float |
             kinds[event or msg.get("type", "?")] = kinds.get(event or msg.get("type", "?"), 0) + 1
 
             if msg.get("type") == "status":
-                print(f"  [{now - opened:6.1f}s] seq={msg['seq']:<4} {msg['status']}"
-                      f" terminal={msg.get('terminal')}")
+                print(
+                    f"  [{now - opened:6.1f}s] seq={msg['seq']:<4} {msg['status']}"
+                    f" terminal={msg.get('terminal')}"
+                )
                 if msg.get("terminal"):
                     terminal = msg
                     break
@@ -250,21 +259,27 @@ def watch(client: httpx.Client, base: str, run_id: str, *, cancel_after: float |
         p50 = ordered[len(ordered) // 2]
         p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
         biggest = max(gaps)
-        print(f"  inter-event gap: p50={p50 * 1000:.0f}ms p99={p99 * 1000:.0f}ms "
-              f"max={biggest * 1000:.0f}ms")
+        print(
+            f"  inter-event gap: p50={p50 * 1000:.0f}ms p99={p99 * 1000:.0f}ms "
+            f"max={biggest * 1000:.0f}ms"
+        )
         # Held-and-released delivery shows up as a p50 near zero with a large
         # max — many messages arriving at once after a long wait.
         if p50 < 0.02 and biggest > 2.0:
-            print("  WARNING: looks BUFFERED — many messages arriving together after a"
-                  " long wait. `X-Accel-Buffering: no` may not be honoured here.")
+            print(
+                "  WARNING: looks BUFFERED — many messages arriving together after a"
+                " long wait. `X-Accel-Buffering: no` may not be honoured here."
+            )
         else:
             print("  delivery looks prompt (not held-and-released)")
 
     if terminal is None:
         failures += 1
-        print("  FAIL: stream ended without a terminal status — the ingress may have"
-              f" cut it at ~{elapsed:.0f}s. That is one of the three numbers"
-              " docs/spike-results.md is missing; record it.")
+        print(
+            "  FAIL: stream ended without a terminal status — the ingress may have"
+            f" cut it at ~{elapsed:.0f}s. That is one of the three numbers"
+            " docs/spike-results.md is missing; record it."
+        )
 
     # --- seq integrity ----------------------------------------------------
     if seqs:
@@ -272,8 +287,9 @@ def watch(client: httpx.Client, base: str, run_id: str, *, cancel_after: float |
         print(f"  seq {min(seqs)}..{max(seqs)}, missing {len(missing)}")
         if missing and replay:
             lo, hi = missing[0], missing[-1]
-            got = client.get(f"{base}/api/runs/{run_id}/replay",
-                             params={"from_seq": lo, "to_seq": hi})
+            got = client.get(
+                f"{base}/api/runs/{run_id}/replay", params={"from_seq": lo, "to_seq": hi}
+            )
             print(f"  replay({lo},{hi}) -> {got.status_code}")
             if got.status_code == 200:
                 back = got.json().get("messages", [])
@@ -292,12 +308,16 @@ def watch(client: httpx.Client, base: str, run_id: str, *, cancel_after: float |
 
     if replay_at is not None and not replayed:
         failures += 1
-        print(f"  FAIL: the run ended before --replay-at {replay_at}s; replay was never"
-              " exercised. Pass a longer run (e.g. --config '{\"seconds\": 60}').")
+        print(
+            f"  FAIL: the run ended before --replay-at {replay_at}s; replay was never"
+            " exercised. Pass a longer run (e.g. --config '{\"seconds\": 60}')."
+        )
 
     if cancelled_at is not None and terminal is not None:
-        print(f"  cancel -> terminal took {last - cancelled_at:.2f}s"
-              f" (status {terminal.get('status')})")
+        print(
+            f"  cancel -> terminal took {last - cancelled_at:.2f}s"
+            f" (status {terminal.get('status')})"
+        )
 
     return failures
 
@@ -305,16 +325,26 @@ def watch(client: httpx.Client, base: str, run_id: str, *, cancel_after: float |
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--app", default="dbx-leaning", help="the Databricks app's name")
-    ap.add_argument("--run", metavar="MODEL",
-                    help="trigger this model — SPENDS one of five task slots")
+    ap.add_argument(
+        "--run", metavar="MODEL", help="trigger this model — SPENDS one of five task slots"
+    )
     ap.add_argument("--config", default="{}", help="DBX_MODEL_CONFIG, as JSON")
     ap.add_argument("--run-id", help="supply one to make the trigger idempotent")
-    ap.add_argument("--cancel-after", type=float, metavar="SECONDS",
-                    help="cancel the run this many seconds in, and time the ack")
-    ap.add_argument("--replay", action="store_true",
-                    help="ask the job to resend any gap the stream showed")
-    ap.add_argument("--replay-at", type=float, metavar="SECONDS",
-                    help="mid-run, ask the LIVE job to resend seq 0..newest and check it")
+    ap.add_argument(
+        "--cancel-after",
+        type=float,
+        metavar="SECONDS",
+        help="cancel the run this many seconds in, and time the ack",
+    )
+    ap.add_argument(
+        "--replay", action="store_true", help="ask the job to resend any gap the stream showed"
+    )
+    ap.add_argument(
+        "--replay-at",
+        type=float,
+        metavar="SECONDS",
+        help="mid-run, ask the LIVE job to resend seq 0..newest and check it",
+    )
     args = ap.parse_args()
 
     base = app_url(args.app)
@@ -339,9 +369,14 @@ def main() -> int:
             if started.status_code != 202:
                 return failures + 1
             run_id = started.json()["run_id"]
-            failures += watch(client, base, run_id,
-                              cancel_after=args.cancel_after, replay=args.replay,
-                              replay_at=args.replay_at)
+            failures += watch(
+                client,
+                base,
+                run_id,
+                cancel_after=args.cancel_after,
+                replay=args.replay,
+                replay_at=args.replay_at,
+            )
 
     print(f"\n{'FAILURES: ' + str(failures) if failures else 'all checks passed'}")
     return 1 if failures else 0

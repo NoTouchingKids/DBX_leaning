@@ -79,26 +79,15 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
         log.info("no DBX_APP_URL — running unobserved, durable path only")
         return None
 
-    # BOTH halves come out of the secret scope, and both are read once per run
-    # rather than per connection attempt: neither rotates mid-run, and a
-    # reconnect loop should not hammer the Secrets API. The TOKEN they buy is
-    # a separate concern — `app_client` builds one `M2MTokenProvider` for the
-    # whole run and it refreshes itself on whichever attempt needs it.
-    client_id = client_secret = None
-    # Read through locals rather than `cfg.has_ingress_identity` and back into
-    # the same three attributes: a type checker can narrow `scope is not None`
-    # for a local it just checked, but not for a property call three lines
-    # away that happens to check the same three fields.
-    scope, id_key, secret_key = (
-        cfg.oauth_secret_scope,
-        cfg.oauth_client_id_key,
-        cfg.oauth_secret_key,
-    )
-    if scope and id_key and secret_key:
-        from .auth import read_secret
+    # BOTH halves come out of the secret scope, read once per run rather than
+    # per connection attempt — see `read_client_credentials`. The TOKEN they
+    # buy is a separate concern: `app_client` builds one `M2MTokenProvider`
+    # for the whole run and it refreshes itself on whichever attempt needs it.
+    from .auth import read_client_credentials
 
-        client_id = read_secret(scope, id_key)
-        client_secret = read_secret(scope, secret_key)
+    client_id, client_secret = read_client_credentials(
+        cfg.oauth_secret_scope, cfg.oauth_client_id_key, cfg.oauth_secret_key
+    )
 
     return app_client(
         cfg.app_url,
@@ -164,9 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     # SIGINT is skipped under a real kernel — see the module docstring for
     # why — and installed only when nothing already claims to be one, e.g.
     # `run_local()`'s plain Ctrl-C case.
-    sigs = (
-        (signal.SIGTERM,) if "ipykernel" in sys.modules else (signal.SIGTERM, signal.SIGINT)
-    )
+    sigs = (signal.SIGTERM,) if "ipykernel" in sys.modules else (signal.SIGTERM, signal.SIGINT)
     for sig in sigs:
         try:
             signal.signal(sig, _cancel_and_chain(harness, signal.getsignal(sig)))

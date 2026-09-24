@@ -87,6 +87,33 @@ variables:
       parameters come back from `jobs get-run` and are shown in the run UI. The
       job's own principal therefore needs READ on the scope.
     default: oauth-client-secret
+  # --- the job's Lakebase identity (Phase 2 of docs/v5-implementation-plan.md)
+  #
+  # A SECOND service-principal credential, distinct from the ingress one
+  # above: the job writes `run_status` itself, and the principal that owns
+  # that database is not the one every job presents to the app's proxy.
+  # Locations only, exactly like the ingress triple — both halves live in the
+  # scope and are read with `dbutils.secrets.get` at run time.
+  #
+  # Non-empty defaults on purpose. An empty variable feeding a parameter is
+  # the deploy-only trap `resources/app.yml` documents; a key that does not
+  # exist in the scope costs nothing — the job reads it back as "not
+  # configured" and the run is unaffected. Nothing reads these yet: the
+  # writer that will is Track C of the v5 plan.
+  job_lakebase_scope:
+    description: >-
+      Workspace secret scope holding the job's Lakebase service principal.
+    default: dbx-leaning
+  job_lakebase_client_id_key:
+    description: >-
+      Key within `job_lakebase_scope` holding that principal's application
+      id. Also its Postgres role name — Lakebase names the role after whoever
+      the token belongs to.
+    default: lakebase-client-id
+  job_lakebase_secret_key:
+    description: >-
+      Key within `job_lakebase_scope` holding that principal's OAuth secret.
+    default: lakebase-client-secret
   app_public_url:
     description: >-
       The app's externally reachable URL, handed to each job so it knows where

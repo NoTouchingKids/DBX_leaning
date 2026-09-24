@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
 import yaml
 
 from job.auth import auth_headers, read_secret
@@ -261,3 +262,113 @@ def test_the_job_is_told_which_workspace_it_is_in():
     """
     args = _heartbeat_job()["tasks"][0]["spark_python_task"]["parameters"]
     assert "DATABRICKS_HOST={{workspace.url}}" in args
+
+
+# --------------------------------------------------------------------------
+# The scope/id-key/secret-key triple, as one call any credential can make
+# --------------------------------------------------------------------------
+
+
+def _fake_secrets(monkeypatch, values: dict[tuple[str, str], str]) -> list[tuple[str, str]]:
+    reads: list[tuple[str, str]] = []
+
+    def fake(scope: str, key: str) -> str | None:
+        reads.append((scope, key))
+        return values.get((scope, key))
+
+    monkeypatch.setattr("job.auth.read_secret", fake)
+    return reads
+
+
+def test_a_credential_triple_reads_both_halves_from_one_scope(monkeypatch):
+    from job.auth import read_client_credentials
+
+    reads = _fake_secrets(monkeypatch, {("s", "id"): "the-id", ("s", "secret"): "the-secret"})
+    assert read_client_credentials("s", "id", "secret") == ("the-id", "the-secret")
+    assert reads == [("s", "id"), ("s", "secret")]
+
+
+@pytest.mark.parametrize(
+    "names", [(None, "id", "secret"), ("s", None, "secret"), ("s", "id", ""), (None, None, None)]
+)
+def test_an_incomplete_triple_reads_nothing(monkeypatch, names):
+    """Fewer than three names is a misconfiguration, not a partial identity —
+    and it must not cost a Secrets API call to find that out."""
+    from job.auth import read_client_credentials
+
+    reads = _fake_secrets(monkeypatch, {})
+    assert read_client_credentials(*names) == (None, None)
+    assert reads == []
+
+
+def test_half_a_credential_read_back_is_none_of_one(monkeypatch):
+    from job.auth import read_client_credentials
+
+    _fake_secrets(monkeypatch, {("s", "id"): "the-id"})
+    assert read_client_credentials("s", "id", "secret") == (None, None)
+
+
+def test_a_provider_is_built_only_for_a_complete_credential_and_a_host(monkeypatch):
+    from job.auth import M2MTokenProvider, m2m_from_secrets
+
+    _fake_secrets(monkeypatch, {("s", "id"): "the-id", ("s", "secret"): "the-secret"})
+    provider = m2m_from_secrets("https://ws.example.com", "s", "id", "secret")
+    assert isinstance(provider, M2MTokenProvider)
+    assert provider.url == "https://ws.example.com/oidc/v1/token"
+
+    assert m2m_from_secrets(None, "s", "id", "secret") is None, "nowhere to send the exchange"
+    assert m2m_from_secrets("https://ws.example.com", "s", "id", "missing") is None
+
+
+# --------------------------------------------------------------------------
+# The Lakebase identity: a second triple, declared ahead of its writer
+# --------------------------------------------------------------------------
+
+LAKEBASE_TRIPLE = (
+    "DBX_LAKEBASE_OAUTH_SECRET_SCOPE",
+    "DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY",
+    "DBX_LAKEBASE_OAUTH_SECRET_KEY",
+)
+
+
+@pytest.mark.parametrize("job", ["model_heartbeat", "model_annealing"])
+def test_every_job_declares_the_lakebase_triple_as_names_only(job):
+    """Every model job carries the second credential's LOCATIONS, never its
+    values — and its keys are not the ingress principal's keys, or the two
+    identities would be one identity under two names."""
+    doc = yaml.safe_load((ROOT / "resources" / f"{job}.job.yml").read_text())
+    params = {p["name"]: str(p["default"]) for p in doc["resources"]["jobs"][job]["parameters"]}
+
+    for name in (*LAKEBASE_TRIPLE, "DBX_LAKEBASE_HOST"):
+        assert name in params, f"{job} does not declare {name}"
+    for forbidden in ("DBX_LAKEBASE_OAUTH_CLIENT_SECRET", "DBX_LAKEBASE_PASSWORD"):
+        assert forbidden not in params
+    assert params["DBX_LAKEBASE_OAUTH_SECRET_KEY"] != params["DBX_OAUTH_SECRET_KEY"]
+    assert params["DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY"] != params["DBX_OAUTH_CLIENT_ID_KEY"]
+
+
+def test_the_lakebase_defaults_are_never_empty():
+    """An empty `${var.*}` is the deploy-only trap resources/app.yml records;
+    a key missing from the scope is merely "not configured" at run time."""
+    variables = yaml.safe_load((ROOT / "databricks.yml").read_text())["variables"]
+    for var in ("job_lakebase_scope", "job_lakebase_client_id_key", "job_lakebase_secret_key"):
+        assert str(variables[var]["default"]).strip(), f"{var} defaults to empty"
+
+
+def test_the_lakebase_identity_is_read_from_the_environment():
+    env = {
+        "DBX_MODEL": "heartbeat",
+        "DBX_LAKEBASE_OAUTH_SECRET_SCOPE": "dbx-leaning",
+        "DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY": "lakebase-client-id",
+        "DBX_LAKEBASE_OAUTH_SECRET_KEY": "lakebase-client-secret",
+        "DBX_LAKEBASE_HOST": "ep-x.database.example.com",
+        "DBX_LAKEBASE_PORT": "5433",
+    }
+    cfg = JobConfig.from_env(env)
+    assert cfg.has_lakebase_identity
+    assert (cfg.lakebase_host, cfg.lakebase_port) == ("ep-x.database.example.com", 5433)
+    assert (cfg.lakebase_database, cfg.lakebase_schema) == ("databricks_postgres", "dbx_leaning")
+
+    unhosted = JobConfig.from_env({**env, "DBX_LAKEBASE_HOST": " "})
+    assert not unhosted.has_lakebase_identity, "no host is no Lakebase, however many names"
+    assert not JobConfig.from_env({"DBX_MODEL": "heartbeat"}).has_lakebase_identity

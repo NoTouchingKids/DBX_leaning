@@ -18,6 +18,11 @@ from typing import Any
 __all__ = ["JobConfig"]
 
 
+def _opt(env: Mapping[str, str], name: str) -> str | None:
+    """A string setting, where absent, empty and whitespace all mean unset."""
+    return (env.get(name) or "").strip() or None
+
+
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
     raw = env.get(name)
     if raw is None or raw.strip() == "":
@@ -64,6 +69,32 @@ class JobConfig:
     oauth_secret_scope: str | None = None
     oauth_client_id_key: str | None = None
     oauth_secret_key: str | None = None
+
+    #: The job's LAKEBASE identity — a second, separate credential, located
+    #: the same way (a scope and two key names) and read the same way. Not the
+    #: ingress principal: the one that owns `run_status` is not the one every
+    #: job presents to the app. Nothing reads these yet; Track C of
+    #: `docs/v5-implementation-plan.md` builds the writer that will.
+    lakebase_secret_scope: str | None = None
+    lakebase_client_id_key: str | None = None
+    lakebase_secret_key: str | None = None
+    #: Where `run_status` lives. The Postgres USER is not configured here: it
+    #: is the Lakebase principal's own client id, read from the scope above.
+    lakebase_host: str | None = None
+    lakebase_database: str = "databricks_postgres"
+    lakebase_port: int = 5432
+    lakebase_schema: str = "dbx_leaning"
+
+    @property
+    def has_lakebase_identity(self) -> bool:
+        """All three names and a host. Anything less, the job writes no
+        `run_status` and says so — never a reason to fail a run."""
+        return bool(
+            self.lakebase_host
+            and self.lakebase_secret_scope
+            and self.lakebase_client_id_key
+            and self.lakebase_secret_key
+        )
 
     @property
     def has_ingress_identity(self) -> bool:
@@ -140,6 +171,13 @@ class JobConfig:
             oauth_secret_scope=(e.get("DBX_OAUTH_SECRET_SCOPE") or "").strip() or None,
             oauth_client_id_key=(e.get("DBX_OAUTH_CLIENT_ID_KEY") or "").strip() or None,
             oauth_secret_key=(e.get("DBX_OAUTH_SECRET_KEY") or "").strip() or None,
+            lakebase_secret_scope=_opt(e, "DBX_LAKEBASE_OAUTH_SECRET_SCOPE"),
+            lakebase_client_id_key=_opt(e, "DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY"),
+            lakebase_secret_key=_opt(e, "DBX_LAKEBASE_OAUTH_SECRET_KEY"),
+            lakebase_host=_opt(e, "DBX_LAKEBASE_HOST"),
+            lakebase_database=_opt(e, "DBX_LAKEBASE_DATABASE") or "databricks_postgres",
+            lakebase_port=_env_int(e, "DBX_LAKEBASE_PORT", 5432),
+            lakebase_schema=_opt(e, "DBX_LAKEBASE_SCHEMA") or "dbx_leaning",
             workspace_host=(e.get("DATABRICKS_HOST") or e.get("DBX_WORKSPACE_HOST") or "").strip()
             or None,
             catalog=e.get("DBX_CATALOG", "main"),

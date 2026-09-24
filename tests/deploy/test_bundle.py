@@ -303,6 +303,12 @@ def test_no_lakebase_credential_is_carried_as_a_bundle_variable(bundle):
         if "lakebase" not in name:
             continue
         assert "password" not in name, f"variable {name!r} looks like a credential"
+        # A `*_key` variable holds a secret-scope KEY NAME — the location of a
+        # credential, e.g. `lakebase-client-secret` — which is exactly what is
+        # allowed here. Its value is still barred from looking like a token.
+        if name.endswith("_key"):
+            assert not str(spec.get("default", "")).startswith("dapi")
+            continue
         assert "secret" not in str(spec.get("default", "")).lower()
 
 
