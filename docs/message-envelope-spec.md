@@ -41,7 +41,8 @@ sent live at all, so a live gap is *routine* and the missing records may never
 arrive over that channel. They are always in Delta. So the client's rule is
 "gap → fetch from the durable store when you actually need it", not "gap →
 block until it turns up". The durable record is the one that is gap-free in
-the strong sense; `tests/integration/test_end_to_end.py` asserts that.
+the strong sense; `tests/job/test_harness.py` asserts that of what
+the harness writes.
 
 ## `log`
 

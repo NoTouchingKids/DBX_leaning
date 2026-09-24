@@ -49,7 +49,21 @@ one for the correction as much as the answer.
    against a live run (CLAUDE.md, "Still not done"). Phase 3 rewrites exactly
    the code they live in — get a known-good baseline first, or a regression
    after the rewrite has nothing to be compared against.
-3. **Decide what to do about `tests/` before Phase 3 starts, not after.**
+3. **SETTLED, 2026-09-24: restored, not abandoned.** The suite `c1f19c4`
+   deleted was *this branch's* suite, not `main`/`dev`'s eleven-model one — it
+   was already trimmed to `heartbeat` + `annealing`. Restored from
+   `c1f19c4^` verbatim, 369 of 374 passed on the first run. The five failures
+   were drift, not bugs: four `tests/deploy/test_bundle.py` tests still
+   asserted the pre-2026-09-09 bundle (Lakebase host, user and the app's own
+   principal all empty and commented out), rewritten to guard the opted-in
+   config instead; and `tests/modelkit/test_template.py` counted an
+   interpreter's `sitecustomize` as a modelkit import, fixed by diffing
+   `sys.modules` around the import. `uv run pytest` → 374 passed. The one
+   claim that still named a file that never existed on this branch
+   (`tests/integration/test_end_to_end.py`, in the envelope spec) now points
+   at the test that actually asserts it. The original text follows.
+
+   **Decide what to do about `tests/` before Phase 3 starts, not after.**
    It does not exist on this branch — commit `c1f19c4`, "droped all Test for
    now," removed all of it (`tests/app/`, `tests/job/`, `tests/deploy/`). It
    still exists in full on `origin/main` and `origin/dev`. Meanwhile roughly
