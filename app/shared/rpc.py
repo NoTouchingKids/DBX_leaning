@@ -25,15 +25,32 @@ proven to work, and the framing is a dozen lines.
 Encoding is JSON both directions — see the plan. One codec, readable in
 devtools, and `replay` parses the same bytes an operator reads out of a
 telemetry part file.
+
+**The shape is JSON-RPC 2.0, exactly** — `jsonrpc: "2.0"` on every frame; a
+request carries `id`, `method`, `params`; a notification is a request with no
+`id`; a response carries `id` and exactly one of `result` or
+`error: {code, message, data?}`. Two deliberate subsets of it: `params` is
+always an object (never positional), and batches (a JSON array of frames) are
+not accepted. Every frame is a WebSocket TEXT frame — see `_encode`.
+
+**Versioning** follows LSP's `initialize`: the first frame on a connection is
+`hello`, whose params carry the job's `protocol_version` and a `capabilities`
+object, and whose result carries the app's. The compatibility rule is
+`is_compatible` below, and it is the whole rule.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 __all__ = [
     "JSONRPC_VERSION",
+    "PROTOCOL_VERSION",
+    "parse_protocol_version",
+    "is_compatible",
+    "check_hello_version",
     "Method",
     "ErrorCode",
     "request",
@@ -47,6 +64,17 @@ __all__ = [
 ]
 
 JSONRPC_VERSION = "2.0"
+
+#: This side's version of the job<->app protocol, "MAJOR.MINOR". Sent by the
+#: job in `hello`'s params and by the app in `hello`'s result.
+#:
+#: Bump MINOR for an addition an older app can safely ignore — a new optional
+#: envelope field, a new message `type`, a new method the other side need not
+#: call. Bump MAJOR (and reset MINOR) for anything an older app would misread.
+#: The rule that turns this into a promise is `is_compatible`.
+PROTOCOL_VERSION = "1.0"
+
+_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 class Method:
@@ -66,10 +94,17 @@ class Method:
     #: what makes it durable.
     TELEMETRY = "telemetry"
 
-    #: REQUEST. First frame of a connection: which run this is, and where it
-    #: picks up. A job that has run unobserved for an hour attaches at seq
-    #: 4,000, not 0 — so the app learns immediately that it has a gap rather
-    #: than inferring one from a jump.
+    #: REQUEST. First frame of a connection: which run this is, where it picks
+    #: up, and which protocol it speaks. A job that has run unobserved for an
+    #: hour attaches at seq 4,000, not 0 — so the app learns immediately that
+    #: it has a gap rather than inferring one from a jump.
+    #:
+    #: params: `run_id`, `next_seq`, `protocol_version` ("MAJOR.MINOR",
+    #: REQUIRED), `capabilities` (object: the methods this side answers).
+    #: result: `observed`, `run_id`, `protocol_version`, `capabilities` — the
+    #: app's. Modelled on LSP's `initialize`. The app processes nothing else
+    #: on a connection until a `hello` has been accepted, and a rejected one
+    #: is answered with an error and the socket closed.
     HELLO = "hello"
 
     #: NOTIFICATION. Clean shutdown: the run is over, expect nothing further.
@@ -110,6 +145,9 @@ class ErrorCode:
     #: `replay` for records the job no longer has. Not an error the caller can
     #: retry away: see the note on `replay` in `job/telemetry.py`.
     RECORDS_GONE = -31002
+    #: `hello` named a protocol version this app does not accept under
+    #: `is_compatible`. Final for that job: retrying cannot change the answer.
+    INCOMPATIBLE_VERSION = -31003
 
 
 class RpcError(Exception):
@@ -126,6 +164,70 @@ class RpcError(Exception):
         if self.data is not None:
             out["data"] = self.data
         return out
+
+
+def parse_protocol_version(value: Any) -> tuple[int, int]:
+    """`"MAJOR.MINOR"` -> `(major, minor)`. Raises `ValueError` otherwise.
+
+    Strict on purpose: a string, two non-negative integers, no leading zeros,
+    no patch component, no `v` prefix. A float `1.0` is refused too — JSON
+    cannot tell `1.10` from `1.1` once it is a number.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"protocol_version must be a string 'MAJOR.MINOR', got {value!r}")
+    m = _VERSION_RE.match(value)
+    if m is None:
+        raise ValueError(f"protocol_version must look like 'MAJOR.MINOR', got {value!r}")
+    return int(m.group(1)), int(m.group(2))
+
+
+def is_compatible(job_version: str, app_version: str = PROTOCOL_VERSION) -> bool:
+    """THE compatibility rule, and the only place it is written in code.
+
+    The app accepts a job whose MAJOR equals the app's and whose MINOR is less
+    than or equal to the app's. So an app at 1.3 accepts jobs at 1.0-1.3, and
+    refuses 1.4 (it may send something the app has never heard of in a way
+    that matters) and 2.x / 0.x (a different protocol). An app upgraded ahead
+    of its jobs keeps observing them; a job upgraded ahead of its app runs
+    unobserved until the app catches up — which costs nothing durable.
+
+    Raises `ValueError` if either side is not a well-formed version.
+    """
+    j_major, j_minor = parse_protocol_version(job_version)
+    a_major, a_minor = parse_protocol_version(app_version)
+    return j_major == a_major and j_minor <= a_minor
+
+
+def check_hello_version(params: dict[str, Any], app_version: str = PROTOCOL_VERSION) -> str:
+    """Validate `hello`'s `protocol_version`; return it, or raise `RpcError`.
+
+    Missing or malformed is INVALID_PARAMS — the field is mandatory, and a
+    version the app cannot even read is not one it can judge. Well-formed but
+    outside the rule is INCOMPATIBLE_VERSION. Both carry the app's version and
+    the rule in `data`, so the job can log exactly why it is unobserved.
+    """
+    data = {
+        "app_protocol_version": app_version,
+        "rule": "job MAJOR == app MAJOR and job MINOR <= app MINOR",
+    }
+    if "protocol_version" not in params:
+        raise RpcError(
+            ErrorCode.INVALID_PARAMS,
+            "hello must carry protocol_version ('MAJOR.MINOR')",
+            data=data,
+        )
+    job_version = params["protocol_version"]
+    try:
+        ok = is_compatible(job_version, app_version)
+    except ValueError as exc:
+        raise RpcError(ErrorCode.INVALID_PARAMS, str(exc), data=data) from None
+    if not ok:
+        raise RpcError(
+            ErrorCode.INCOMPATIBLE_VERSION,
+            f"job protocol {job_version} is not compatible with app protocol {app_version}",
+            data={**data, "job_protocol_version": job_version},
+        )
+    return job_version
 
 
 class Request:
@@ -208,6 +310,10 @@ def parse(raw: str | bytes) -> Request | Response:
             f"jsonrpc must be {JSONRPC_VERSION!r}, got {obj.get('jsonrpc')!r}",
         )
 
+    frame_id = obj.get("id")
+    if frame_id is not None and (isinstance(frame_id, bool) or not isinstance(frame_id, int | str)):
+        raise RpcError(ErrorCode.INVALID_REQUEST, "id must be a string, an integer, or absent")
+
     if "method" in obj:
         method = obj["method"]
         if not isinstance(method, str) or not method:
@@ -217,10 +323,24 @@ def parse(raw: str | bytes) -> Request | Response:
             # Positional params are legal JSON-RPC and deliberately unsupported:
             # one shape means call sites cannot disagree about argument order.
             raise RpcError(ErrorCode.INVALID_PARAMS, "params must be an object, not an array")
-        return Request(method, params, obj.get("id"))
+        return Request(method, params, frame_id)
 
-    if "result" in obj or "error" in obj:
-        return Response(obj.get("id"), obj.get("result"), obj.get("error"))
+    if "result" in obj and "error" in obj:
+        raise RpcError(ErrorCode.INVALID_REQUEST, "a response carries result or error, not both")
+    if "error" in obj:
+        error = obj["error"]
+        if (
+            not isinstance(error, dict)
+            or isinstance(error.get("code"), bool)
+            or not isinstance(error.get("code"), int)
+            or not isinstance(error.get("message"), str)
+        ):
+            raise RpcError(
+                ErrorCode.INVALID_REQUEST, "error must be an object with integer code and message"
+            )
+        return Response(frame_id, None, error)
+    if "result" in obj:
+        return Response(frame_id, obj["result"])
 
     raise RpcError(ErrorCode.INVALID_REQUEST, "frame is neither a request nor a response")
 

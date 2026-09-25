@@ -1,10 +1,18 @@
 # Message envelope — the wire contract
 
 This is the contract in prose. It is implemented, in Pydantic, in
-`shared/envelope.py`, and published as JSON Schema under `schema/` — so if
-this file and `shared/envelope.py` ever disagree, the code is right and this
-file is stale; say so and fix it here. Every track — models, job, app,
-frontend — builds against this shape.
+`app/shared/envelope.py` (the job imports the same module as `shared.envelope`
+— see CLAUDE.md on why it lives under `app/`), the job↔app RPC in
+`app/shared/rpc.py`, and the durable part files in `job/telemetry.py`; the
+envelope and RPC are published as JSON Schema under `schema/`. If this file
+and the code ever disagree, the code is right and this file is stale; say so
+and fix it here. Every track — models, job, app, frontend — builds against
+this shape.
+
+Four things make up the frozen contract, and a fork of the harness owes the
+app all four: the **envelope** (below), **tolerant reading** of it, the **RPC
+channel** including its `hello` version handshake, and the **part-file
+layout** on the telemetry volume. Each has its own section.
 
 **Do not let a model-building track invent its own message shape.** If this
 spec is ambiguous or missing something a model needs, that is a reason to
@@ -159,7 +167,7 @@ envelope.
 ## The schema, generated
 
 The tables above are the contract in prose; `schema/envelope.schema.json` is
-the same contract a machine can read, generated from `shared/envelope.py` by
+the same contract a machine can read, generated from `app/shared/envelope.py` by
 `scripts/export_schema.py` and checked against the models in CI-shaped tests
 so it cannot drift.
 
@@ -178,7 +186,7 @@ retyping either by hand and going stale the first time one gains a member.
 `Seq1`, `Type1`, one alias per property occurrence — and carrying none of the
 reasoning that makes the contract usable. So `app/client/src/lib/envelope.ts`
 is hand-written, and the cost of that (it can silently fall behind
-`shared/envelope.py`) is paid by a drift test rather than by discipline:
+`app/shared/envelope.py`) is paid by a drift test rather than by discipline:
 `app/client/src/lib/envelope.contract.test.ts` checks both directions against
 this generated schema — every property and enum member the server can emit is
 declared in TypeScript, and nothing declared in TypeScript is absent from the
@@ -195,23 +203,168 @@ and a redeployed server can notice they disagree instead of failing silently
 somewhere further downstream.
 
 **Serialization mode, deliberately:** the schema describes what actually goes
-out, not what the server is willing to accept.
+out, not what the server is willing to accept. That is why it still says
+`additionalProperties: false` although readers now ignore unknown fields (next
+section): nothing this version *sends* carries an undeclared field, so a
+producer validating its own output against the schema is validating the
+right thing. A *reader* must not use the schema to reject a record for having
+an extra property — that is the tolerant-read rule, and it outranks the
+schema for anyone consuming records from a producer that may be newer.
 
-## Encoding (not part of the contract — this is a delivery detail)
+## Reading records: tolerant, per record
 
-- msgpack: job → app, and in the Delta write buffer.
-- JSON: app → browser (SSE). Native to the browser, readable in devtools,
-  already compressed by the transport.
-- The envelope's job is to define valid *shape*. Whatever encodes it
-  (msgpack, JSON, whatever comes next) must produce byte-identical logical
-  content — that interchangeability is the test that the boundary between
-  "protocol" and "serialisation" is drawn in the right place.
-- Validation (e.g. Pydantic models once this is implemented) lives with
-  whichever side is deserialising, not inside the encoding step itself.
+Frozen 2026-09-25. What lets a job one minor version ahead of the app still be
+observed, and what lets a fork add something without breaking everyone else.
+
+- **An unknown field is ignored, never rejected.** The envelope models use
+  `extra="ignore"`: the record is read, the field is dropped. The strictness
+  that `extra="forbid"` used to provide moved to the write side —
+  `make_message` (what the harness builds every record with) still refuses a
+  field the message type does not declare, so a model that misspells a field
+  fails loudly in the job instead of losing it silently at the app.
+- **An unknown `type` is skipped, never fatal.** The app's parse boundary
+  (`app/server/routes/rpc.py`, the `telemetry` handler) handles each record of
+  a batch on its own: a record whose `type` it does not know, a record that
+  is not an object, and a known type that fails validation are each counted,
+  logged once per batch, and skipped. Every other record in the same batch is
+  still ingested, and the socket loop never sees an exception from it.
+  Nothing is lost by skipping — the part files have every record.
+- Missing required fields and out-of-range values are still invalid. Tolerance
+  is about *additions*; a record that lacks what this version needs is not one
+  it can read.
+
+## The job ↔ app RPC channel
+
+Frozen 2026-09-25. Implemented in `app/shared/rpc.py`; the app's side is
+`app/server/routes/rpc.py`, the job's is `job/ws.py`. One WebSocket per run at
+`/ws/job/<run_id>`, and **every frame is a WebSocket TEXT frame** carrying one
+JSON object — the app reads with `receive_text()`, and a binary frame killed
+every run once (CLAUDE.md, "Four failures").
+
+**The framing is JSON-RPC 2.0, exactly.** Every frame has `"jsonrpc": "2.0"`.
+
+| Frame | Members |
+|---|---|
+| request | `jsonrpc`, `id` (string or integer), `method`, `params` (object) |
+| notification | `jsonrpc`, `method`, `params` — no `id`, and it never gets a reply |
+| success | `jsonrpc`, `id`, `result` (any JSON, including `null`) |
+| error | `jsonrpc`, `id` (`null` if the request could not be parsed), `error: {code, message, data?}` |
+
+Two deliberate subsets of JSON-RPC: `params` is always an object (positional
+arrays are refused with `-32602`), and batch arrays are not accepted. A frame
+carrying both `result` and `error`, or an `error` without an integer `code`
+and string `message`, is refused as `-32600`. Error codes: JSON-RPC's own
+(`-32700`, `-32600`, `-32601`, `-32602`, `-32603`) plus ours outside the
+reserved range — `-31001` unknown run, `-31002` records gone,
+`-31003` incompatible protocol version.
+
+The method set is six — `hello`, `telemetry`, `bye` (job → app), `cancel`,
+`replay` (app → job), `ping` (either) — and `schema/control.schema.json`
+publishes each one's kind and direction.
+
+### `hello`: the version handshake
+
+Modelled on LSP's `initialize`. It is the job's **first frame** on every
+connection, and a request:
+
+| `params` | |
+|---|---|
+| `run_id` | string |
+| `next_seq` | integer — the seq the job is picking up from |
+| `protocol_version` | string `"MAJOR.MINOR"` — **required** |
+| `capabilities` | object — one key per method this side answers (`cancel`, `replay`, `ping`), each value that method's options (`{}` today) |
+
+The success `result` is `{observed, run_id, protocol_version, capabilities}`,
+the last two being the app's own. The current version is `PROTOCOL_VERSION =
+"1.0"` in `app/shared/rpc.py`, and `schema/control.schema.json` publishes it
+as `x-protocol-version`.
+
+**The compatibility rule — the whole of it:** the app accepts a job whose
+MAJOR equals the app's MAJOR and whose MINOR is less than or equal to the
+app's MINOR. Numbers compare numerically (`1.10` > `1.9`). So an app at 1.3
+observes jobs at 1.0–1.3; an app redeployed ahead of its jobs keeps observing
+them, and a job ahead of its app runs unobserved until the app catches up.
+The version is a string of two non-negative integers with no leading zeros —
+`"1"`, `"1.0.0"`, `"v1.0"` and the JSON number `1.0` are all malformed.
+
+Bump MINOR for an addition an older app can ignore under the tolerant-read
+rule (an optional field, a new `type`, a method the other side need not
+call). Bump MAJOR, and reset MINOR, for anything an older app would misread.
+
+**What a refusal looks like:**
+
+- `protocol_version` missing or malformed → error `-32602`; well-formed but
+  outside the rule → error `-31003`. Both carry
+  `data: {app_protocol_version, rule}`, the latter also `job_protocol_version`.
+- The app then **closes the socket** with code 1008 and a reason beginning
+  `hello refused:`.
+- The app processes nothing on a connection until a `hello` is accepted: a
+  request sent first is answered `-32600` ("send hello before anything
+  else"), a notification sent first is dropped, and the job is not reachable
+  for `cancel` or `replay` until it has attached.
+- **The job treats a refusal as "run unobserved", never as a run failure.** It
+  logs the app's error once, stops — no reconnect, since retrying an
+  incompatible version can only get the same answer — and the run continues
+  with its durable path untouched. The job waits for `hello`'s answer before
+  streaming anything, so a refusal can never be mistaken for a dropped
+  connection and retried.
+
+## The durable record: telemetry part files
+
+Frozen 2026-09-25. Written by `job/telemetry.py::PartFileWriter`. Read today
+by `replay`, and later by the Slice 4 ingestion job; this section is the
+promise both of them build on.
+
+- **Directory:** `<telemetry root>/runs/<run_id>/`. The root is the job's
+  `DBX_TELEMETRY_VOLUME`, by default `/Volumes/main/dbx_leaning/telemetry`
+  (`uc_ddl/004_telemetry_volume.sql`). One directory per run; the harness
+  writes nothing into it but part files.
+- **File name:** `part-NNNNN.jsonl` — five-digit, zero-padded, numbered from
+  `part-00001` in the order they were closed. Zero-padding keeps
+  lexicographic and numeric order the same through `part-99999`.
+- **Framing:** JSON Lines, UTF-8. One record per line, each line a complete
+  JSON object terminated by `\n`, written compactly (`separators=(",", ":")`).
+  Each record is exactly an envelope message in its JSON form
+  (`model_dump(mode="json")`: enums as their string values) — the same shape
+  the job sends in `telemetry` and the app serves over SSE. **Not msgpack:**
+  that was v3, and v4 moved everything to JSON (see Encoding).
+- **Ordering:** records within a part are in the order they were emitted,
+  and part numbers increase over the run, but a reader must order by `seq`,
+  not by file position — `seq` is the contract, and `replay` sorts by it.
+  `seq` values are unique within a run; a reader that sees one twice may
+  treat the copies as the same record.
+- **A part is durable only once it is closed.** Each part is written whole
+  and closed in one operation, never appended to afterwards. On a UC volume a
+  file does not exist to another reader until it is closed, and a record that
+  has not yet been rolled into a closed part is lost if the job dies. Parts
+  roll on size or age (by default 1 MB or 30 s, whichever first) and at end
+  of run; the sizes are tuning, not contract.
+- **One terminal status per run.** A run that completes ends with exactly one
+  `status` record with `terminal: true`, written by the harness as the run's
+  last record (highest `seq`), after the final roll — and the harness refuses
+  to report `SUCCEEDED` if any record failed to reach a closed part. A model
+  must not emit a `terminal: true` status itself. A run whose process died has
+  *no* terminal status in its parts, which is how a reader tells "crashed"
+  from "finished".
+
+## Encoding (a delivery detail, not part of the contract)
+
+- **JSON everywhere**, since v4: JSON-RPC text frames job ↔ app, JSON Lines
+  in the telemetry part files, JSON on the SSE stream to the browser. One
+  codec, readable in devtools and in a part file an operator opens by hand,
+  and `replay` parses the same bytes that were written. The msgpack this
+  section used to describe (job → app and in the Delta write buffer) is v3
+  and is gone, dependency and all — `app/shared/codec.py` says why.
+- The envelope's job is to define valid *shape*. Whatever encodes it must
+  produce the same logical content — that interchangeability is the test that
+  the boundary between "protocol" and "serialisation" is drawn in the right
+  place.
+- Validation (Pydantic) lives with whichever side is deserialising, not
+  inside the encoding step itself.
 
 ## What a model actually sees
 
-A model never imports this spec, msgpack, WebSockets, or anything
+A model never imports this spec, WebSockets, or anything
 transport-related. It is handed a plain callback (something like
 `emit(type: str, **fields)`) by the job harness and calls it with
 envelope-shaped keyword arguments; the harness is responsible for stamping
@@ -242,3 +395,39 @@ Clarification, not a change. "Gap means these records exist and haven't
 arrived yet" was true but incomplete: on the live path they may never arrive,
 because logs are droppable there by contract. Spelled out under the common
 fields.
+
+### 2026-09-25 — the wire freeze (v5 Phase 1)
+
+Four changes and one piece of writing-down, so that the wire — not the
+harness — is the compatibility promise a fork owes the app.
+
+1. **Tolerant read.** Envelope models went from `extra="forbid"` to
+   `extra="ignore"`: an unknown field is dropped, not rejected. The write side
+   stays strict — `make_message` still refuses an undeclared field, now with a
+   `ValueError` naming it rather than a Pydantic `ValidationError`. The
+   published schema is unchanged and still says `additionalProperties: false`
+   (it describes output). See "Reading records".
+2. **Unknown `type` is skipped, never fatal**, at the app's `telemetry` parse
+   boundary, per record; the rest of the batch is still ingested. The code
+   already survived a bad record — what changed is that an unknown type is
+   now told apart from a malformed record, and both are counted and logged
+   once per batch instead of once per record.
+3. **`hello` carries a mandatory `protocol_version`** (`"1.0"`), enforced by
+   the rule *job MAJOR == app MAJOR and job MINOR <= app MINOR*. A refused
+   `hello` gets a JSON-RPC error (`-32602` missing/malformed, `-31003`
+   incompatible — a new code) and the socket is closed with 1008. The app now
+   processes nothing before an accepted `hello`, and registers the job for
+   `cancel`/`replay` only then. The job waits for `hello`'s answer before
+   streaming, and treats a refusal as "unobserved, stop retrying". **Breaking
+   for any client that does not send the field** — the only one is this
+   repo's `job/ws.py`, which does, so job and app must deploy together once.
+4. **JSON-RPC 2.0 formalised.** The frames already had the 2.0 shape; what
+   changed is that `parse` now refuses a response with both `result` and
+   `error`, an `error` without an integer `code` and string `message`, and an
+   `id` that is not a string, integer or absent. `hello` follows LSP's
+   capability exchange: `capabilities` in the params (the job's) and in the
+   result (the app's), alongside each side's `protocol_version`.
+5. **Written down, not changed:** the part-file layout, as part of the frozen
+   contract (see "The durable record"). The Encoding section's msgpack claim
+   was stale since v4 and is corrected: everything is JSON. The top of this
+   file pointed at `shared/envelope.py`; it is `app/shared/envelope.py`.

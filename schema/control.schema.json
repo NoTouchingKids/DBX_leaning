@@ -18,7 +18,19 @@
     "hello": {
       "from": "job",
       "kind": "request",
-      "summary": "Which run this is, and the seq it is picking up from."
+      "params": {
+        "capabilities": "object: methods this side answers, e.g. {'cancel': {}}",
+        "next_seq": "integer",
+        "protocol_version": "string 'MAJOR.MINOR', REQUIRED",
+        "run_id": "string"
+      },
+      "result": {
+        "capabilities": "object: methods the app answers",
+        "observed": "boolean",
+        "protocol_version": "string 'MAJOR.MINOR' \u2014 the app's",
+        "run_id": "string"
+      },
+      "summary": "First frame. Which run this is, the seq it is picking up from, and the job's protocol version and capabilities."
     },
     "ping": {
       "from": "either",
@@ -36,5 +48,7 @@
       "summary": "A batch of envelope messages. The bulk of all traffic."
     }
   },
+  "x-protocol-compatibility": "job MAJOR == app MAJOR and job MINOR <= app MINOR",
+  "x-protocol-version": "1.0",
   "x-schema-version": "1.0.0"
 }

@@ -17,7 +17,16 @@ from websockets.sync.client import connect as ws_connect
 from websockets.sync.server import serve
 
 from job.ws import RpcClient, app_client, diagnose
-from shared.rpc import ErrorCode, Method, parse, request
+from shared.rpc import (
+    PROTOCOL_VERSION,
+    ErrorCode,
+    Method,
+    RpcError,
+    failure,
+    parse,
+    request,
+    success,
+)
 
 
 class Server:
@@ -29,7 +38,12 @@ class Server:
     honest way by doing it.
     """
 
-    def __init__(self):
+    def __init__(self, hello_error: dict | None = None):
+        #: What the stand-in says to `hello`. None = accept, as the real app
+        #: does for a compatible job; an error object = refuse, then close,
+        #: which is exactly what `app/server/routes/rpc.py` does.
+        self.hello_error = hello_error
+        self.connections = 0
         self.frames: list[dict] = []
         #: The RAW frames, kept alongside the parsed ones so a test can assert
         #: what KIND each was. `websockets` hands back `str` for a text frame
@@ -45,12 +59,43 @@ class Server:
 
     def _handler(self, ws):
         self._conn = ws
+        self.connections += 1
         self.ready.set()
         try:
             for raw in ws:
                 self.raw_frames.append(raw)
                 frame = json.loads(raw)
                 self.frames.append(frame)
+                if frame.get("method") == Method.HELLO:
+                    # The real app answers hello before anything else happens,
+                    # and the job waits for that answer — so a stand-in that
+                    # stayed silent would be more lenient than the real thing.
+                    if self.hello_error is None:
+                        ws.send(
+                            success(
+                                frame["id"],
+                                {
+                                    "observed": True,
+                                    "run_id": frame["params"]["run_id"],
+                                    "protocol_version": PROTOCOL_VERSION,
+                                    "capabilities": {},
+                                },
+                            )
+                        )
+                    else:
+                        ws.send(
+                            failure(
+                                frame["id"],
+                                RpcError(
+                                    self.hello_error["code"],
+                                    self.hello_error["message"],
+                                    self.hello_error.get("data"),
+                                ),
+                            )
+                        )
+                        ws.close(code=1008, reason="hello refused")
+                        return
+                    continue
                 if "result" in frame or "error" in frame:
                     self._responses.put(frame)
         except Exception:  # noqa: BLE001 - client went away; that is the test ending
@@ -112,10 +157,77 @@ def test_it_says_hello_with_the_seq_it_is_picking_up_from():
         try:
             assert server.wait_for(Method.HELLO)
             hello = next(f for f in server.frames if f.get("method") == Method.HELLO)
-            assert hello["params"] == {"run_id": "r1", "next_seq": 4000}
+            assert hello["params"]["run_id"] == "r1"
+            assert hello["params"]["next_seq"] == 4000
             assert "id" in hello, "hello is a request; the app is expected to answer it"
         finally:
             client.stop()
+
+
+def test_hello_carries_the_protocol_version_and_capabilities():
+    """LSP's `initialize`, in miniature: the version the app judges the job
+    by, and the methods the job will answer."""
+    with Server() as server:
+        client = _client(server)
+        client.start()
+        try:
+            assert server.wait_for(Method.HELLO)
+            hello = next(f for f in server.frames if f.get("method") == Method.HELLO)
+            assert hello["params"]["protocol_version"] == PROTOCOL_VERSION
+            caps = hello["params"]["capabilities"]
+            assert isinstance(caps, dict)
+            assert {Method.CANCEL, Method.REPLAY, Method.PING} <= set(caps)
+        finally:
+            client.stop()
+
+
+def test_a_refused_hello_means_unobserved_and_no_retry():
+    """An incompatible version is not a dropped socket.
+
+    Retrying it would get the same answer forever — ten reconnects per run,
+    each one a warning in the app's log — so the client stops at the first
+    refusal, records why, and the run carries on unobserved. Nothing here
+    raises into the caller: `send()` keeps working and keeps being ignored.
+    """
+    error = {
+        "code": ErrorCode.INCOMPATIBLE_VERSION,
+        "message": "job protocol 2.0 is not compatible with app protocol 1.0",
+        "data": {"app_protocol_version": "1.0"},
+    }
+    with Server(hello_error=error) as server:
+        client = _client(server, backoff_s=0.01)
+        client.start()
+        try:
+            assert server.wait_for(Method.HELLO)
+            client._thread.join(timeout=5)
+            assert not client._thread.is_alive(), "the socket thread kept retrying"
+
+            client.send({"type": "log", "seq": 1})  # must not raise
+            time.sleep(0.2)
+        finally:
+            client.stop()
+
+        assert server.connections == 1, "a refused hello was retried"
+        assert client.rejected is not None
+        assert client.rejected["code"] == ErrorCode.INCOMPATIBLE_VERSION
+        assert "hello refused" in (client.last_error or "")
+        assert Method.TELEMETRY not in server.methods(), "streamed before hello was accepted"
+
+
+def test_telemetry_waits_for_hello_to_be_accepted():
+    """Records queued before the app answers are held, not sent into a
+    handshake the app might be about to refuse."""
+    with Server() as server:
+        client = _client(server)
+        for seq in range(3):
+            client.send({"type": "log", "seq": seq})
+        client.start()
+        try:
+            assert server.wait_for(Method.TELEMETRY)
+        finally:
+            client.stop()
+        methods = server.methods()
+        assert methods.index(Method.HELLO) < methods.index(Method.TELEMETRY)
 
 
 def test_records_are_batched_into_telemetry_notifications():

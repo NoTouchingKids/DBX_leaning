@@ -20,7 +20,7 @@ import pytest
 
 from job.local import run_local
 from job.ws import ws_url_for
-from shared.rpc import Method
+from shared.rpc import ErrorCode, Method
 
 websockets = pytest.importorskip("websockets")
 
@@ -43,7 +43,10 @@ RUN_HZ = 5
 class Collector:
     """A stand-in app: accepts a socket, records every frame it is sent."""
 
-    def __init__(self) -> None:
+    def __init__(self, refuse_hello: bool = False) -> None:
+        #: Answer `hello` the way the app answers an incompatible job: a
+        #: JSON-RPC error, then a close.
+        self.refuse_hello = refuse_hello
         self.frames: list[dict] = []
         self.messages: list[dict] = []
         self.connections = 0
@@ -62,6 +65,21 @@ class Collector:
                     self.frames.append(frame)
                     if frame.get("method") == Method.TELEMETRY:
                         self.messages.extend(frame["params"]["messages"])
+                    if self.refuse_hello and frame.get("method") == Method.HELLO:
+                        ws.send(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": frame["id"],
+                                    "error": {
+                                        "code": ErrorCode.INCOMPATIBLE_VERSION,
+                                        "message": "job protocol 9.0 is not compatible",
+                                    },
+                                }
+                            )
+                        )
+                        ws.close(code=1008, reason="hello refused")
+                        return
                     # A request needs a reply; a notification must not get one.
                     if "id" in frame:
                         ws.send(json.dumps({"jsonrpc": "2.0", "id": frame["id"], "result": {}}))
@@ -155,6 +173,28 @@ def test_a_dead_app_does_not_fail_the_run(tmp_path):
     # The durable path is untouched by any of it.
     assert len(run.messages) > 0
     assert run.outcome.unflushed == 0
+
+
+def test_an_app_that_refuses_the_hello_leaves_the_run_unobserved_not_failed(tmp_path):
+    """A version mismatch between job and app is a live-path fact, not a run
+    outcome. The run succeeds, its durable record is whole, and the client
+    asked exactly once — an incompatible version cannot be retried away."""
+    with Collector(refuse_hello=True) as app:
+        run = run_local(
+            "heartbeat",
+            run_id="live-5",
+            seconds=RUN_SECONDS,
+            hz=RUN_HZ,
+            telemetry_dir=tmp_path,
+            app_url=app.url,
+        )
+
+    assert run.outcome.status == "SUCCEEDED"
+    assert run.observed is False
+    assert app.connections == 1, "a refused hello was retried"
+    assert "hello refused" in (run.last_error or "")
+    assert not app.messages, "telemetry was streamed into a refused session"
+    assert len(run.messages) > 0 and run.outcome.unflushed == 0
 
 
 def test_a_local_callback_and_a_socket_can_both_be_used(tmp_path):

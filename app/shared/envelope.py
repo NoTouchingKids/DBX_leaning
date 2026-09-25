@@ -136,9 +136,26 @@ class _Common(BaseModel):
 
     Frozen: a message is a record of something that already happened. Nothing
     downstream — relay, buffer, codec — has any business editing one in place.
+
+    **Tolerant on read, strict on write.** ``extra="ignore"``: a field this
+    version does not know is dropped, not rejected, so an app at protocol 1.0
+    still reads a 1.1 job's messages (the compatibility rule is in
+    ``shared.rpc``). The strictness that used to live here moved to where a
+    message is *built*: ``make_message`` still refuses a field the model does
+    not declare, so a model inventing its own field fails loudly in the job
+    rather than vanishing quietly at the app.
+
+    The published JSON Schema keeps ``additionalProperties: false`` through
+    ``json_schema_extra``. It describes what this version *sends*, and nothing
+    this version sends carries an undeclared field.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
+    model_config = ConfigDict(
+        extra="ignore",
+        frozen=True,
+        use_enum_values=False,
+        json_schema_extra={"additionalProperties": False},
+    )
 
     run_id: str = Field(min_length=1)
     #: Assigned by the job, one monotonic counter per run shared across all
@@ -336,4 +353,13 @@ def make_message(
             f"{', '.join(m.value for m in MessageType)}"
         ) from None
     model = _BY_TYPE[mtype]
+    # The write side stays strict although the models ignore extras on read:
+    # a misspelt or invented field from a model is a bug to surface at the
+    # emit() call, not a value to lose silently somewhere downstream.
+    unknown = sorted(set(fields) - set(model.model_fields))
+    if unknown:
+        raise ValueError(
+            f"{mtype.value} message has no field(s) {', '.join(unknown)}; "
+            f"declared: {', '.join(sorted(model.model_fields))}"
+        )
     return model(run_id=run_id, seq=seq, ts=now_ms() if ts is None else ts, **fields)  # type: ignore[return-value]
