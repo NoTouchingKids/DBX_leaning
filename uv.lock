@@ -466,6 +466,7 @@ app = [
 job = [
     { name = "databricks-sdk" },
     { name = "httpx" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "websockets" },
 ]
 
@@ -491,6 +492,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'app'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'job'", specifier = ">=0.27" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'app'", specifier = ">=3.2" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'job'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'app'", specifier = ">=0.29" },
     { name = "websockets", marker = "extra == 'job'", specifier = ">=12" },

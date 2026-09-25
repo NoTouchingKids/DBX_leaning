@@ -73,8 +73,8 @@ class JobConfig:
     #: The job's LAKEBASE identity — a second, separate credential, located
     #: the same way (a scope and two key names) and read the same way. Not the
     #: ingress principal: the one that owns `run_status` is not the one every
-    #: job presents to the app. Nothing reads these yet; Track C of
-    #: `docs/v5-implementation-plan.md` builds the writer that will.
+    #: job presents to the app. Read by `job/lakebase.py::from_config`, once
+    #: per run; the harness plugs the writer it returns into its status path.
     lakebase_secret_scope: str | None = None
     lakebase_client_id_key: str | None = None
     lakebase_secret_key: str | None = None

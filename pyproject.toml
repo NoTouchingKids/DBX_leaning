@@ -64,6 +64,14 @@ job = [
     "websockets>=12",
     "httpx>=0.27",
     "databricks-sdk>=0.30",
+    # The job's Lakebase writer (job/lakebase.py): `run_status` over a plain
+    # Postgres connection, an OAuth token as the password — the mechanism
+    # Phase 0 item 1 of docs/v5-implementation-plan.md confirmed. The same
+    # pin as the app's, so one resolution serves both. `[binary]` because a
+    # serverless environment has no libpq to build against; psycopg-binary
+    # ships manylinux wheels for x86_64 AND aarch64, and serverless may be
+    # either.
+    "psycopg[binary]>=3.2",
 ]
 
 [dependency-groups]

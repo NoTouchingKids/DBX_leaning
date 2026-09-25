@@ -163,6 +163,22 @@ class M2MTokenProvider:
     def url(self) -> str:
         return f"https://{self._host}/oidc/v1/token"
 
+    @property
+    def client_id(self) -> str:
+        """The principal's client id. Not a secret — it is also the principal's
+        Postgres role name, which is why `job/lakebase.py` reads it from here
+        rather than reading the secret scope a second time."""
+        return self._client_id
+
+    def invalidate(self) -> None:
+        """Forget the cached token, so the next `token()` fetches a new one.
+
+        For a caller whose connection was just refused or dropped: the cached
+        token may be the reason, and the skew only protects against expiry
+        the clock can see coming."""
+        self._token = None
+        self._expires_at = 0.0
+
     def token(self) -> str:
         """A valid token, cached until it is nearly expired."""
         if self._token is not None and self._now() < self._expires_at:
