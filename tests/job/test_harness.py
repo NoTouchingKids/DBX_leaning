@@ -323,3 +323,209 @@ def test_a_raising_status_writer_does_not_fail_the_run(tmp_path):
     outcome = _harness(tmp_path, status_writer=sw).run()
     assert outcome.status == "SUCCEEDED"
     assert sw.calls, "the writer was never called"
+
+
+# --- four threads: the controller, the status writer, the shutdown order -----
+
+
+def test_the_status_writer_runs_on_the_controller_never_the_models_thread(tmp_path):
+    sw = _RecordingStatusWriter()
+    outcome = _harness(tmp_path, status_writer=sw).run()
+
+    assert outcome.status_writes == len(sw.calls) >= 2
+    assert set(sw.threads) == {"controller"}, sw.threads
+
+
+def test_rolls_happen_on_the_controller(tmp_path):
+    names: list[str] = []
+    writer = PartFileWriter(tmp_path, "r1", max_age_s=0.0)
+    original = writer.roll_if_due
+
+    def watched():
+        names.append(threading.current_thread().name)
+        return original()
+
+    writer.roll_if_due = watched  # type: ignore[method-assign]
+    h = Harness(
+        "r1",
+        writer,
+        handle=describe_object(Heartbeat(seconds=0.3, hz=20), "heartbeat"),
+        roll_tick_s=0.01,
+    )
+    outcome = h.run()
+
+    assert outcome.status == "SUCCEEDED"
+    assert names and set(names) == {"controller"}
+
+
+def test_a_slow_status_writer_stalls_neither_the_model_nor_the_run(tmp_path):
+    """A Postgres write that hangs must cost the run at most its bounded
+    shutdown wait, and the model nothing at all."""
+    import time
+
+    sw = _RecordingStatusWriter(delay_s=3.0)
+    h = _harness(
+        tmp_path, model=Heartbeat(seconds=0.2, hz=20), status_writer=sw, status_timeout_s=0.2
+    )
+    started = time.monotonic()
+    outcome = h.run()
+    elapsed = time.monotonic() - started
+
+    assert outcome.status == "SUCCEEDED"
+    assert elapsed < 2.0, f"the run waited on the status writer ({elapsed:.2f}s)"
+    assert outcome.status_terminal_reported is False
+    # And the durable record is whole regardless.
+    assert _records(h.writer)[-1]["terminal"] is True
+
+
+def test_a_raising_status_writer_is_counted_not_fatal(tmp_path):
+    sw = _RecordingStatusWriter(fail=True)
+    outcome = _harness(tmp_path, status_writer=sw).run()
+    assert outcome.status == "SUCCEEDED"
+    assert outcome.status_write_failures == len(sw.calls) >= 2
+    assert outcome.status_writes == 0
+
+
+def test_lakebase_is_never_told_a_status_the_volume_does_not_have(tmp_path):
+    """At-most-stale, never ahead: at the moment the status writer is called,
+    that status is already in a closed part file."""
+    on_disk_at_write: list[bool] = []
+    writer = PartFileWriter(tmp_path, "r1")  # default size/age: nothing rolls by itself
+
+    class Checking(_RecordingStatusWriter):
+        def write(self, run_id, seq, status, terminal, detail, ts):
+            on_disk_at_write.append(seq in {r["seq"] for r in _records(writer)})
+            return super().write(run_id, seq, status, terminal, detail, ts)
+
+    h = Harness(
+        "r1",
+        writer,
+        handle=describe_object(Heartbeat(seconds=0.1, hz=40), "heartbeat"),
+        status_writer=Checking(),
+        roll_tick_s=0.01,
+    )
+    outcome = h.run()
+
+    assert outcome.status == "SUCCEEDED"
+    assert on_disk_at_write and all(on_disk_at_write), on_disk_at_write
+    assert outcome.status_writes == len(on_disk_at_write)
+
+
+def test_a_status_whose_part_never_closes_is_withheld_from_lakebase(tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise OSError("volume unavailable")
+
+    monkeypatch.setattr("pathlib.Path.write_text", boom)
+    sw = _RecordingStatusWriter()
+    outcome = _harness(tmp_path, status_writer=sw).run()
+
+    assert outcome.status == "FAILED"
+    assert sw.calls == [], "Lakebase was told about statuses the volume never got"
+    assert outcome.status_writes_withheld >= 2
+
+
+def test_the_shutdown_order_is_the_signed_off_one(tmp_path):
+    """model result -> part files closed -> Lakebase terminal -> bye.
+
+    A crash between any two of these must leave the part files as the floor
+    and Lakebase at-most-stale, never the reverse — which only holds if they
+    happen in this order.
+    """
+    order: list[str] = []
+    lock = threading.Lock()
+
+    def note(what: str) -> None:
+        with lock:
+            order.append(what)
+
+    class ResultThenDone:
+        def attach(self, emit, should_cancel):
+            self.emit = emit
+
+        def run(self):
+            self.emit("result", row_count=3, fetch_hint={"table": "t"})
+
+    class Channel:
+        def send(self, record):
+            pass
+
+        def start(self, executor):
+            note("channel-start")
+
+        def close(self, timeout):
+            note("bye")
+
+    class Status(_RecordingStatusWriter):
+        def write(self, run_id, seq, status, terminal, detail, ts):
+            if terminal:
+                note("lakebase-terminal")
+            return super().write(run_id, seq, status, terminal, detail, ts)
+
+        def close(self):
+            note("lakebase-close")
+
+    writer = PartFileWriter(tmp_path, "r1")
+    append, close = writer.append, writer.close
+
+    def watched_append(record):
+        if record["type"] == "result":
+            note("model-result")
+        return append(record)
+
+    def watched_close():
+        note("parts-closed")
+        return close()
+
+    writer.append = watched_append  # type: ignore[method-assign]
+    writer.close = watched_close  # type: ignore[method-assign]
+
+    h = Harness(
+        "r1",
+        writer,
+        handle=describe_object(ResultThenDone(), "result-then-done"),
+        channel=Channel(),
+        status_writer=Status(),
+    )
+    outcome = h.run()
+
+    assert outcome.status == "SUCCEEDED"
+    assert order == [
+        "channel-start",
+        "model-result",
+        "parts-closed",
+        "parts-closed",  # the second close is the terminal status itself landing
+        "lakebase-terminal",
+        "lakebase-close",
+        "bye",
+    ], order
+
+
+def test_a_model_cannot_emit_its_own_terminal_status(tmp_path):
+    """Exactly one terminal status per run, the harness's, the last record.
+    A model that says `terminal=True` is recorded as non-terminal and warned —
+    not failed, and its status name is kept."""
+
+    class Eager:
+        def attach(self, emit, should_cancel):
+            self.emit = emit
+
+        def run(self):
+            self.emit("status", status="INFEASIBLE", terminal=True, detail="no solution")
+            self.emit("status", status="INFEASIBLE", terminal=True)
+            self.emit("log", message="still here")
+
+    sw = _RecordingStatusWriter()
+    h = _harness(tmp_path, model=Eager(), status_writer=sw)
+    outcome = h.run()
+
+    records = _records(h.writer)
+    terminal = [r for r in records if r["type"] == "status" and r["terminal"]]
+    assert len(terminal) == 1 and terminal[0] == records[-1]
+    assert outcome.status == "SUCCEEDED"
+    assert outcome.coerced_terminal == 2
+
+    model_statuses = [r for r in records if r.get("status") == "INFEASIBLE"]
+    assert len(model_statuses) == 2 and not any(r["terminal"] for r in model_statuses)
+    warnings = [r for r in records if r["type"] == "log" and "only the harness" in r["message"]]
+    assert len(warnings) == 1, "warn once per run, not once per offence"
+    assert [c[3] for c in sw.calls].count(True) == 1

@@ -1,8 +1,9 @@
 """Cancellation, as a ``threading.Event``.
 
 Deliberately not an ``asyncio.Event``: the thing that has to observe it is the
-model's blocking call, running on a worker thread. The event loop sets it in
-response to a cancel command arriving over the WebSocket; the model polls it.
+model's blocking call, on the main thread. The harness's controller thread sets
+it in response to a cancel command arriving over the WebSocket, and a signal
+handler sets it on SIGTERM; the model polls it.
 
 There is no durable/warehouse-polling fallback for cancel on this side. If no
 live channel exists at all, the operator escape hatch is

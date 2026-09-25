@@ -77,6 +77,25 @@ class LocalRun:
         return iter((self.outcome, self.messages))
 
 
+class _Tee:
+    """A local callback and the socket, as one live channel. `send` offers to
+    both, in that order; the lifecycle is the socket's."""
+
+    def __init__(self, local: Any, client: Any) -> None:
+        self._local = local
+        self._client = client
+
+    def send(self, record: dict[str, Any]) -> None:
+        self._local(record)
+        self._client.send(record)
+
+    def start(self, executor: Any = None) -> None:
+        self._client.start(executor)
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._client.close(timeout)
+
+
 def run_local(
     model: str,
     *,
@@ -88,6 +107,7 @@ def run_local(
     workspace_host: str | None = None,
     client_id: str | None = None,
     client_secret: str | None = None,
+    status_writer: Any = None,
     **config: Any,
 ) -> LocalRun:
     """Drive `model` through the harness, with or without a live channel.
@@ -119,6 +139,10 @@ def run_local(
     because a run nobody watched is the normal case rather than a broken one.
     So check `observed` — a green status says nothing about the socket.
 
+    `status_writer` plugs a `run_status` writer into the same slot a job uses
+    (see `job/status.py`) — e.g. `job.lakebase.from_config(...)` — so a
+    notebook can watch the Lakebase row move. None writes nothing.
+
     There is usually no credential to pass: the Databricks identity comes from
     the SDK's default chain, which in a notebook is you. Pass `client_id` and
     `client_secret` to authenticate as the shared ingress service principal
@@ -143,6 +167,7 @@ def run_local(
         model_spec=model,
         model_config=config,
         on_message=on_message,
+        status_writer=status_writer,
         roll_tick_s=roll_every,
     )
 
@@ -162,18 +187,11 @@ def run_local(
         )
         # Both, when a caller asked for both: `on_message` stays a local view
         # and the socket gets everything too. Silently replacing the callback
-        # the caller passed would lose the one they can actually see.
-        local = on_message
-        harness.channel = (
-            client.send if local is None else lambda record: (local(record), client.send(record))[1]
-        )
-        client.start()
+        # the caller passed would lose the one they can actually see. The
+        # harness starts and closes the socket itself, as it does in a job.
+        harness.channel = client if on_message is None else _Tee(on_message, client)
 
-    try:
-        outcome = harness.run()
-    finally:
-        if client is not None:
-            client.stop()
+    outcome = harness.run()
 
     # Read them back from the part files rather than collecting them in
     # memory: this is the same path `replay` and the ingestion job take, so if

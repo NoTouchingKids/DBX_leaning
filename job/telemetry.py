@@ -82,6 +82,8 @@ class TelemetryWriter(Protocol):
 
     def append(self, record: dict[str, Any]) -> None: ...
     def roll_if_due(self) -> bool: ...
+    def flush(self) -> bool: ...
+    def holds(self, seq: int) -> bool: ...
     def close(self) -> None: ...
     def replay(self, from_seq: int, to_seq: int | None = None) -> list[dict[str, Any]]: ...
 
@@ -89,8 +91,8 @@ class TelemetryWriter(Protocol):
 class PartFileWriter:
     """Rolling JSONL part files under one run's directory.
 
-    Thread-safe: the model thread appends while the harness's roller thread
-    ages parts out, so every mutation of `_pending` is under `_lock`. The
+    Thread-safe: the model thread appends while the harness's controller
+    thread ages parts out, so every mutation of `_pending` is under `_lock`. The
     actual file write happens outside the lock — a ~117ms close must not block
     a model mid-solve.
     """
@@ -125,9 +127,10 @@ class PartFileWriter:
         #: returns a hole: measured here as replay(0) returning [] for a run
         #: that had issued five records.
         #:
-        #: A dict rather than one list because two threads roll — the roller
-        #: on age/size and `close()` at end of run — and each must be able to
-        #: have a batch in flight without clobbering the other's.
+        #: A dict rather than one list because two threads can roll — the
+        #: harness's controller on age/size (and before a status write), and
+        #: `close()` at end of run on the main thread — and each must be able
+        #: to have a batch in flight without clobbering the other's.
         #:
         #: **The invariant every read here depends on: a record is always in
         #: at least one of `_pending`, `_inflight`, or a closed part file.**
@@ -167,6 +170,34 @@ class PartFileWriter:
             if not aged and self._pending_bytes < self.max_bytes:
                 return False
         return self._roll()
+
+    def flush(self) -> bool:
+        """Roll whatever is pending now, due or not. Returns whether a part was
+        written.
+
+        The harness's controller calls this before reporting a `status` to
+        `run_status`, so that Lakebase is never told about a record the volume
+        does not have yet. Priced like any roll (~117ms on a UC volume), which
+        is affordable because a run has a handful of statuses, and
+        self-coalescing: statuses queued behind one flush find their records
+        already closed and skip their own.
+        """
+        return self._roll()
+
+    def holds(self, seq: int) -> bool:
+        """Is a record with this `seq` still waiting to be durable — pending, or
+        in a part whose write has not returned?
+
+        False means "not held here": closed into a part, or never appended.
+        The harness asks only about records it appended itself, so for it the
+        answer reads as "durable". Exact under the same invariant `replay`
+        relies on: a record is always in `_pending`, `_inflight`, or a closed
+        part, and both halves are checked in one critical section.
+        """
+        with self._lock:
+            if any(r.get("seq") == seq for r in self._pending):
+                return True
+            return any(r.get("seq") == seq for b in self._inflight.values() for r in b)
 
     def close(self) -> None:
         """End of run: roll whatever is left, whatever the outcome was.

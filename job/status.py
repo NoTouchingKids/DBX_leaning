@@ -22,8 +22,18 @@ The contract, all of it:
 * **It must bound its own calls** (connect and statement timeouts). The
   harness can bound how long it WAITS for a write, never how long the write
   takes — a thread cannot be preempted.
+* **It is called on the harness's controller thread**, never the model's —
+  queued by `emit()` — so a slow write cannot stall a model. It can delay the
+  controller's other work (rolls, cancel), which is why the bound above
+  matters. At shutdown the harness waits at most `status_timeout_s` for the
+  terminal write, then says `bye` regardless.
+* **It is never told a status the volume does not have.** The controller
+  flushes the part holding the record first and withholds the call if the
+  record still is not in a closed part: `run_status` is at-most-stale
+  relative to the part files, never ahead of them.
 * ``close()``, if the writer has one, is called once at the end of the run,
-  after the terminal write. Optional; idempotent is expected.
+  on the controller, right after the terminal write. Optional; idempotent is
+  expected.
 
 A `Protocol`, so a writer matches by shape rather than by ancestry — the same
 rule models follow. `close` is not in it because it is optional.

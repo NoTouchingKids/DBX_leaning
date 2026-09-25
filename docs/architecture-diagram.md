@@ -265,193 +265,227 @@ Reading it:
 
 ## Job concurrency model (threads)
 
-Zooming into one box from the diagrams above: `job/harness.py`'s own
-docstring says *"three threads, and that is the whole concurrency story
-[...] they meet at two places only: a `queue.Queue` of outbound frames, and
-the `CancellationToken`."* That undercounts by two — `PartFileWriter._lock`
-(`job/telemetry.py`) and `SeqCounter`'s own lock (`shared/seq.py`, and
-`shared/seq.py` says so explicitly: *"Thread-safe. The model's callback
-fires on a worker thread [...] Both draw from here, so the lock is not
-optional"*) are just as real a meeting point. Worth naming rather than
-silently correcting, in the spirit of the rest of this file: a docstring
-describing "the whole concurrency story" is exactly the kind of claim that
-goes stale quietly.
+Zooming into one box from the diagrams above. **Four threads** since v5
+Phase 3 (`job/harness.py`'s module docstring is the authority): `main` runs
+the model, `controller` runs everything else the harness does, and the
+socket's `sender` and `receiver` each own one direction of the WebSocket. The
+v4 version of this section was three threads (main / roller / socket) and
+quoted the harness claiming they met "at two places only"; that undercounted
+— the writer's lock and `SeqCounter`'s lock were meeting points too — and the
+docstring now lists every one.
+
+The rule the split exists to hold: **nothing slow runs on `main`.** `emit()` is
+called synchronously by the model, so it does only what cannot block on I/O —
+stamp, append to the writer, put on the outbox, queue a status write. A socket
+`send` (which can block with no timeout), a ~117ms part close, a Lakebase
+write and every RPC handler all happen somewhere else.
 
 ```mermaid
 flowchart LR
     subgraph MainT["main thread<br/>job/main.py -&gt; Harness.run()"]
         direction TB
-        SignalH["signal.signal(SIGTERM, SIGINT)<br/>handler runs ON the main thread —<br/>Python only ever delivers signals there"]
-        ModelRun["handle.run(): the model's own code,<br/>BLOCKS this thread for the run<br/>polls the token itself to stop<br/>cooperatively (libs/modelkit's<br/>interruptible sleep)"]
-        Emit["Harness.emit(type, **fields)<br/>called synchronously by the model,<br/>so it runs on this thread too"]
+        SignalH["signal.signal(SIGTERM[, SIGINT])<br/>handler runs ON the main thread —<br/>Python only ever delivers signals there"]
+        ModelRun["handle.run(): the model's own code,<br/>BLOCKS this thread for the run,<br/>polls the token to stop cooperatively"]
+        Emit["Harness.emit(type, **fields)<br/>stamp, append, offer, queue —<br/>no I/O; a model's terminal=true<br/>is coerced to false"]
+        Shutdown["Harness._shutdown()<br/>the signed-off order, see below"]
         ModelRun --> Emit
     end
 
-    subgraph RollerT["roller thread — Harness._roll_loop"]
+    subgraph CtrlT["controller thread — job/controller.py"]
         direction TB
-        RollLoop["every roll_tick_s (default 1.0s):<br/>writer.roll_if_due()<br/>started in Harness.run(), joined<br/>(timeout 5s) in its finally"]
+        CtrlLoop["queue.get(timeout = time to next tick)<br/>FIFO work, one item at a time"]
+        Tick["tick: writer.roll_if_due()<br/>(the old roller's job)"]
+        StatusW["status write: flush the part holding it,<br/>then status_writer.write() — withheld<br/>if the record is not in a closed part"]
+        Rpc["RPC handlers: cancel, replay, ping,<br/>and hello's answer"]
+        CtrlLoop --> Tick
+        CtrlLoop --> StatusW
+        CtrlLoop --> Rpc
     end
 
-    subgraph SocketT["rpc thread<br/>RpcClient._loop, job/ws.py<br/>started by job/main.py when<br/>DBX_APP_URL is set, stopped<br/>after harness.run() returns"]
+    subgraph SendT["rpc-send thread — RpcClient._send_loop"]
         direction TB
-        ReconnectLoop["outer: connect with backoff,<br/>CONSECUTIVE-failure counter,<br/>resets on success, gives up at 10"]
-        SessionLoop["_session(ws): every ~10ms,<br/>drain then pump inbound"]
-        Drain["_drain(): pop up to 200<br/>records, send as one<br/>telemetry notification"]
-        PumpInbound["_pump_inbound(): recv with a<br/>10ms timeout, dispatch<br/>cancel / replay / ping"]
-        ReconnectLoop --> SessionLoop --> Drain
-        SessionLoop --> PumpInbound
+        Reconnect["connect with backoff, CONSECUTIVE-<br/>failure counter, gives up at 10;<br/>a refused hello ends it, no retry"]
+        Hello["send hello, wait on the session<br/>until the app answers — nothing<br/>streams before an accepted hello"]
+        Stream["Outbox.take(): BLOCKS until records,<br/>replies, stop or a closed socket;<br/>sends telemetry batches + replies,<br/>then bye. The only ws.send caller"]
+        Reconnect --> Hello --> Stream
     end
 
-    subgraph Shared["shared state — every arrow crossing into here is the concurrency story"]
+    subgraph RecvT["rpc-recv thread — one per connection"]
         direction TB
-        WriterLock[("PartFileWriter._lock<br/>guards _pending, _inflight,<br/>_pending_bytes, _oldest_ts, _part_no")]
-        OutQueue[("RpcClient._q<br/>queue.Queue(maxsize=10000)<br/>thread-safe internally;<br/>full queue drops the OLDEST")]
-        Token[("CancellationToken<br/>threading.Event + its own<br/>lock for the reason string")]
-        SeqC[("SeqCounter<br/>threading.Lock around<br/>one counter, every type")]
+        Recv["ws.recv() BLOCKS; parse;<br/>hello's answer and every request<br/>go to the executor (controller)"]
     end
 
-    Emit -->|"append(): lock,<br/>push _pending"| WriterLock
-    Emit -->|"seq.next(): lock,<br/>increment, return"| SeqC
-    Emit -.->|"send(): put_nowait,<br/>never blocks"| OutQueue
-    SignalH -->|"token.cancel(reason)"| Token
-    ModelRun -.->|"is_cancelled() / token()"| Token
+    subgraph Shared["shared state — every arrow into here is the concurrency story"]
+        direction TB
+        WriterLock[("PartFileWriter._lock<br/>_pending, _inflight, counters")]
+        Outbox[("Outbox (job/ws.py)<br/>kept: status/result, no cap<br/>logs + other: capped, drop log first")]
+        CtrlQ[("controller queue<br/>queue.Queue, FIFO")]
+        Session[("_Session<br/>Condition: answer_seen, accepted,<br/>rejected, closed")]
+        Token[("CancellationToken<br/>threading.Event + lock")]
+        SeqC[("SeqCounter<br/>one lock, one counter")]
+    end
 
-    RollLoop -->|"pop _pending into _inflight<br/>UNDER the lock, then write<br/>~117ms OUTSIDE it"| WriterLock
+    Emit -->|"seq.next()"| SeqC
+    Emit -->|"append()"| WriterLock
+    Emit -.->|"send(): Outbox.put,<br/>never blocks"| Outbox
+    Emit -.->|"status: submit()"| CtrlQ
+    SignalH -->|"token.cancel()"| Token
+    ModelRun -.->|"is_cancelled()"| Token
+    Shutdown -->|"final close x2"| WriterLock
 
-    Drain -->|"get_nowait()<br/>up to 200"| OutQueue
-    PumpInbound -->|"cancel: harness.cancel(),<br/>cross-thread write"| Token
-    PumpInbound -->|"replay: writer.replay(),<br/>the SAME lock"| WriterLock
-    SessionLoop -->|"hello: reads<br/>harness.seq.issued"| SeqC
+    CtrlQ --> CtrlLoop
+    Tick -->|"roll under the roll gate"| WriterLock
+    StatusW -->|"holds(seq) / flush()"| WriterLock
+    Rpc -->|"cancel"| Token
+    Rpc -->|"replay"| WriterLock
+    Rpc -->|"reply: put_frame()"| Outbox
+    Rpc -->|"hello answered"| Session
+
+    Stream -->|"take()"| Outbox
+    Hello -->|"wait"| Session
+    Hello -->|"next_seq = seq.issued"| SeqC
+    Recv -->|"submit(handler)"| CtrlQ
+    Recv -->|"closed / answer_seen"| Session
 
     classDef mainc fill:#e8f1ff,stroke:#5b8def,color:#1a1a1a;
-    classDef rollc fill:#fff2e0,stroke:#e08a2b,color:#1a1a1a;
+    classDef ctrlc fill:#fff2e0,stroke:#e08a2b,color:#1a1a1a;
     classDef sockc fill:#e6f7ee,stroke:#2fa86b,color:#1a1a1a;
     classDef shared fill:#fff5f5,stroke:#d64545,color:#1a1a1a;
 
-    class SignalH,ModelRun,Emit mainc;
-    class RollLoop rollc;
-    class ReconnectLoop,SessionLoop,Drain,PumpInbound sockc;
-    class WriterLock,OutQueue,Token,SeqC shared;
+    class SignalH,ModelRun,Emit,Shutdown mainc;
+    class CtrlLoop,Tick,StatusW,Rpc ctrlc;
+    class Reconnect,Hello,Stream,Recv sockc;
+    class WriterLock,Outbox,CtrlQ,Session,Token,SeqC shared;
 ```
 
 Reading it:
 
-- **The model and the harness share a thread, by design.** `Harness.emit()`
-  is not a message passed to another thread — the model calls it directly,
-  synchronously, so `append()` and `send()` execute on the same thread the
-  solver is blocking. This is why `append()` has to be fast and lock-scoped
-  tightly: it is on the critical path of whatever the model is doing, not a
-  background concern.
-- **`PartFileWriter._lock` is held by three different threads for three
-  different reasons** — main (`append()`, and `close()` at both ends of a
-  run), roller (`roll_if_due()` on a timer), and the socket thread
-  (`replay()`, answering a gap-fill request from the app). The lock is
-  narrow on purpose: the ~117ms file write in `_roll()` happens **outside**
-  it, which is what stops a slow volume write from blocking the model's own
-  `append()` calls.
-- **The outbound queue is the only place backpressure is allowed to show
-  up, and it shows up as data loss, not blocking.** `RpcClient.send()` never
-  blocks and never raises — a full queue drops the OLDEST record rather
-  than refusing the model's newest one. That is a deliberate trade
-  (recent telemetry over old, when a viewer is actually watching), not an
-  accident of using a bounded queue: the volume already has everything, so
-  nothing durable is actually lost.
-- **The `CancellationToken` is written from two different threads and read
-  from a third.** The socket thread writes it when a `cancel` RPC arrives;
-  the main thread's own signal handler writes it on SIGTERM/SIGINT
-  (Python delivers signals to the main thread only, which is why this isn't
-  a fourth thread); the model, running on the main thread, reads it to
-  decide whether to keep going. All three go through the token's own lock,
-  not a new one.
-- **`SeqCounter` is the quietest cross-thread dependency here**, and the
-  easiest to miss: the socket thread reads `harness.seq.issued` once per
-  reconnect (to say "resume from here" in `hello`), while the main thread
-  is continuously incrementing the same counter inside `emit()`. Nothing
-  about the harness's own "two places only" framing mentions this at all.
+- **The model and `emit()` share a thread, by design, and that is why `emit()`
+  is so small.** The durable append happens there — a lock and a list, no
+  file I/O — so the floor never waits on a queue. Everything that can take
+  time is handed off: the live record to the outbox, a status to the
+  controller.
+- **All RPC dispatch is on the controller, never on `main` and never on a
+  socket thread.** The receiver only reads and parses; it hands `cancel`,
+  `replay`, `ping` and `hello`'s answer to `controller.submit`. A slow
+  `replay` therefore cannot stop the receiver reading, and a cancel is
+  handled in FIFO order behind whatever the controller was already doing.
+- **The controller is FIFO, so a slow item delays the ones behind it** — a
+  Lakebase write that takes its full timeout delays the next roll tick and
+  any cancel queued behind it. That is the price of one thread doing all of
+  it, and it is paid by bounding each item at its source: the Lakebase
+  writer's connect and statement timeouts, a UC close's ~117ms. The harness
+  can only bound how long it *waits*; it cannot preempt a thread.
+- **The outbox is where backpressure shows up, and it shows up as a live
+  drop, never as blocking or a durable loss** (signed off 2026-09-24). A full
+  live lane drops the oldest `log`; with no log left, an incoming log is
+  itself dropped, and otherwise the oldest `progress` goes. `status` and
+  `result` sit in their own lane with no cap and are never dropped. Every
+  dropped record is already in the part files, and `replay` serves it: the
+  policy decides what a client sees *first*, not what it can *have*.
+- **Blocking reads everywhere.** The v4 socket thread polled every 10ms. Now
+  the sender sleeps on the outbox's condition, the receiver in `ws.recv`, the
+  controller in `queue.get` until the next tick — each woken by the thing it
+  is waiting for.
+- **Lakebase is never ahead of the volume.** Before the controller reports a
+  status it flushes the part holding that record, and withholds the report
+  if the record still is not in a closed part. `run_status` can lag the part
+  files; it cannot lead them.
+- **The `CancellationToken` is written from two threads and read from a
+  third**: the controller (a `cancel` RPC) and the signal handler on `main`
+  write it; the model on `main` reads it.
 
 ### Startup and shutdown order
 
-The interesting bugs in a threaded harness are almost always about *order*,
-not logic — what's guaranteed to have started before what, and what's
-guaranteed to still be alive when something else finishes. This is what
-`job/main.py` and `job/harness.py` actually guarantee:
+The interesting bugs in a threaded harness are almost always about *order*.
+This is what `job/main.py` and `job/harness.py` guarantee. Shutdown is the
+order signed off 2026-09-24 and written in `Harness._shutdown`'s docstring:
+**model's result write → part files closed → Lakebase terminal write
+(bounded) → `bye`.**
 
 ```mermaid
 sequenceDiagram
-    participant Main as main() (main thread)
-    participant Socket as socket thread (RpcClient)
-    participant H as Harness.run() (main thread)
-    participant Roller as roller thread
+    participant Main as main() / Harness.run() (main thread)
+    participant Ctrl as controller thread
+    participant Send as rpc-send thread
+    participant Recv as rpc-recv thread
     participant Model as model code (main thread)
     participant W as PartFileWriter
+    participant LB as status writer (Lakebase)
 
-    Main->>Main: install SIGTERM/SIGINT handlers<br/>(they will run on this same thread)
-    opt DBX_APP_URL is configured
-        Main->>Socket: client.start()
-        activate Socket
-        Note over Socket: begins its own reconnect loop<br/>immediately, independent of H
-    end
-    Main->>H: harness.run()
-    activate H
-    H->>Roller: start roller thread
-    activate Roller
-    H->>Model: load_model(), wire(emit, token)
-    H->>Model: build() / refresh() (if the model has them)
-    H->>Model: run() -- BLOCKS the main thread
+    Main->>Main: assemble slots: channel = RpcClient (if DBX_APP_URL),<br/>status_writer = lakebase.from_config(cfg) (if configured)
+    Main->>Main: install SIGTERM (and SIGINT outside a kernel)
+    Main->>Ctrl: controller.start()
+    Main->>Send: channel.start(controller.submit)
+    Send->>Recv: connect; start receiver; send hello
+    Recv->>Ctrl: hello's answer, handled on the controller
+    Ctrl-->>Send: session accepted: streaming may begin<br/>(refused: unobserved, no retry)
+    Main->>Model: load_model(), wire(emit, token), build()
+    Main->>W: emit(status RUNNING): append
+    Main-->>Ctrl: queue the RUNNING status write
+    Ctrl->>W: flush the part holding it
+    Ctrl->>LB: write(RUNNING)
+    Main->>Model: run() -- BLOCKS the main thread
     loop while the model runs
-        Model->>H: emit(log / progress / result)
-        H->>W: append() -- locked, fast, no I/O
-        H-->>Socket: send() queues the record, non-blocking
-        Roller->>W: roll_if_due() on its own timer
+        Model->>Main: emit(log / progress / result)
+        Main->>W: append(): locked, no I/O
+        Main-->>Send: Outbox.put(): never blocks
+        Ctrl->>W: roll_if_due() on its tick
+        Send->>Send: take() wakes, sends a telemetry batch
     end
-    opt a cancel request arrives over the socket
-        Socket->>H: on_cancel() calls harness.cancel()
-        H->>H: token.cancel(reason)
-        Model->>Model: notices the token,<br/>stops at its own next checkpoint
+    opt a cancel arrives over the socket
+        Recv->>Ctrl: cancel request
+        Ctrl->>Main: token.cancel() -- the model notices at its next check
+        Ctrl-->>Send: reply queued in the outbox
     end
-    Model-->>H: run() returns
-    H->>Roller: stop event set, then join (timeout 5s)
-    deactivate Roller
-    H->>W: close() -- final roll of whatever is pending
-    H->>H: decide the terminal status<br/>(SUCCEEDED only if unflushed is 0)
-    H->>W: emit(status, terminal)<br/>still offered to Socket if it is up
-    H->>W: close() again -- the terminal<br/>status itself must land
-    H-->>Main: RunOutcome
-    deactivate H
-    opt the socket was started
-        Main->>Socket: client.stop() -- only AFTER<br/>harness.run() has fully returned
-        Note over Socket: stayed alive through H's whole<br/>life, so the terminal status emitted<br/>above had a channel to reach
-        deactivate Socket
-    end
+    Model-->>Main: run() returns (1. its results are already written and appended)
+    Note over Main,W: 2. part files flushed
+    Main->>Main: close the roll gate (waits out a controller roll in flight)
+    Main->>W: close() -- final roll
+    Main->>Main: decide terminal status: SUCCEEDED only if unflushed == 0
+    Main->>W: emit(status, terminal): append, offer live
+    Main->>W: close() again -- the terminal status itself lands
+    Note over Main,LB: 3. Lakebase terminal write, bounded
+    Main-->>Ctrl: queue the terminal status write, then the writer's close()
+    Ctrl->>LB: write(terminal); close()
+    Main->>Main: controller.drain(status_timeout_s) -- gives up, never blocks forever
+    Note over Main,Send: 4. bye
+    Main->>Send: channel.close() -- flush the outbox, send bye, close the socket
+    Send-->>Recv: socket closed, receiver ends
+    Main->>Ctrl: controller.stop()
+    Main-->>Main: RunOutcome
 ```
 
 Reading it:
 
-- **The socket outlives `harness.run()` on purpose.** `client.stop()` is
-  called in `job/main.py` only *after* `harness.run()` returns — so the
-  terminal status message, emitted inside `Harness._finalise()`, still has
-  a live channel to be offered to if one was ever connected. Stopping the
-  socket before that emit would silently turn every run's last, most
-  important message into an unobserved one.
-- **The roller stops before `_finalise()` runs, not after.** `Harness.run()`
-  sets `_stop_roller` and joins the roller thread (timeout 5s) in its
-  `finally`, before deciding the terminal status. This matters because
-  `_finalise()` calls `writer.close()` itself — if the roller were still
-  ticking, two threads could both try to roll the same pending batch at
-  once. By the time `_finalise()` runs, there is exactly one thread left
-  touching the writer.
-- **A cancel doesn't stop anything by itself — it's cooperative.** Setting
-  the token doesn't interrupt `handle.run()`; the model has to be polling
-  it (which is what `libs/modelkit`'s interruptible sleep is for). A model
-  that never checks the token runs to completion regardless of how many
-  times `cancel()` is called — the token changes what the model *sees*, not
-  what the CPU is doing.
-- **Two `writer.close()` calls at the end are deliberate, not a bug.** The
-  first flushes whatever the model left pending before the terminal status
-  is decided (so `unflushed` is accurate); the second is needed because
-  emitting that terminal status itself adds one more record to `_pending` —
-  without the second `close()`, the very message announcing SUCCEEDED could
-  be the one record that never reaches the volume.
+- **The socket outlives the model, and `bye` is last.** The harness itself
+  closes the channel as the final shutdown step — `job/main.py` no longer
+  starts or stops the client — so the terminal status always has a live
+  channel to travel on, and the app hears "finished" only once the part files
+  and Lakebase both have something finished to show.
+- **A crash between any two steps leaves the part files as the floor and
+  Lakebase at-most-stale, never the reverse.** Between 1 and 2 there is no
+  terminal status anywhere — which is how a reader tells "crashed" from
+  "finished". Between 2 and 3 the volume has it and Lakebase does not yet.
+  Between 3 and 4 both do, and the app sees a dropped socket instead of
+  `bye`, and backfills.
+- **The roll gate replaces "join the roller".** The controller keeps running
+  through shutdown — it still has the Lakebase write and any late RPC to
+  serve — so instead of stopping a thread, shutdown closes a gate the
+  controller rolls under, which waits out any roll in flight. From then on
+  `main` is the only thread rolling, so `unflushed` is exact when it is read.
+- **Two `writer.close()` calls are deliberate.** The first makes `unflushed`
+  honest before the terminal status is decided; the second lands the terminal
+  status itself — without it the very message announcing SUCCEEDED could be
+  the one record that never reaches the volume.
+- **The Lakebase wait is bounded; the write is not the harness's to bound.**
+  `status_timeout_s` (default 25s, sized to the Lakebase writer's own worst
+  case) caps how long shutdown waits. Past it, `bye` goes anyway and
+  `run_status` is left stale; the daemon controller finishes or dies with the
+  process.
+- **A cancel is still cooperative.** Setting the token interrupts nothing; the
+  model has to poll it (which is what `libs/modelkit`'s interruptible sleep is
+  for).
 
 ## Proposed: job-authored `run_status`, over the Lakebase Data API (not yet built)
 

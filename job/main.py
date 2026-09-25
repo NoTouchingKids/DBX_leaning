@@ -4,8 +4,9 @@ The v3 file this replaces was mostly a workaround. It ran the harness under
 `asyncio.run`, discovered that a serverless `spark_python_task` executes inside
 an ipykernel that already owns a running loop, and grew a ThreadPoolExecutor
 plus twenty lines of explanation to nest one loop inside another. None of that
-is here, because there is no loop to nest: the model blocks on this thread, the
-telemetry roller and the socket each have one of their own.
+is here, because there is no loop to nest: the model blocks on this thread, and
+the harness's controller and the socket's sender and receiver each have one of
+their own (four in all — see `job/harness.py`).
 
 What survives from v3 is the SIGTERM handling, and it survives because it earns
 its place: Databricks cancels a task with SIGTERM, and treating that as a
@@ -101,6 +102,23 @@ def _build_client(cfg: JobConfig, harness: Harness) -> RpcClient | None:
     )
 
 
+def _build_status_writer(cfg: JobConfig) -> Any:
+    """The run's Lakebase `run_status` writer, or None when not configured.
+
+    Lazily imported, like the socket's machinery: a run with no Lakebase
+    identity must not depend on the Postgres driver to start. None is "not
+    configured", never a failure — the part files record every status either
+    way. The harness calls it on its controller thread and closes it at the
+    end of the run.
+    """
+    try:
+        from .lakebase import from_config
+    except Exception as exc:  # noqa: BLE001 - no writer is a normal run
+        log.info("no Lakebase status writer: %s", exc)
+        return None
+    return from_config(cfg)
+
+
 def main(argv: list[str] | None = None) -> int:
     _setup_logging()
     cfg = JobConfig.from_env()
@@ -140,10 +158,16 @@ def main(argv: list[str] | None = None) -> int:
         roll_tick_s=cfg.flush_tick_s,
     )
 
+    # The parts are slots, assembled here and nowhere else. The harness starts
+    # the channel (handing it the controller to run its handlers on) and ends
+    # both in the signed-off shutdown order — terminal status durable, then
+    # run_status, then `bye` — so neither is started or stopped from here.
     client = _build_client(cfg, harness)
     if client is not None:
-        harness.channel = client.send
-        client.start()
+        harness.channel = client
+    status_writer = _build_status_writer(cfg)
+    if status_writer is not None:
+        harness.status_writer = status_writer
 
     # Databricks cancels a task with SIGTERM. Treating it as a cancel rather
     # than a kill is what lets the run flush its telemetry and record an honest
@@ -165,9 +189,6 @@ def main(argv: list[str] | None = None) -> int:
             log.info("no %s handler (%s); cancel over the socket still works", sig, exc)
 
     outcome = harness.run()
-
-    if client is not None:
-        client.stop()
 
     # `observed` is the CHANNEL's count of what it actually put on a socket,
     # not the harness's count of what it handed over. Those differ whenever the

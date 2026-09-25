@@ -16,7 +16,7 @@ import pytest
 from websockets.sync.client import connect as ws_connect
 from websockets.sync.server import serve
 
-from job.ws import RpcClient, app_client, diagnose
+from job.ws import Outbox, RpcClient, app_client, diagnose
 from shared.rpc import (
     PROTOCOL_VERSION,
     ErrorCode,
@@ -353,10 +353,9 @@ def test_send_never_blocks_and_drops_the_oldest_when_full():
     assert time.monotonic() - started < 1.0, "send blocked the caller"
     assert client.dropped > 0
 
-    drained = []
-    while not client._q.empty():
-        drained.append(client._q.get_nowait()["seq"])
+    drained = [r["seq"] for r in client.outbox.pending()]
     assert drained[-1] == 999, "the newest record was dropped instead of the oldest"
+    assert drained == list(range(990, 1000))
 
 
 def test_an_unreachable_app_gives_up_without_touching_the_run():
@@ -529,3 +528,230 @@ def test_every_frame_the_job_sends_is_text():
             f"Starlette's receive_text() raises KeyError: 'text' on those, so "
             f"the app drops the socket on its first read."
         )
+
+
+# --- the drop policy (signed off 2026-09-24) ---------------------------------
+
+
+def _rec(type_: str, seq: int) -> dict:
+    return {"type": type_, "seq": seq}
+
+
+def test_a_full_outbox_drops_logs_first():
+    box = Outbox(live_max=4)
+    box.put(_rec("log", 0))
+    box.put(_rec("progress", 1))
+    box.put(_rec("log", 2))
+    box.put(_rec("progress", 3))
+    box.put(_rec("progress", 4))  # full: the OLDEST log goes, not the oldest record
+    box.put(_rec("progress", 5))  # full: the other log goes
+
+    assert [r["seq"] for r in box.pending()] == [1, 3, 4, 5]
+    assert box.dropped == 2 and box.dropped_logs == 2 and box.dropped_progress == 0
+
+
+def test_with_no_log_left_the_oldest_progress_goes_and_a_new_log_is_refused():
+    box = Outbox(live_max=3)
+    for seq in range(3):
+        box.put(_rec("progress", seq))
+    box.put(_rec("log", 3))  # nothing droppable ranks below it: it is the one dropped
+    assert [r["seq"] for r in box.pending()] == [0, 1, 2]
+    box.put(_rec("progress", 4))  # now the oldest progress goes
+    assert [r["seq"] for r in box.pending()] == [1, 2, 4]
+    assert box.dropped_logs == 1 and box.dropped_progress == 1
+
+
+def test_status_and_result_are_never_dropped_and_keep_their_place():
+    box = Outbox(live_max=2)
+    seq = 0
+    for _ in range(500):
+        box.put(_rec("log", seq))
+        seq += 1
+        box.put(_rec("progress", seq))
+        seq += 1
+    box.put(_rec("status", seq))
+    box.put(_rec("result", seq + 1))
+    for kind in ("status", "result"):
+        for i in range(200):
+            box.put(_rec(kind, 10_000 + i + (0 if kind == "status" else 1000)))
+
+    pending = box.pending()
+    kept = [r for r in pending if r["type"] in ("status", "result")]
+    assert len(kept) == 402, "a status or result was dropped"
+    assert len(pending) - len(kept) == 2, "the live lanes outgrew their cap"
+    # One stream, in put order, across lanes.
+    frames, taken = box.take(10_000, until=lambda: True)
+    assert frames == []
+    assert taken == pending
+
+
+def test_take_blocks_until_something_arrives():
+    box = Outbox()
+    got: list = []
+    done = threading.Event()
+
+    def reader():
+        got.append(box.take(10, until=lambda: False))
+        done.set()
+
+    threading.Thread(target=reader, daemon=True).start()
+    assert not done.wait(0.1), "take returned with nothing to send"
+    box.put(_rec("log", 7))
+    assert done.wait(5)
+    assert got[0][1] == [_rec("log", 7)]
+
+
+def test_status_and_result_reach_the_app_even_when_the_live_queue_overflowed():
+    """End to end over a real socket: everything queued before the app attached,
+    with far more commentary than the queue holds."""
+    with Server() as server:
+        client = _client(server, queue_max=5, batch_max=1000)
+        seq = 0
+        for _ in range(100):
+            client.send(_rec("log", seq))
+            seq += 1
+        client.send(_rec("status", seq))
+        for _ in range(100):
+            seq += 1
+            client.send(_rec("progress", seq))
+        client.send(_rec("result", seq + 1))
+        client.start()
+        try:
+            assert server.wait_for(Method.TELEMETRY)
+        finally:
+            client.stop()
+
+    got = [
+        m
+        for f in server.frames
+        if f.get("method") == Method.TELEMETRY
+        for m in f["params"]["messages"]
+    ]
+    types = [m["type"] for m in got]
+    assert types.count("status") == 1 and types.count("result") == 1
+    assert "log" not in types, "logs outlived progress under pressure"
+    assert len(got) == 5 + 2
+    assert [m["seq"] for m in got] == sorted(m["seq"] for m in got)
+
+
+# --- dispatch: every handler on the executor, never a socket thread ----------
+
+
+class NamedExecutor:
+    """Runs submitted work on one named thread, like the harness's controller."""
+
+    def __init__(self, delay_s: float = 0.0):
+        self.q: queue.Queue = queue.Queue()
+        self.delay_s = delay_s
+        self.ran = 0
+        threading.Thread(target=self._loop, name="executor", daemon=True).start()
+
+    def __call__(self, fn):
+        self.q.put(fn)
+        return True
+
+    def _loop(self):
+        while True:
+            fn = self.q.get()
+            if self.delay_s:
+                threading.Event().wait(self.delay_s)
+            self.ran += 1
+            fn()
+
+
+def test_hello_cancel_replay_and_ping_are_all_handled_on_the_executor():
+    names: dict[str, str] = {}
+
+    def on_cancel(who):
+        names["cancel"] = threading.current_thread().name
+        return {"accepted": True}
+
+    def on_replay(a, b):
+        names["replay"] = threading.current_thread().name
+        return []
+
+    executor = NamedExecutor()
+    with Server() as server:
+        client = _client(server, on_cancel=on_cancel, on_replay=on_replay)
+        client.start(executor)
+        try:
+            assert server.wait_for(Method.HELLO)
+            assert server.call(Method.CANCEL, {"requested_by": "kp"}, id=10).ok
+            assert server.call(Method.REPLAY, {"from_seq": 0}, id=11).ok
+            assert server.call(Method.PING, {}, id=12).ok
+        finally:
+            client.stop()
+
+    assert names == {"cancel": "executor", "replay": "executor"}
+    # hello's answer + three requests, all through it
+    assert executor.ran >= 4
+
+
+def test_a_refusal_handled_late_is_still_a_refusal_not_a_dropped_socket():
+    """The app refuses and closes at once; the controller gets to the refusal
+    only afterwards. That must still read as "refused, stop" — not as a
+    connection that dropped before answering, which would be retried."""
+    error = {"code": ErrorCode.INCOMPATIBLE_VERSION, "message": "no"}
+    with Server(hello_error=error) as server:
+        client = _client(server, backoff_s=0.01)
+        client.start(NamedExecutor(delay_s=0.3))
+        try:
+            client._thread.join(timeout=5)
+            assert not client._thread.is_alive()
+        finally:
+            client.stop()
+
+    assert server.connections == 1, "a refused hello was retried"
+    assert client.rejected is not None
+
+
+def test_cancel_and_replay_run_on_the_harness_controller(tmp_path):
+    """Through a real harness: the handlers run on the thread named
+    `controller`, never the model's and never a socket thread."""
+    from heartbeat import Heartbeat
+
+    from job.harness import Harness
+    from job.loader import describe_object
+    from job.telemetry import PartFileWriter
+
+    names: dict[str, str] = {}
+    box: list = []
+    done = threading.Event()
+
+    h = Harness(
+        "r1",
+        PartFileWriter(tmp_path, "r1"),
+        handle=describe_object(Heartbeat(seconds=30, hz=20), "heartbeat"),
+        roll_tick_s=0.05,
+    )
+
+    def on_cancel(who):
+        names["cancel"] = threading.current_thread().name
+        return h.cancel(who)
+
+    def on_replay(a, b):
+        names["replay"] = threading.current_thread().name
+        return h.replay(a, b)
+
+    with Server() as server:
+        h.channel = _client(server, on_cancel=on_cancel, on_replay=on_replay)
+
+        def go():
+            box.append(h.run())
+            done.set()
+
+        threading.Thread(target=go, name="model-main", daemon=True).start()
+        assert server.wait_for(Method.TELEMETRY)
+        replay = server.call(Method.REPLAY, {"from_seq": 0, "to_seq": 0}, id=21)
+        assert replay.ok and replay.result["count"] == 1
+        assert server.call(Method.CANCEL, {"requested_by": "kp"}, id=22).result["accepted"]
+        assert done.wait(10), "the run did not end after a cancel over the socket"
+        assert server.wait_for(Method.BYE)
+
+    assert box[0].status == "CANCELLED"
+    assert names == {"cancel": "controller", "replay": "controller"}
+    # The terminal status went out live before `bye`.
+    methods = server.methods()
+    last_batch = [f for f in server.frames if f.get("method") == Method.TELEMETRY][-1]
+    assert last_batch["params"]["messages"][-1]["terminal"] is True
+    assert methods[-1] == Method.BYE

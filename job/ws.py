@@ -1,9 +1,25 @@
-"""The job's side of the RPC channel, on a thread.
+"""The job's side of the RPC channel: two threads and an outbox.
 
-One thread owns the socket. The model thread never touches it — it calls
-`send()`, which drops a record on a queue and returns immediately. That is the
-whole reason this is threaded rather than async: a solver blocks for minutes at
-a time, and nothing about the socket should care.
+The model's thread never touches the socket. It calls `send()`, which puts a
+record in the outbox and returns — never blocks, never raises. `ws.send` can
+block with no timeout at all outside the closing handshake, and that is
+exactly the stall a model-blocking main thread cannot afford to inherit.
+
+**Two threads, one direction each:**
+
+    sender    connects, says `hello`, waits for the app's answer, then blocks
+              on the outbox and sends — `telemetry` batches, RPC replies,
+              `bye`. The ONLY thread that calls `ws.send`.
+    receiver  one per connection: blocks in `ws.recv`, parses, and hands every
+              request — and `hello`'s answer — to the EXECUTOR. It runs no
+              handler itself.
+
+The executor is where handlers run. Inside a harness it is the controller
+thread (`Harness` passes `controller.submit` to `start()`), so `cancel`,
+`replay`, `ping` and the hello answer all run there, never on the model's
+thread and never on either socket thread. With no executor — a bare client, as
+in tests — handlers run on the receiver. Blocking reads throughout: no thread
+here polls on a timer for work.
 
 **Best-effort by contract.** Nothing here may raise into a run, block the model,
 or change what lands on the volume. An app that is down, unreachable, or
@@ -13,24 +29,26 @@ A run with no live channel at all is not degraded; it is Tuesday.
 What it does:
 
   * connects, says `hello` with the seq it is picking up from and its
-    protocol version, waits for the app to accept it, and then streams
+    protocol version, waits for the app to accept it, and only then streams
     `telemetry` notifications in batches. A refused `hello` means the run goes
     unobserved — logged once, never retried, never a run failure;
   * answers `cancel`, `replay` and `ping` requests from the app;
+  * drops live records under pressure by type — `log` first, then the oldest
+    `progress`, and never `status` or `result` (see `Outbox`);
   * reconnects with backoff, counting CONSECUTIVE failures and resetting on
     every success — a naive "give up after N" would kill a healthy channel
     within minutes if the ingress cuts long-lived streams periodically, which
     community reports say it does;
   * says `bye` on a clean shutdown, so the app can tell "finished" from
-    "dropped".
+    "dropped". Every frame is a TEXT frame.
 """
 
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -50,7 +68,7 @@ from shared.rpc import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RpcClient", "app_client", "diagnose", "ws_url_for"]
+__all__ = ["HelloRejected", "Outbox", "RpcClient", "app_client", "diagnose", "ws_url_for"]
 
 #: The methods this job answers, sent in `hello`'s params. LSP-style: a key
 #: per method, its value that method's options (none yet).
@@ -78,11 +96,17 @@ class HelloRejected(Exception):
         self.error = error
 
 
-#: Outbound records waiting to be batched. Bounded on purpose: if the app
-#: cannot keep up, the right thing is to drop live commentary, not to grow
-#: without limit inside a job that has real work to do. The volume already has
-#: every record.
+#: Live `log`/`progress` records waiting to be batched. Bounded on purpose: if
+#: the app cannot keep up, the right thing is to drop live commentary, not to
+#: grow without limit inside a job that has real work to do. The volume already
+#: has every record. `status` and `result` are not counted against this and
+#: are never dropped — see `Outbox`.
 DEFAULT_QUEUE_MAX = 10_000
+
+#: How long a blocked sender sleeps at most before re-checking its exits. A
+#: liveness backstop only: every state change that should wake it (a record, a
+#: reply, stop, a closed socket, hello's answer) notifies it directly.
+_BACKSTOP_S = 1.0
 
 #: How many records go in one `telemetry` notification.
 DEFAULT_BATCH_MAX = 200
@@ -232,8 +256,155 @@ def app_client(
     )
 
 
+#: Types that are never dropped from the live path: they travel in their own
+#: lane with no cap. Safe because a run has only a handful of them.
+KEPT_TYPES = frozenset({"status", "result"})
+
+
+class Outbox:
+    """What the sender sends: RPC replies, and records in three lanes.
+
+    ``kept``    `status` and `result`. Unbounded, never dropped.
+    ``logs``    `log`. First to go when the live lanes are full.
+    ``other``   `progress`, and any type this build does not know. Its oldest
+                goes once there is no `log` left to drop.
+
+    `logs` and `other` together hold at most `live_max` records. Records leave
+    in the order they were put, across all three lanes, so a batch reads in
+    `seq` order whenever nothing was dropped.
+
+    Durable writes never come through here: the harness appends to the part
+    files before it offers a record to the live channel, so nothing this class
+    drops is lost — only late.
+    """
+
+    def __init__(self, live_max: int = DEFAULT_QUEUE_MAX) -> None:
+        self._cond = threading.Condition()
+        self._live_max = max(1, live_max)
+        self._n = 0
+        self._kept: deque[tuple[int, dict[str, Any]]] = deque()
+        self._logs: deque[tuple[int, dict[str, Any]]] = deque()
+        self._other: deque[tuple[int, dict[str, Any]]] = deque()
+        #: RPC replies, each tagged with the session it answers — a reply
+        #: meant for a connection that has since dropped is discarded, never
+        #: sent down a new one.
+        self._frames: deque[tuple[object, str]] = deque()
+
+        self.dropped = 0
+        self.dropped_logs = 0
+        self.dropped_progress = 0
+
+    def put(self, record: dict[str, Any]) -> None:
+        """Queue one record. Never blocks.
+
+        **The drop point.** Live delivery is best-effort for EVERY type, and
+        `replay` is how a client catches up: a record dropped here is already
+        in the part files, and `replay(from_seq, to_seq)` serves it from
+        there. So what this decides is what a client sees FIRST, not what it
+        can HAVE. Signed off 2026-09-24: when the live lanes are full, the
+        oldest `log` goes; if there is none, an incoming `log` is itself the
+        one dropped; otherwise the oldest `progress` goes. `status` and
+        `result` are never dropped here.
+        """
+        kind = record.get("type") if isinstance(record, dict) else None
+        with self._cond:
+            self._n += 1
+            item = (self._n, record)
+            if kind in KEPT_TYPES:
+                self._kept.append(item)
+            else:
+                if len(self._logs) + len(self._other) >= self._live_max:
+                    self.dropped += 1
+                    if self._logs:
+                        self._logs.popleft()
+                        self.dropped_logs += 1
+                    elif kind == "log":
+                        self.dropped_logs += 1
+                        return
+                    else:
+                        self._other.popleft()
+                        self.dropped_progress += 1
+                (self._logs if kind == "log" else self._other).append(item)
+            self._cond.notify_all()
+
+    def put_frame(self, frame: str, session: object) -> None:
+        with self._cond:
+            self._frames.append((session, frame))
+            self._cond.notify_all()
+
+    def wake(self) -> None:
+        """Rouse a blocked `take` so it re-checks why it is waiting."""
+        with self._cond:
+            self._cond.notify_all()
+
+    def discard_frames(self) -> None:
+        with self._cond:
+            self._frames.clear()
+
+    def take(
+        self, max_records: int, *, until: Callable[[], bool]
+    ) -> tuple[list[tuple[object, str]], list[dict[str, Any]]]:
+        """Block until there is something to send or `until()` is true, then
+        return every queued reply and up to `max_records` records in order."""
+        with self._cond:
+            while not self._has_any_locked() and not until():
+                self._cond.wait(_BACKSTOP_S)
+            frames = list(self._frames)
+            self._frames.clear()
+            records: list[dict[str, Any]] = []
+            while len(records) < max_records:
+                lanes = [lane for lane in (self._kept, self._logs, self._other) if lane]
+                if not lanes:
+                    break
+                records.append(min(lanes, key=lambda lane: lane[0][0]).popleft()[1])
+        return frames, records
+
+    def empty(self) -> bool:
+        with self._cond:
+            return not self._has_any_locked()
+
+    def pending(self) -> list[dict[str, Any]]:
+        """The queued records, in the order they would be sent. Diagnostic."""
+        with self._cond:
+            items = [*self._kept, *self._logs, *self._other]
+        return [record for _, record in sorted(items, key=lambda item: item[0])]
+
+    def __len__(self) -> int:
+        with self._cond:
+            return len(self._kept) + len(self._logs) + len(self._other)
+
+    def _has_any_locked(self) -> bool:
+        return bool(self._frames or self._kept or self._logs or self._other)
+
+
+class _Session:
+    """One connection: its socket, its `hello`, and what has been heard back.
+
+    Written by the receiver (`answer_seen`, `closed`) and by whichever thread
+    handles hello's answer (`accepted`, `rejected`); read by the sender, which
+    waits on `cond` for any of them to change.
+    """
+
+    def __init__(self, ws: Any, hello_id: int) -> None:
+        self.ws = ws
+        self.hello_id = hello_id
+        self.cond = threading.Condition()
+        self.answer_seen = False
+        self.accepted = False
+        self.rejected: dict[str, Any] | None = None
+        self.closed = False
+
+    def poke(self) -> None:
+        with self.cond:
+            self.cond.notify_all()
+
+
 class RpcClient:
-    """Owns the socket thread. Constructed by the harness, or not at all."""
+    """The live channel to the app. Constructed by `job/main.py`, or not at all.
+
+    Satisfies the harness's `LiveChannel`: `send` from the model's thread,
+    `start(executor)` and `close(timeout)` from the harness's run.
+    """
 
     def __init__(
         self,
@@ -249,6 +420,7 @@ class RpcClient:
         max_failures: int = DEFAULT_MAX_FAILURES,
         backoff_s: float = 1.0,
         hello_timeout_s: float = DEFAULT_HELLO_TIMEOUT_S,
+        executor: Callable[[Callable[[], Any]], Any] | None = None,
     ) -> None:
         self.url = url
         self.run_id = run_id
@@ -260,51 +432,65 @@ class RpcClient:
         self._max_failures = max_failures
         self._backoff_s = backoff_s
         self._hello_timeout_s = hello_timeout_s
+        self._executor = executor
 
-        self._q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_max)
+        self.outbox = Outbox(queue_max)
         self._stop = threading.Event()
+        #: The SENDER thread. The receiver is per connection.
         self._thread: threading.Thread | None = None
+        self._receiver: threading.Thread | None = None
+        self._session: _Session | None = None
         self._next_id = 0
 
         self.sent = 0
-        self.dropped = 0
         self.connects = 0
         self.last_error: str | None = None
         #: The app's error object if it refused our `hello`; None otherwise.
         self.rejected: dict[str, Any] | None = None
 
+    @property
+    def dropped(self) -> int:
+        """Live records dropped under pressure. All of them are in the part
+        files; `replay` serves them."""
+        return self.outbox.dropped
+
     # --- what the harness calls -------------------------------------------
 
     def send(self, record: dict[str, Any]) -> None:
-        """Queue a record. Never blocks, never raises.
-
-        A full queue drops the OLDEST record rather than refusing the newest:
-        if the channel is behind, recent telemetry is what a watching human
-        wants. Nothing is lost that matters — the volume has all of it, and
-        `replay` can fetch any of it back.
-        """
+        """Queue a record. Never blocks, never raises, never touches the
+        socket — see `Outbox.put` for what a full queue drops."""
         try:
-            self._q.put_nowait(record)
-        except queue.Full:
-            self.dropped += 1
-            try:
-                self._q.get_nowait()
-                self._q.put_nowait(record)
-            except (queue.Empty, queue.Full):  # pragma: no cover - racing drains
-                pass
+            self.outbox.put(record)
+        except Exception:  # noqa: BLE001 - the live path cannot fail a run
+            log.debug("could not queue a live record", exc_info=True)
 
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="rpc", daemon=True)
+    def start(self, executor: Callable[[Callable[[], Any]], Any] | None = None) -> None:
+        """Start the sender. `executor` is where inbound handlers will run —
+        the harness passes its controller's `submit`. Idempotent."""
+        if executor is not None:
+            self._executor = executor
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._send_loop, name="rpc-send", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Flush what is queued, say `bye`, close. Joins for at most `timeout`."""
         self._stop.set()
+        self.outbox.wake()
+        session = self._session
+        if session is not None:
+            session.poke()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
 
-    # --- the socket thread -------------------------------------------------
+    def close(self, timeout: float = 5.0) -> None:
+        """The harness's name for `stop` — its last shutdown step."""
+        self.stop(timeout)
 
-    def _loop(self) -> None:
+    # --- the sender thread -------------------------------------------------
+
+    def _send_loop(self) -> None:
         failures = 0
         while not self._stop.is_set():
             if failures >= self._max_failures:
@@ -318,7 +504,7 @@ class RpcClient:
                 with self._connect() as ws:
                     self.connects += 1
                     failures = 0  # CONSECUTIVE — reset on every success
-                    self._session(ws)
+                    self._session_run(ws)
             except HelloRejected as exc:
                 # NOT a run failure and NOT a reason to retry: the app has said
                 # it will not observe this job, and reconnecting would get the
@@ -343,33 +529,36 @@ class RpcClient:
                     f" — {hint}" if hint else "",
                 )
                 self._stop.wait(min(30.0, self._backoff_s * failures))
+            finally:
+                self._join_receiver()
 
-    def _session(self, ws: Any) -> None:
-        hello_id = self._id()
-        ws.send(
-            request(
-                Method.HELLO,
-                {
-                    "run_id": self.run_id,
-                    "next_seq": self._next_seq(),
-                    "protocol_version": PROTOCOL_VERSION,
-                    "capabilities": JOB_CAPABILITIES,
-                },
-                id=hello_id,
-            )
-        )
-        self._await_hello(ws, hello_id)
-        while not self._stop.is_set():
-            self._drain(ws)
-            self._pump_inbound(ws)
-            time.sleep(0.01)
-        self._drain(ws)
+    def _session_run(self, ws: Any) -> None:
+        session = _Session(ws, self._id())
+        self.outbox.discard_frames()  # replies to a previous connection's requests
+        self._session = session
         try:
-            ws.send(notification(Method.BYE, {"run_id": self.run_id}))
-        except Exception:  # noqa: BLE001 - a clean goodbye is a courtesy
-            log.debug("could not say bye", exc_info=True)
+            self._receiver = threading.Thread(
+                target=self._recv_loop, args=(session,), name="rpc-recv", daemon=True
+            )
+            self._receiver.start()
+            ws.send(
+                request(
+                    Method.HELLO,
+                    {
+                        "run_id": self.run_id,
+                        "next_seq": self._next_seq(),
+                        "protocol_version": PROTOCOL_VERSION,
+                        "capabilities": JOB_CAPABILITIES,
+                    },
+                    id=session.hello_id,
+                )
+            )
+            self._await_hello(session)
+            self._stream(session)
+        finally:
+            self._session = None
 
-    def _await_hello(self, ws: Any, hello_id: int) -> None:
+    def _await_hello(self, session: _Session) -> None:
         """Wait for the app's answer to `hello` before streaming anything.
 
         The app processes nothing until `hello` is accepted, and closes the
@@ -377,82 +566,135 @@ class RpcClient:
         close and turn a final refusal into an ordinary dropped connection,
         retried forever. Raises `HelloRejected` on an error reply; a timeout
         raises `TimeoutError`, which the outer loop counts as a normal failure.
+
+        The answer is HANDLED on the executor (the controller), so a socket
+        the app closes straight after refusing can be seen closed here before
+        the refusal is processed. `answer_seen` — set by the receiver the
+        moment it reads the answer — is what stops that from being mistaken
+        for a dropped connection and retried.
         """
         deadline = time.monotonic() + self._hello_timeout_s
+        with session.cond:
+            while True:
+                if session.rejected is not None:
+                    raise HelloRejected(session.rejected)
+                if session.accepted:
+                    return
+                if self._stop.is_set():
+                    raise TimeoutError("stopped before the app answered hello")
+                if session.closed and not session.answer_seen:
+                    raise ConnectionError("the app closed the socket before answering hello")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"app did not answer hello in {self._hello_timeout_s}s")
+                session.cond.wait(remaining)
+
+    def _stream(self, session: _Session) -> None:
+        """Send until stopped; on stop, flush everything queued, then `bye`."""
+        ws = session.ws
+
+        def done() -> bool:
+            return self._stop.is_set() or session.closed
+
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"app did not answer hello in {self._hello_timeout_s}s")
-            if self._stop.is_set():
-                raise TimeoutError("stopped before the app answered hello")
-            try:
-                raw = ws.recv(timeout=min(remaining, 0.1))
-            except TimeoutError:
-                continue
-            try:
-                frame = parse(raw)
-            except RpcError as exc:
-                ws.send(failure(None, exc))
-                continue
-            if not isinstance(frame, Response):
-                self._handle(ws, frame)
-                continue
-            if frame.id != hello_id:
-                continue
-            if frame.error is not None:
-                raise HelloRejected(frame.error)
-            result = frame.result if isinstance(frame.result, dict) else {}
-            log.info("attached to the app (app protocol %s)", result.get("protocol_version"))
-            return
-
-    def _drain(self, ws: Any) -> None:
-        """Coalesce queued records into one `telemetry` notification."""
-        batch: list[dict[str, Any]] = []
-        while len(batch) < self._batch_max:
-            try:
-                batch.append(self._q.get_nowait())
-            except queue.Empty:
+            frames, records = self.outbox.take(self._batch_max, until=done)
+            for owner, frame in frames:
+                if owner is session:
+                    ws.send(frame)
+            if records:
+                ws.send(
+                    notification(Method.TELEMETRY, {"run_id": self.run_id, "messages": records})
+                )
+                self.sent += len(records)
+            if session.closed:
+                raise ConnectionError("the app closed the socket")
+            if self._stop.is_set() and self.outbox.empty():
                 break
-        if not batch:
-            return
-        ws.send(notification(Method.TELEMETRY, {"run_id": self.run_id, "messages": batch}))
-        self.sent += len(batch)
-
-    def _pump_inbound(self, ws: Any) -> None:
         try:
-            raw = ws.recv(timeout=0.01)
-        except TimeoutError:
-            return
-        except Exception:
-            raise  # a dead socket is the outer loop's problem
+            ws.send(notification(Method.BYE, {"run_id": self.run_id}))
+        except Exception:  # noqa: BLE001 - a clean goodbye is a courtesy
+            log.debug("could not say bye", exc_info=True)
 
+    def _join_receiver(self) -> None:
+        receiver, self._receiver = self._receiver, None
+        if receiver is not None and receiver is not threading.current_thread():
+            receiver.join(timeout=5)
+
+    # --- the receiver thread -----------------------------------------------
+
+    def _recv_loop(self, session: _Session) -> None:
+        try:
+            while True:
+                self._on_frame(session, session.ws.recv())
+        except Exception:  # noqa: BLE001 - a closed socket ends the receiver
+            log.debug("receiver ended", exc_info=True)
+        finally:
+            with session.cond:
+                session.closed = True
+                session.cond.notify_all()
+            self.outbox.wake()
+
+    def _on_frame(self, session: _Session, raw: Any) -> None:
         try:
             frame = parse(raw)
         except RpcError as exc:
-            ws.send(failure(None, exc))
+            self.outbox.put_frame(failure(None, exc), session)
             return
 
         if isinstance(frame, Response):
-            return  # hello's ack was consumed by _await_hello; nothing else is ours
-        self._handle(ws, frame)
+            if frame.id == session.hello_id:
+                with session.cond:
+                    session.answer_seen = True
+                self._dispatch(lambda: self._on_hello_answer(session, frame))
+            return  # nothing else we sent expects an answer
+        self._dispatch(lambda: self._handle(session, frame))
 
-    def _handle(self, ws: Any, req: Request) -> None:
+    def _dispatch(self, fn: Callable[[], Any]) -> None:
+        """Run a handler on the executor — the controller, inside a harness.
+
+        An executor that will not take it (stopped, or raising) means it runs
+        here, on the receiver: a request is never silently left unanswered.
+        """
+        executor = self._executor
+        if executor is not None:
+            try:
+                if executor(fn) is not False:
+                    return
+            except Exception:  # noqa: BLE001
+                log.debug("executor refused a handler; running it on the receiver", exc_info=True)
+        fn()
+
+    # --- handlers: on the executor ------------------------------------------
+
+    def _on_hello_answer(self, session: _Session, frame: Response) -> None:
+        with session.cond:
+            if frame.error is not None:
+                session.rejected = frame.error
+            else:
+                session.accepted = True
+                result = frame.result if isinstance(frame.result, dict) else {}
+                log.info("attached to the app (app protocol %s)", result.get("protocol_version"))
+            session.cond.notify_all()
+
+    def _handle(self, session: _Session, req: Request) -> None:
         try:
             result = self._invoke(req)
         except RpcError as exc:
             if not req.is_notification:
-                ws.send(failure(req.id, exc))
+                self.outbox.put_frame(failure(req.id, exc), session)
             return
         except Exception as exc:  # noqa: BLE001
             log.exception("handler for %s raised", req.method)
             if not req.is_notification:
-                ws.send(failure(req.id, RpcError(ErrorCode.INTERNAL_ERROR, str(exc))))
+                self.outbox.put_frame(
+                    failure(req.id, RpcError(ErrorCode.INTERNAL_ERROR, str(exc))), session
+                )
             return
 
         # A notification gets no reply, ever — sending one is a protocol error,
         # not merely unnecessary.
         if not req.is_notification:
-            ws.send(success(req.id, result))
+            self.outbox.put_frame(success(req.id, result), session)
 
     def _invoke(self, req: Request) -> Any:
         if req.method == Method.PING:
