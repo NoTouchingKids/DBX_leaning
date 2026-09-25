@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     client = _build_client(cfg, harness)
     if client is not None:
-        harness._on_message = client.send  # noqa: SLF001 - assembled here on purpose
+        harness.channel = client.send
         client.start()
 
     # Databricks cancels a task with SIGTERM. Treating it as a cancel rather

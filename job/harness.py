@@ -38,11 +38,42 @@ from shared.seq import SeqCounter
 
 from .cancellation import CancellationToken
 from .loader import ModelHandle, load_model
-from .telemetry import PartFileWriter
+from .status import NullStatusWriter, StatusWriter
+from .telemetry import TelemetryWriter
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RunOutcome", "Harness"]
+__all__ = ["Channel", "RunOutcome", "Harness"]
+
+#: The live sink: handed every stamped record, after the durable write.
+#: Best-effort by contract — it must return promptly and a raise is swallowed.
+Channel = Callable[[dict[str, Any]], None]
+
+
+class _Slot:
+    """One named, swappable part of a `Harness`.
+
+    Readable always; replaceable until `run()` starts, and refused after — a
+    part swapped mid-run would be half the old one's and half the new one's,
+    with nothing to say which record went where.
+    """
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+        self.attr = f"_slot_{name}"
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        if obj is None:
+            return self
+        return getattr(obj, self.attr)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        if getattr(obj, "_running", False):
+            raise RuntimeError(
+                f"Harness.{self.name} cannot be replaced once run() has started; "
+                f"assemble the harness first, then run it"
+            )
+        setattr(obj, self.attr, value)
 
 
 @dataclass
@@ -66,34 +97,69 @@ class Harness:
     """Drives one model, gets its messages onto the durable path, and offers
     them to a live channel if one is attached.
 
+    **Its parts are slots.** Each is a public attribute, settable as a keyword
+    at construction and replaceable by plain assignment until `run()` starts
+    (and refused after). That is what makes "change the harness freely, as
+    long as the wire contract holds" a supported path rather than a fork:
+
+    ``writer``         the durable path — `TelemetryWriter`, normally
+                       `PartFileWriter`. Every record goes here first.
+    ``channel``        the live sink, a `Channel` callable, or None for nobody
+                       listening (the normal case, not a degraded one).
+    ``token``          the `CancellationToken` the model polls and a cancel
+                       sets.
+    ``seq``            the run's `SeqCounter` — one counter, every type.
+    ``handle``         the `ModelHandle` to drive. None means "load
+                       ``model_spec`` with ``model_config`` when run() starts".
+    ``status_writer``  where every `status` message ALSO goes: the Lakebase
+                       `run_status` writer, a `StatusWriter`. Defaults to
+                       `NullStatusWriter`. See `job/status.py` for its contract.
+
     The live channel is injected rather than constructed here: it keeps this
     file free of any transport, and it is what lets the whole run be exercised
     with nothing listening — which is the normal case, not a degraded one.
     """
 
+    writer = _Slot()
+    channel = _Slot()
+    token = _Slot()
+    seq = _Slot()
+    handle = _Slot()
+    status_writer = _Slot()
+
     def __init__(
         self,
         run_id: str,
-        writer: PartFileWriter,
+        writer: TelemetryWriter,
         *,
         model_spec: str = "heartbeat",
         model_config: dict[str, Any] | None = None,
         handle: ModelHandle | None = None,
-        on_message: Callable[[dict[str, Any]], None] | None = None,
+        channel: Channel | None = None,
+        on_message: Channel | None = None,
+        token: CancellationToken | None = None,
+        seq: SeqCounter | None = None,
+        status_writer: StatusWriter | None = None,
         roll_tick_s: float = 1.0,
     ) -> None:
+        if channel is not None and on_message is not None:
+            raise TypeError("pass `channel` or its older name `on_message`, not both")
+        self._running = False
         self.run_id = run_id
-        self.writer = writer
         self.model_spec = model_spec
         self.model_config = model_config or {}
-        self.token = CancellationToken()
-        self.seq = SeqCounter()
 
-        self._handle = handle
+        self.writer = writer
         #: Where a live message goes, if anything is listening. Best-effort by
         #: contract: this must never raise into a run, and a run with no
-        #: listener is not degraded.
-        self._on_message = on_message
+        #: listener is not degraded. `on_message` is the name it had before it
+        #: was a slot, kept as a constructor alias.
+        self.channel = channel if channel is not None else on_message
+        self.token = token if token is not None else CancellationToken()
+        self.seq = seq if seq is not None else SeqCounter()
+        self.handle = handle
+        self.status_writer = status_writer if status_writer is not None else NullStatusWriter()
+
         self._roll_tick_s = roll_tick_s
         self._live_offered = 0
         self._stop_roller = threading.Event()
@@ -113,22 +179,54 @@ class Harness:
 
         self.writer.append(record)
 
-        if self._on_message is not None:
+        if self.channel is not None:
             try:
-                self._on_message(record)
+                self.channel(record)
                 self._live_offered += 1
             except Exception:  # noqa: BLE001 - a dead channel is not a failed run
                 log.debug("live channel refused a message; the run is unaffected", exc_info=True)
 
+        if record["type"] == "status":
+            self._write_status(record)
+
+    def _write_status(self, record: dict[str, Any]) -> None:
+        """Hand a status record to the `status_writer` slot. Never raises."""
+        writer = self.status_writer
+        if isinstance(writer, NullStatusWriter):
+            return
+        try:
+            landed = writer.write(
+                record["run_id"],
+                record["seq"],
+                record["status"],
+                bool(record.get("terminal", False)),
+                record.get("detail"),
+                record["ts"],
+            )
+        except Exception:  # noqa: BLE001 - run_status is at-most-stale, never load-bearing
+            log.warning("status writer raised; run_status may be stale", exc_info=True)
+            return
+        if landed is False:
+            log.info("status writer did not land seq=%s; run_status may be stale", record["seq"])
+
+    def _close_status_writer(self) -> None:
+        close = getattr(self.status_writer, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                log.debug("status writer close raised", exc_info=True)
+
     # --- the run -----------------------------------------------------------
 
     def run(self) -> RunOutcome:
+        self._running = True
         roller = threading.Thread(target=self._roll_loop, name="roller", daemon=True)
         roller.start()
 
         status, terminal, detail = RunStatus.FAILED, True, None
         try:
-            handle = self._handle or load_model(self.model_spec, self.model_config)
+            handle = self.handle or load_model(self.model_spec, self.model_config)
             handle.wire(self.emit, self.token)
 
             self.emit("status", status=RunStatus.RUNNING, terminal=False, detail="run started")
@@ -219,6 +317,7 @@ class Harness:
             self.writer.close()  # the terminal status itself must land
         except Exception:  # noqa: BLE001
             log.exception("could not record terminal status")
+        self._close_status_writer()
         return status, detail
 
     def _roll_loop(self) -> None:

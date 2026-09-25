@@ -164,7 +164,7 @@ def run_local(
         # and the socket gets everything too. Silently replacing the callback
         # the caller passed would lose the one they can actually see.
         local = on_message
-        harness._on_message = (  # noqa: SLF001 - assembled here, as main.py does
+        harness.channel = (
             client.send if local is None else lambda record: (local(record), client.send(record))[1]
         )
         client.start()

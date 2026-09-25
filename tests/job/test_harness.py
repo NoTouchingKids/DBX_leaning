@@ -237,3 +237,89 @@ def test_offered_is_not_delivered(tmp_path):
     assert not hasattr(outcome, "observed_live"), (
         "observed_live is back; the harness cannot know what a channel delivered"
     )
+
+
+# --- the slots ---------------------------------------------------------------
+
+
+def test_every_swappable_part_is_a_named_public_slot(tmp_path):
+    """Writer, channel, token, seq, model handle and status writer are settable
+    at construction and by plain assignment — no private attribute to poke."""
+    from job.cancellation import CancellationToken
+    from job.status import NullStatusWriter
+    from shared.seq import SeqCounter
+
+    token, seq = CancellationToken(), SeqCounter(start=10)
+    h = Harness("r1", _writer(tmp_path), token=token, seq=seq)
+    assert h.token is token and h.seq is seq
+    assert h.channel is None and h.handle is None
+    assert isinstance(h.status_writer, NullStatusWriter)
+
+    seen: list[dict] = []
+    h.channel = seen.append
+    h.handle = describe_object(Heartbeat(seconds=0.05, hz=40), "heartbeat")
+    outcome = h.run()
+
+    assert outcome.status == "SUCCEEDED"
+    assert seen and seen[0]["seq"] == 10, "the injected SeqCounter was not the one used"
+
+
+def test_a_slot_cannot_be_replaced_once_the_run_has_started(tmp_path):
+    h = _harness(tmp_path)
+    h.run()
+    with pytest.raises(RuntimeError, match="cannot be replaced"):
+        h.channel = print
+
+
+def test_channel_and_its_old_name_are_not_both_accepted(tmp_path):
+    with pytest.raises(TypeError):
+        Harness("r1", _writer(tmp_path), channel=print, on_message=print)
+
+
+class _RecordingStatusWriter:
+    def __init__(self, delay_s: float = 0.0, fail: bool = False) -> None:
+        self.calls: list[tuple] = []
+        self.threads: list[str] = []
+        self.delay_s = delay_s
+        self.fail = fail
+        self.closed = False
+
+    def write(self, run_id, seq, status, terminal, detail, ts):
+        self.threads.append(threading.current_thread().name)
+        if self.delay_s:
+            threading.Event().wait(self.delay_s)
+        self.calls.append((run_id, seq, status, terminal, detail, ts))
+        if self.fail:
+            raise RuntimeError("postgres is down")
+        return True
+
+    def close(self):
+        self.closed = True
+
+
+def test_the_status_writer_sees_every_status_with_its_own_seq_and_ts(tmp_path):
+    sw = _RecordingStatusWriter()
+    h = _harness(tmp_path, status_writer=sw)
+    outcome = h.run()
+
+    statuses = [r for r in _records(h.writer) if r["type"] == "status"]
+    assert [c[1] for c in sw.calls] == [r["seq"] for r in statuses]
+    assert sw.calls[0][2] == "RUNNING" and sw.calls[0][3] is False
+    assert sw.calls[-1][:5] == ("r1", statuses[-1]["seq"], outcome.status, True, None)
+    assert sw.calls[-1][5] == statuses[-1]["ts"]
+    assert sw.closed, "the status writer was not closed at the end of the run"
+
+
+def test_the_lakebase_writer_fits_the_slot():
+    """Shape, not ancestry: `job/lakebase.py` is the real occupant."""
+    from job.lakebase import LakebaseStatusWriter
+    from job.status import StatusWriter
+
+    assert issubclass(LakebaseStatusWriter, StatusWriter)
+
+
+def test_a_raising_status_writer_does_not_fail_the_run(tmp_path):
+    sw = _RecordingStatusWriter(fail=True)
+    outcome = _harness(tmp_path, status_writer=sw).run()
+    assert outcome.status == "SUCCEEDED"
+    assert sw.calls, "the writer was never called"

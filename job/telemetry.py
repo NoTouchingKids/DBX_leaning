@@ -68,7 +68,17 @@ class TelemetryWriter(Protocol):
     A `Protocol` rather than a base class, and structurally so: `PartFileWriter`
     does not inherit it, which is the point — a substitute has to match the
     shape, not the ancestry.
+
+    The four counters are part of the shape because the harness reads them to
+    decide whether SUCCEEDED is honest (`unflushed`) and to report the run.
     """
+
+    rows_written: int
+    write_failures: int
+    last_error: str | None
+
+    @property
+    def unflushed(self) -> int: ...
 
     def append(self, record: dict[str, Any]) -> None: ...
     def roll_if_due(self) -> bool: ...
