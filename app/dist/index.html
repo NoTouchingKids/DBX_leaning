@@ -1584,10 +1584,10 @@ async function loadRuns() {
     tr.tabIndex = 0;
     // `detail` is where a FAILED run says what happened. Not a column —
     // it is long and usually absent — but not thrown away either.
-    tr.title = [rec.detail, rec.requested_by && `requested by ${rec.requested_by}`,
-      rec.job_run_id && `job run ${rec.job_run_id}`].filter(Boolean).join("\n");
+    tr.title = [rec.detail, rec.job_run_id && `job run ${rec.job_run_id}`]
+      .filter(Boolean).join("\n");
     for (const text of [rec.run_id, rec.model,
-      rec.status + (rec.live ? " ●" : ""), fmtTime(rec.updated_ts)]) {
+      rec.status + (rec.live ? " ●" : ""), fmtTime(rec.updated_at)]) {
       tr.insertCell().textContent = text;
     }
     if (rec.live) tr.cells[2].className = "ok";   // a job is attached right now

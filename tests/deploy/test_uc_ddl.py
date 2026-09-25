@@ -137,17 +137,6 @@ def test_no_column_is_declared_twice(columns):
         assert not duplicates, f"{table} declares {duplicates} more than once"
 
 
-def test_run_status_carries_what_the_run_store_reads(columns):
-    """`run_status` is the one table here the job never writes, so `to_row`
-    says nothing about it. The warehouse-backed store reads it by name, and
-    those names are what must line up.
-    """
-    from server.store import _COLUMN_NAMES
-
-    missing = sorted(set(_COLUMN_NAMES) - set(columns["run_status"]))
-    assert not missing, f"WarehouseRunStore selects {missing}, which run_status lacks"
-
-
 def test_run_status_stays_nullable_where_the_merge_leaves_it_empty(columns):
     """`app/server/repository.py::set_run_status` upserts with only
     (run_id, job_run_id, status, detail, updated_ts).

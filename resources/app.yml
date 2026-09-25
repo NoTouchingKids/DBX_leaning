@@ -187,10 +187,10 @@ resources:
         # instance's NAME — not the `read_write_dns` hostname `lakebase_host`
         # takes.
         #
-        # CAN_CONNECT_AND_CREATE is the only permission this resource offers,
-        # and CREATE is the half that matters: `ensure_schema()` issues
-        # `CREATE SCHEMA IF NOT EXISTS dbx_leaning`, and Postgres grants CREATE
-        # on a database to its owner alone.
+        # CAN_CONNECT_AND_CREATE is the only permission this resource offers.
+        # The app uses the CONNECT half: it creates nothing, and only checks
+        # at startup that lakebase_ddl/*.sql were applied (out of band — see
+        # deploy/README.md, "Applying the Lakebase schema").
         #
         # - name: lakebase
         #   description: Run state — the run_status table.

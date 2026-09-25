@@ -49,7 +49,10 @@ def get_store(hub: Annotated[ServiceHub, Depends(get_hub)]) -> PostgresRunStore:
     if hub.store is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            hub.degraded.get("store") or hub.degraded.get("lakebase") or "no run store",
+            hub.degraded.get("store")
+            or hub.degraded.get("lakebase")
+            or hub.degraded.get("lakebase_schema")
+            or "no run store",
         )
     return hub.store
 

@@ -190,6 +190,24 @@ async def get_run(run_id: str, store: Store, hub: Hub) -> dict:
     }
 
 
+@router.get("/{run_id}/history")
+async def run_history(run_id: str, store: Store) -> dict:
+    """Every status transition reported for this run, in `seq` order.
+
+    What was REPORTED, not only what is current: a late report the
+    current-state row refused as stale still appears here, which is the
+    evidence for why `GET /api/runs/{run_id}` says what it says. Read from
+    Lakebase, so it costs no warehouse uptime. Empty — not 404 — for a run
+    nothing has reported yet.
+    """
+    transitions = await store.history(run_id)
+    return {
+        "run_id": run_id,
+        "count": len(transitions),
+        "transitions": [t.as_dict() for t in transitions],
+    }
+
+
 # The two warehouse-backed reads that used to live here — `GET
 # /{run_id}/messages` (backfill) and `GET /{run_id}/results` — are gone, and
 # neither is coming back in this shape. See docs/v4-rewrite-plan.md.
