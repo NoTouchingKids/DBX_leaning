@@ -148,6 +148,37 @@ def test_job_ids_are_absent_from_both_files():
         )
 
 
+def test_the_project_tag_is_one_literal_matching_every_model_job():
+    """`DBX_PROJECT_TAG` is what discovery filters on, and a mismatch is
+    silent: the app sees plenty of jobs, none of them "ours", and nothing can
+    be triggered. So the two app files and this bundle's own model jobs are
+    pinned to one value.
+
+    A literal in BOTH files, never `${var...}`: an empty bundle variable drops
+    `value` entirely and only `bundle run` fails; and a variable would let
+    `--var` move the app off this bundle's jobs while their tags stayed put.
+    """
+    values = {}
+    for where, env in (("app/app.yaml", _app_yaml()), ("resources/app.yml", _resource_config())):
+        entry = {e["name"]: e for e in env["env"]}.get("DBX_PROJECT_TAG")
+        assert entry is not None, f"{where} does not set DBX_PROJECT_TAG"
+        value = str(entry.get("value") or "")
+        assert value and "${" not in value, f"{where}: DBX_PROJECT_TAG must be a non-empty literal"
+        values[where] = value
+    assert len(set(values.values())) == 1, f"the two files disagree: {values}"
+
+    tag = next(iter(values.values()))
+    job_files = sorted((ROOT / "resources").glob("model_*.job.yml"))
+    assert job_files, "no model jobs found to check against"
+    for path in job_files:
+        for key, spec in yaml.safe_load(path.read_text())["resources"]["jobs"].items():
+            project = (spec.get("tags") or {}).get("project")
+            assert project == tag, (
+                f"{path.name}:{key} is tagged project={project!r} but the app "
+                f"discovers project={tag!r}; it would never be found"
+            )
+
+
 def test_the_app_asks_for_no_sql_warehouse():
     """v4's app queries no warehouse: run state is Postgres, live gaps are
     replayed by the job, and history arrives via the ingestion job. A

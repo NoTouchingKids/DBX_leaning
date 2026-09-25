@@ -12,6 +12,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .discovery import PROJECT_TAG as DEFAULT_PROJECT_TAG
 from .store import DEFAULT_SCHEMA as DEFAULT_LAKEBASE_SCHEMA
 
 __all__ = ["AppConfig"]
@@ -60,6 +61,21 @@ class AppConfig:
     job_ids: dict[str, int] = field(default_factory=dict)
     #: Fallback for a single generic harness job parameterised by model.
     default_job_id: int | None = None
+
+    #: Which jobs are ours: the `project` tag (and `... <tag> · <model>` name
+    #: suffix) discovery matches. Per deployment, so a team running its own
+    #: instance scopes it to its own jobs without forking `discovery.py`. The
+    #: default is imported from there rather than retyped, so they cannot drift.
+    project_tag: str = DEFAULT_PROJECT_TAG
+    #: Seconds between background re-discoveries. 0 disables — the map is then
+    #: whatever startup found. A Jobs API list call, never the warehouse, so
+    #: this costs no warehouse uptime. Ignored when `job_ids` or
+    #: `default_job_id` is configured: an explicit map is an allow-list.
+    discovery_refresh_s: float = 300.0
+    #: The least time between two ON-DEMAND refreshes — the one a trigger for
+    #: an unknown model causes. Without it, any request naming a nonexistent
+    #: model would page through the workspace's whole job list.
+    discovery_on_demand_min_s: float = 30.0
 
     #: This app's own externally reachable URL, handed to the job so it knows
     #: where to attach. Absent = jobs run unobserved, which is a normal case.
@@ -166,6 +182,8 @@ class AppConfig:
             backfill_page_size=int(e.get("DBX_BACKFILL_PAGE_SIZE", "5000")),
             job_ids=job_ids,
             default_job_id=int(default_job) if default_job else None,
+            project_tag=(e.get("DBX_PROJECT_TAG") or "").strip() or DEFAULT_PROJECT_TAG,
+            discovery_refresh_s=max(0.0, float(e.get("DBX_DISCOVERY_REFRESH_S") or "300")),
             public_url=public_url,
             lakebase_dsn=lakebase_dsn,
             lakebase_schema=(e.get("DBX_LAKEBASE_SCHEMA") or "").strip() or DEFAULT_LAKEBASE_SCHEMA,

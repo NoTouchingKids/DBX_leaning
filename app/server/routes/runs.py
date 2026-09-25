@@ -124,11 +124,15 @@ async def trigger_run(body: TriggerRequest, request: Request, hub: Hub) -> dict:
             hub.degraded.get("jobs_api", "runs cannot be triggered from this app"),
         )
 
-    job_id = hub.config.job_id_for(body.model)
+    # Through the hub, not `hub.config` directly: a model missing from the map
+    # costs one (rate-limited) re-discovery before the 404, so a job created
+    # since the last periodic refresh is triggerable straight away.
+    job_id = await hub.job_id_for(body.model)
     if job_id is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            f"no job found for model {body.model!r}; discovered models are "
+            f"no job found for model {body.model!r} (project tag "
+            f"{hub.config.project_tag!r}); discovered models are "
             f"{hub.config.triggerable_models or '(none — check the project tag and /healthz)'}",
         )
 
