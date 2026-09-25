@@ -14,7 +14,8 @@ gone, and one implementation does not need a seam.
 
 **Two tables.** ``run_status`` is current state, one row per run;
 ``run_status_history`` is every reported transition, append-only. One status
-report writes both, in one statement (:data:`REPORT_SQL`). The shape was signed
+report writes both, in one statement (:data:`REPORT_SQL`, which lives in
+``shared/run_state.py`` because the job's writer issues it too). The shape was signed
 off on 2026-09-24 — ``docs/v5-implementation-plan.md``, Phase 2 item 1.
 
 **This module creates nothing.** The DDL is ``lakebase_ddl/001_run_status.sql``
@@ -43,11 +44,20 @@ complexity, not before.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from shared.envelope import RunStatus
+from shared.run_state import (
+    DEFAULT_SCHEMA,
+    HISTORY_TABLE,
+    REPORT_SQL,
+    STATUS_TABLE,
+    UnsafeSchemaName,
+    report_params,
+    report_sql,
+    vet_schema,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,9 +76,6 @@ __all__ = [
     "UnsafeSchemaName",
     "qualified",
 ]
-
-STATUS_TABLE = "run_status"
-HISTORY_TABLE = "run_status_history"
 
 #: Which DDL file creates each table — named in the degraded reason, so the
 #: message says what to apply rather than only what is wrong.
@@ -202,24 +209,12 @@ class HistoryRecord:
 # Postgres / Lakebase
 # --------------------------------------------------------------------------
 
-#: Postgres identifier, for the one thing here that cannot be a bound
-#: parameter. A schema name is an identifier, not a value.
-_PG_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-#: Where the tables live inside the Lakebase database.
-#:
-#: NOT `public`, and that is not tidiness. Since PostgreSQL 15 the `public`
-#: schema no longer grants CREATE to `PUBLIC`, so a role that is not the
-#: database owner gets `permission denied for schema public`. The DDL is
-#: applied out of band now, but the same rule decides where it can land.
-#:
-#: It also mirrors the Unity Catalog side, where everything is in
-#: `<catalog>.dbx_leaning` rather than loose in `default`.
-DEFAULT_SCHEMA = "dbx_leaning"
-
-
-class UnsafeSchemaName(ValueError):
-    """A schema name that will not be interpolated into SQL."""
+#: `DEFAULT_SCHEMA` (``dbx_leaning``, not ``public`` — see its note), the
+#: identifier check behind :func:`qualified`, the table names and
+#: :data:`REPORT_SQL` itself all live in ``shared/run_state.py`` and are
+#: re-exported from here. The job's own Lakebase writer (``job/lakebase.py``)
+#: must issue exactly the same statement, and the job does not import
+#: ``server`` — so the text lives where both can reach it, once.
 
 
 def qualified(schema: str, table: str = STATUS_TABLE) -> str:
@@ -231,80 +226,11 @@ def qualified(schema: str, table: str = STATUS_TABLE) -> str:
     to `public` finds a DIFFERENT, empty table rather than failing — which is
     a far worse outcome than an error.
     """
-    if not _PG_IDENTIFIER.match(schema):
-        raise UnsafeSchemaName(
-            f"{schema!r} is not a plain Postgres identifier; refusing to build SQL from it"
-        )
+    vet_schema(schema)
     if table not in EXPECTED_COLUMNS:
         raise ValueError(f"{table!r} is not a table this store knows")
     return f"{schema}.{table}"
 
-
-#: One status report: the current-state upsert and the history append, in ONE
-#: statement.
-#:
-#: The upsert rides as a data-modifying CTE and the history append is the
-#: primary query. Postgres runs a data-modifying CTE exactly once and always to
-#: completion whether or not anything reads its output, so `upsert_current` is
-#: not dead code despite nothing selecting from it. One statement is one
-#: implicit transaction and one round trip.
-#:
-#: **The seq guard** (`WHERE EXCLUDED.seq >= rs.seq`): a report older than the
-#: row does not move it backwards. `seq` is job-assigned, per run, monotonic —
-#: the message's own clock. Never `now()`: a late-landing write always carries
-#: the later `now()`, which would make the guard inert on exactly the path that
-#: needs it. `>=` rather than `>` so an exact redelivery reapplies the same
-#: values — idempotent — instead of being a special case.
-#:
-#: **The history row appends even when the guard makes the upsert a no-op.**
-#: The two tables answer different questions: current state is what is true,
-#: history is what was reported. `ON CONFLICT (run_id, seq) DO NOTHING` is what
-#: keeps a redelivered report one row.
-#:
-#: **A known `model` or `job_run_id` is never blanked.** `NULLIF(..., '')`
-#: before the COALESCE, not a bare COALESCE: `model` is NOT NULL DEFAULT '', so
-#: a writer that does not know it sends `''`, and a bare COALESCE would see an
-#: empty string rather than a NULL and keep it — the bug `5c57c33` fixed on the
-#: prior branch, where a run carried `model=''` for the rest of its life.
-#:
-#: Every parameter carries an explicit cast. An untyped parameter is how this
-#: repo got `"2" > "12"` twice; `seq` here is the guard, and must compare as a
-#: number.
-REPORT_SQL = """
-WITH upsert_current AS (
-    INSERT INTO {status_table} AS rs
-        (run_id, job_run_id, model, status, terminal, detail, seq, updated_at)
-    VALUES (
-        %(run_id)s::text,
-        NULLIF(%(job_run_id)s::text, ''),
-        COALESCE(%(model)s::text, ''),
-        %(status)s::text,
-        %(terminal)s::boolean,
-        %(detail)s::text,
-        %(seq)s::bigint,
-        %(ts)s::bigint
-    )
-    ON CONFLICT (run_id) DO UPDATE SET
-        job_run_id = COALESCE(EXCLUDED.job_run_id, rs.job_run_id),
-        model      = COALESCE(NULLIF(EXCLUDED.model, ''), rs.model),
-        status     = EXCLUDED.status,
-        terminal   = EXCLUDED.terminal,
-        detail     = EXCLUDED.detail,
-        seq        = EXCLUDED.seq,
-        updated_at = EXCLUDED.updated_at
-    WHERE EXCLUDED.seq >= rs.seq
-)
-INSERT INTO {history_table} (run_id, seq, status, terminal, detail, ts)
-VALUES (
-    %(run_id)s::text,
-    %(seq)s::bigint,
-    %(status)s::text,
-    %(terminal)s::boolean,
-    %(detail)s::text,
-    %(ts)s::bigint
-)
-ON CONFLICT (run_id, seq) DO NOTHING
-""".strip()
 
 _COLUMNS_SQL = """
 SELECT table_name::text, column_name::text, data_type::text, is_nullable::text
@@ -342,7 +268,7 @@ class PostgresRunStore:
         self._schema = schema
         self._table = qualified(schema, STATUS_TABLE)
         self._history = qualified(schema, HISTORY_TABLE)
-        self._report_sql = REPORT_SQL.format(status_table=self._table, history_table=self._history)
+        self._report_sql = report_sql(schema)
         #: Awaited on every connection, when set. Lakebase's password is a
         #: short-lived OAuth token, so it cannot live in the DSN: baked in at
         #: startup it works for about an hour, and this app runs for up to 24.
@@ -462,16 +388,16 @@ class PostgresRunStore:
         try:
             await conn.execute(
                 self._report_sql,
-                {
-                    "run_id": run_id,
-                    "job_run_id": job_run_id,
-                    "model": model,
-                    "status": str(status),
-                    "terminal": bool(terminal),
-                    "detail": detail,
-                    "seq": int(seq),
-                    "ts": int(ts),
-                },
+                report_params(
+                    run_id,
+                    status,
+                    seq=seq,
+                    terminal=terminal,
+                    ts=ts,
+                    detail=detail,
+                    model=model,
+                    job_run_id=job_run_id,
+                ),
             )
         finally:
             await conn.close()

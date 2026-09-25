@@ -147,3 +147,26 @@ def test_an_unreachable_endpoint_raises_the_same_way():
 
     with pytest.raises(TokenUnavailable, match="could not reach"):
         _provider(handler).token()
+
+
+def test_invalidate_forces_the_next_token_to_be_fetched():
+    """For a caller whose connection was just refused: the cached token may be
+    why, and the clock cannot see that coming. `job/lakebase.py` relies on it."""
+    handler, calls = _ok()
+    provider = _provider(handler)
+    provider.token()
+    provider.token()
+    assert len(calls) == 1
+
+    provider.invalidate()
+    provider.token()
+    assert len(calls) == 2
+
+
+def test_the_client_id_is_readable_and_the_secret_is_not():
+    """The client id is the Lakebase principal's Postgres role name, so the
+    writer reads it from here rather than reading the scope twice."""
+    handler, _ = _ok()
+    provider = _provider(handler)
+    assert provider.client_id == "client-id"
+    assert not hasattr(provider, "client_secret")
