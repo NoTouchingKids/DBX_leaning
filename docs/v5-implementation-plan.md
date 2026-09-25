@@ -49,7 +49,21 @@ one for the correction as much as the answer.
    against a live run (CLAUDE.md, "Still not done"). Phase 3 rewrites exactly
    the code they live in — get a known-good baseline first, or a regression
    after the rewrite has nothing to be compared against.
-3. **Decide what to do about `tests/` before Phase 3 starts, not after.**
+3. **SETTLED, 2026-09-24: restored, not abandoned.** The suite `c1f19c4`
+   deleted was *this branch's* suite, not `main`/`dev`'s eleven-model one — it
+   was already trimmed to `heartbeat` + `annealing`. Restored from
+   `c1f19c4^` verbatim, 369 of 374 passed on the first run. The five failures
+   were drift, not bugs: four `tests/deploy/test_bundle.py` tests still
+   asserted the pre-2026-09-09 bundle (Lakebase host, user and the app's own
+   principal all empty and commented out), rewritten to guard the opted-in
+   config instead; and `tests/modelkit/test_template.py` counted an
+   interpreter's `sitecustomize` as a modelkit import, fixed by diffing
+   `sys.modules` around the import. `uv run pytest` → 374 passed. The one
+   claim that still named a file that never existed on this branch
+   (`tests/integration/test_end_to_end.py`, in the envelope spec) now points
+   at the test that actually asserts it. The original text follows.
+
+   **Decide what to do about `tests/` before Phase 3 starts, not after.**
    It does not exist on this branch — commit `c1f19c4`, "droped all Test for
    now," removed all of it (`tests/app/`, `tests/job/`, `tests/deploy/`). It
    still exists in full on `origin/main` and `origin/dev`. Meanwhile roughly
@@ -66,7 +80,42 @@ one for the correction as much as the answer.
    fast feedback loop means a collision between two tracks' changes is
    caught by a human reviewer or not at all. Resolve this before, or as,
    Track A below starts.
-4. **Check the other branches in this repo before building Phase 2 from
+4. **SETTLED, 2026-09-24: read, and neither is a base to build on.** Both
+   branches are v3-era trees with no merge base with this branch (v4 was a
+   rewrite), so there is nothing to merge — only ideas to lift.
+
+   - `origin/claude/durable-writer-and-results` (`37cf0a8`) is where
+     `PostgresRunStore`, the `RunStore` Protocol, `claim_slot` and the
+     advisory-locked count-and-claim came from — i.e. the dead code Track 0
+     item 1 deletes. Its delta-rs and results-table work was retired by v4
+     ("Who writes what"), and `main` reverted the branch's merge (`080216d`).
+     Nothing here for Phase 2.
+   - `origin/lakebase-status-history` (`3280f49`, `5c57c33`) built exactly
+     Phase 2's job-side writer — `job/lakebase.py` — but on the mechanism
+     Phase 0 item 1 disproved (a Database REST API), on asyncio (Phase 3
+     item 6 rejects it), and beside an app that still claimed slots. The
+     transport does not carry over. **Three rules do, and Tracks A and C
+     should adopt them rather than rediscover them:**
+     1. *A late write must not move the row backwards.* The upsert's
+        `WHERE run_status.<clock> <= EXCLUDED.<clock>` guard, keyed on the
+        message's own clock and never on `now()` — a late-landing write
+        always carries the later `now()`, which makes the guard inert on
+        exactly the path that needs it. On v5 the clock should be `seq`, not
+        `ts`: it is job-assigned, per run, monotonic by construction, and
+        already in the proposed column list.
+     2. *History, if kept, is a second table, not `run_status` made
+        append-only.* The primary key on `run_id` is what makes the upsert
+        possible at all. That branch's `run_status_history` appended every
+        reported transition, deduped by a partial unique index on
+        `(run_id, seq)`. Whether v5 wants a history table is part of the
+        Phase 2 item 1 sign-off, not a default.
+     3. *Never raise, count instead.* `writes` / `failures` / `last_error` on
+        the writer object, so a best-effort path is observable without being
+        load-bearing.
+
+   Original text follows.
+
+   **Check the other branches in this repo before building Phase 2 from
    scratch.** `origin/lakebase-status-history` and
    `origin/claude/durable-writer-and-results` both sound like they already
    cover ground this phase needs — a Lakebase status history and a durable
@@ -107,7 +156,20 @@ Arrow IPC on the wire:
 
 ## Phase 2 — run state moves to where it's authoritative
 
-1. **`run_status` column shape — PROPOSED, needs sign-off before the DDL is
+1. **SIGNED OFF 2026-09-24: every transition, plus history.** It replaces the
+   proposal below. One row per run in `run_status`: `run_id` (PK),
+   `job_run_id`, `model`, `status` (free text), `terminal`, `detail`, `seq`,
+   `updated_at`. The harness writes RUNNING and the terminal status for
+   **every** run, not only the nuanced ones, so `GET /api/runs` keeps
+   listing from this table and `model` stops being `''`. The upsert only
+   applies when `EXCLUDED.seq >= run_status.seq`, so a late write cannot
+   move the row backwards (see Phase 0 item 4). Every reported transition
+   is also appended to `run_status_history`, deduped by a unique index on
+   `(run_id, seq)`. That history table is the second table
+   `origin/lakebase-status-history` had, not `run_status` made
+   append-only. The superseded proposal:
+
+   **`run_status` column shape — PROPOSED, needs sign-off before the DDL is
    written:**
    `run_id` (PK), `status` (free text, not an enum — the vocabulary is the
    model's), `terminal` (bool), `detail` (text), `updated_at`, `seq` at time
@@ -175,11 +237,23 @@ Arrow IPC on the wire:
    `sendall` can block indefinitely with no timeout outside the closing
    handshake, which is exactly the stall a model-blocking main thread cannot
    afford to inherit.
-3. **PROPOSED** drop policy: two logical queues, or a type check at the drop
+3. **SIGNED OFF 2026-09-24:** a full live queue drops `log` first, then the
+   oldest `progress`. `status` and `result` travel in a small separate queue
+   with no size cap. That is safe because a run has only a handful of them.
+   The owner's framing, which is the rule to design against: **live delivery
+   is best-effort for everything, and `replay` is how a client catches up.**
+   A dropped live record is never lost: it is in the part files, and
+   `replay(from_seq, to_seq)` serves it from them. So the drop policy
+   decides what a client sees *first*, not what it can *have*. The
+   superseded proposal:
+
+   **PROPOSED** drop policy: two logical queues, or a type check at the drop
    point, so a full queue drops `log` records (best-effort, per the envelope
    spec) and never `status` or `result` (never best-effort, per the same
    spec). Today's single queue drops oldest regardless of type.
-4. **PROPOSED** terminal shutdown sequence, written down before the shutdown
+4. **SIGNED OFF 2026-09-24, as written below.**
+
+   **PROPOSED** terminal shutdown sequence, written down before the shutdown
    code is touched: model's own result write → part files flushed → Lakebase
    status write → `bye`. A crash between any two must leave Delta as the
    floor and Lakebase as at-most-stale, never the reverse.
@@ -202,7 +276,15 @@ Arrow IPC on the wire:
 2. Make `discovery.PROJECT_TAG` configurable per deployment, so a team
    running their own instance of the app can point it at only their own jobs
    without forking `discovery.py`.
-3. **PROPOSED** task-scoped run id convention for chained multi-task jobs —
+3. **OPEN, and possibly not needed. Not landed in Track 0.** The owner's
+   model for a multi-task pipeline: one *main* task centralises the
+   communication for the rest. If only one task per job run hosts the
+   harness, nothing collides and no task-scoped id is needed. The collision
+   below exists only if two or more tasks in the same job run each run the
+   harness under the same `DBX_RUN_ID`. Decide this when a chained job
+   actually exists. The original text:
+
+   **PROPOSED** task-scoped run id convention for chained multi-task jobs —
    today a job parameter is job-level, so every task in a chain gets the
    same `DBX_RUN_ID` and would collide on `runs/<run_id>/` in the telemetry
    volume and on the Lakebase primary key. Exact format (job run id + task

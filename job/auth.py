@@ -270,6 +270,51 @@ def read_secret(scope: str, key: str) -> str | None:
         return None
 
 
+def read_client_credentials(
+    scope: str | None, id_key: str | None, secret_key: str | None
+) -> tuple[str | None, str | None]:
+    """Both halves of a service principal's OAuth credential, from one scope.
+
+    The job carries more than one of these — the shared ingress identity
+    today, a Lakebase-scoped one in Phase 2 of `docs/v5-implementation-plan.md`
+    — and each arrives the same way: three job parameters naming a scope and
+    two keys, none of them a credential, resolved here with `read_secret`.
+
+    Call this ONCE per run, not per connection attempt. Neither half rotates
+    mid-run, and a reconnect loop should not hammer the Secrets API; the TOKEN
+    the pair buys is a separate concern, cached by `M2MTokenProvider`.
+
+    `(None, None)` unless all three names are present and both reads succeed.
+    Fewer than three names is a misconfiguration rather than a partial
+    identity, and half a credential is as good as none.
+    """
+    if not (scope and id_key and secret_key):
+        return None, None
+    client_id = read_secret(scope, id_key)
+    client_secret = read_secret(scope, secret_key)
+    if not (client_id and client_secret):
+        return None, None
+    return client_id, client_secret
+
+
+def m2m_from_secrets(
+    host: str | None, scope: str | None, id_key: str | None, secret_key: str | None
+) -> M2MTokenProvider | None:
+    """One token provider for the run, from a scope/id-key/secret-key triple.
+
+    Build it once and close over it: that is what makes its cache worth having
+    — the same token for a reconnect a minute in, a fresh one an hour in.
+    None when there is no host or no complete credential, which callers treat
+    as "this identity is not configured", never as a failure.
+    """
+    if not host:
+        return None
+    client_id, client_secret = read_client_credentials(scope, id_key, secret_key)
+    if not (client_id and client_secret):
+        return None
+    return M2MTokenProvider(host, client_id, client_secret)
+
+
 def auth_headers(
     host: str | None = None,
     config: Any = None,

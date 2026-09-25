@@ -57,14 +57,19 @@ async def healthz(hub: Hub) -> dict:
             "kind": getattr(hub.store, "name", None),
             "server_version": getattr(hub.store, "server_version", None),
         },
-        # Where the job map came from. "discovered" is a working app AND a
-        # warning: it means the live app deployment was not created by
-        # `databricks bundle run`, so nothing else in resources/app.yml
-        # reached it either — the volume, the ingress token, the Lakebase host.
+        # Where the job map came from: "config" (an explicit DBX_JOB_IDS
+        # allow-list), "discovered" (by tag — the normal v4 state), or "none".
         "job_ids": {
             "source": hub.job_ids_source,
             "count": len(hub.config.job_ids),
         },
+        # How discovery is going: the project tag it filters on — a
+        # misspelled one is silently "none of ours", so it is printed rather
+        # than assumed — the refresh interval (0 = off, which an explicit
+        # DBX_JOB_IDS forces), and the last success and last error. A failed
+        # refresh keeps the previous map, so `last_error_at` later than
+        # `last_success_at` means the models listed may be stale.
+        "discovery": hub.discovery.as_dict(),
         "live_jobs": len(hub.job_sockets.run_ids),
         "messages_ingested": hub.messages_ingested,
     }

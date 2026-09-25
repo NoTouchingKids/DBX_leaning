@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +22,7 @@ from shared.tables import TableSet
 
 from .broadcaster import Broadcaster, InProcessBroadcaster
 from .config import AppConfig
-from .discovery import map_jobs_to_models
+from .discovery import DiscoveryStatus, map_jobs_to_models
 from .jobs_api import JobsApi
 from .oauth import OAuthTokenProvider
 from .store import PostgresRunStore
@@ -169,17 +171,31 @@ class ServiceHub:
         #: one is a socket registry, the other is the Databricks REST client.
         self.job_sockets = JobConnections()
         self.jobs_api: JobsApi | None = None
-        #: Run state. Postgres when Lakebase is configured, else the
-        #: warehouse-backed one — see app/server/store.py for why it moved.
+        #: Run state, in Lakebase. None when it is unconfigured, unreachable, or
+        #: its schema fails the startup check — see `degraded` for which.
         self.store: PostgresRunStore | None = None
         self.degraded: dict[str, str] = {}
-        #: Where `config.job_ids` came from — "config" when DBX_JOB_IDS was
-        #: set, "discovered" when the workspace was asked instead, "none" when
-        #: neither worked. Reported on `/healthz` and `/api/models`, because
-        #: "discovered" means the live app deployment was not created by the
-        #: bundle, and so nothing else in `resources/app.yml` reached the app
-        #: either — the app volume, the ingress token, the Lakebase host.
+        #: Where `config.job_ids` came from — "config" when DBX_JOB_IDS (or
+        #: DBX_JOB_ID) was set, "discovered" when the workspace was asked by
+        #: tag, "none" when neither has worked yet. Reported on `/healthz` and
+        #: `/api/models`. "discovered" is the normal v4 state, not a warning:
+        #: `resources/app.yml` deliberately sets no DBX_JOB_IDS.
         self.job_ids_source: str = "none"
+        #: Decided once, from the config the hub was BUILT with — discovery
+        #: writes its result into `self.config.job_ids`, so re-reading that
+        #: later cannot tell an explicit map from a discovered one.
+        self._job_ids_explicit = bool(config.job_ids) or config.default_job_id is not None
+        #: How discovery is going, for `/healthz`: tag, interval, last success,
+        #: last error. See `refresh_job_ids()`.
+        self.discovery = DiscoveryStatus(project_tag=config.project_tag)
+        #: The periodic refresh, owned here and cancelled in `shutdown()`.
+        self._discovery_task: asyncio.Task | None = None
+        #: Serialises the periodic refresh and the on-demand one, so a trigger
+        #: arriving mid-refresh waits for that answer instead of asking again.
+        self._discovery_lock = asyncio.Lock()
+        #: Monotonic time of the last attempt, success or not — what rate-limits
+        #: the on-demand refresh in `job_id_for()`.
+        self._discovery_attempted_at: float | None = None
         #: The app's durable filesystem, or None when unconfigured or
         #: unreachable. A route needing it should 503 rather than fall back
         #: to local disk, which disappears with the container.
@@ -218,11 +234,12 @@ class ServiceHub:
             )
             log.warning(self.degraded["jobs_api"])
 
-        await self._resolve_job_ids(cfg)
+        await self.refresh_job_ids()
+        self._start_discovery_refresh()
         self._check_volume(cfg)
 
-    async def _resolve_job_ids(self, cfg: AppConfig) -> None:
-        """Ask the workspace which jobs are available, by tag.
+    async def refresh_job_ids(self) -> bool:
+        """Ask the workspace which jobs are ours, by tag. True if the map was replaced.
 
         **Discovery is the mechanism now, not the fallback.** v3 had it the
         other way round: `DBX_JOB_IDS` was interpolated at deploy time from
@@ -235,62 +252,180 @@ class ServiceHub:
         coupling v4 exists to remove. A tag does not care where a job is
         defined, who deployed it, or whether it still lives in this
         repository. Out of hundreds of jobs in a workspace, the ones carrying
-        `project: dbx-leaning` are ours; that is the whole contract.
+        `project: <DBX_PROJECT_TAG>` are ours; that is the whole contract.
 
         `DBX_JOB_IDS` is still honoured when explicitly set, because someone
         who sets it means it — it is an allow-list, narrowing to exactly the
         models named. It is no longer produced by the bundle, and nothing
-        depends on it existing.
-        """
-        if cfg.job_ids or cfg.default_job_id is not None:
-            self.job_ids_source = "config"
-            return
+        depends on it existing. When it is set this does nothing, and no
+        periodic refresh is started.
 
+        Called at startup, then every `discovery_refresh_s` by
+        `_discovery_loop`, and on demand by `job_id_for()`. **A failed refresh
+        keeps the last good map**: a Jobs API blip, or a principal that
+        briefly lost access, must not take away every model a working app
+        could trigger. It is recorded on `self.discovery` and reported under
+        `degraded.job_discovery` instead, until an attempt succeeds.
+        """
+        async with self._discovery_lock:
+            return await self._discover()
+
+    async def _discover(self) -> bool:
+        """One attempt. Callers hold `_discovery_lock`."""
+        if self._job_ids_explicit:
+            self.job_ids_source = "config"
+            return False
+
+        tag = self.config.project_tag
         if self.jobs_api is None:
             self.degraded["job_ids"] = (
                 "no DBX_JOB_IDS configured and no Jobs API to discover them from; "
                 "no model can be triggered from this app"
             )
             log.warning(self.degraded["job_ids"])
-            return
+            return False
 
+        self._discovery_attempted_at = time.monotonic()
         try:
-            # Bounded: startup must not hang on a slow or wedged workspace.
+            # Bounded: startup must not hang on a slow or wedged workspace,
+            # and neither may a trigger waiting on an on-demand refresh.
             jobs = await asyncio.wait_for(self.jobs_api.list_jobs(), timeout=30)
         except Exception as exc:  # noqa: BLE001 - a failed lookup is degraded, not fatal
-            self.degraded["job_ids"] = (
-                f"no DBX_JOB_IDS configured and discovering jobs failed ({exc}); "
-                "no model can be triggered from this app"
-            )
-            log.warning(self.degraded["job_ids"], exc_info=True)
-            return
+            self._discovery_failed(f"discovering jobs failed ({exc})", exc_info=True)
+            return False
 
-        found = map_jobs_to_models(jobs)
+        found = map_jobs_to_models(jobs, tag)
         if not found.job_ids:
-            self.degraded["job_ids"] = (
-                f"no DBX_JOB_IDS configured, and none of the {len(jobs)} jobs visible to "
-                "this app are tagged project=dbx-leaning or named '... dbx-leaning · <model>'; "
-                "no model can be triggered from this app"
+            # Treated as a failure, not as "there are now no models". The
+            # realistic causes of a previously non-empty answer going empty
+            # all at once are a principal that lost access or a tag edited
+            # on the wrong side — both mistakes a stale map survives better
+            # than an empty one. A single job disappearing from a non-empty
+            # answer IS honoured, below.
+            self._discovery_failed(
+                f"none of the {len(jobs)} jobs visible to this app are tagged "
+                f"project={tag} or named '... {tag} · <model>'"
             )
-            log.warning(self.degraded["job_ids"])
-            return
+            return False
 
-        self.config = replace(cfg, job_ids=found.job_ids)
+        previous = self.config.job_ids
+        self.config = replace(self.config, job_ids=found.job_ids)
         self.job_ids_source = "discovered"
-        log.warning(
-            "DBX_JOB_IDS was not set; discovered %d job(s) from the workspace: %s. "
-            "This works, but it means the live app deployment was not created by "
-            "`databricks bundle run`, so nothing else in resources/app.yml reached "
-            "the app either.",
-            len(found.job_ids),
-            ", ".join(found.job_ids),
-        )
+        self.discovery.refreshes += 1
+        self.discovery.last_success_at = _now()
+        self.degraded.pop("job_ids", None)
+        self.degraded.pop("job_discovery", None)
+
+        if found.job_ids != previous:
+            added = sorted(set(found.job_ids) - set(previous))
+            removed = sorted(set(previous) - set(found.job_ids))
+            log.info(
+                "job discovery (project=%s): %d job(s): %s%s%s",
+                tag,
+                len(found.job_ids),
+                ", ".join(f"{m}={j}" for m, j in found.job_ids.items()),
+                f"; added {', '.join(added)}" if previous and added else "",
+                f"; removed {', '.join(removed)}" if removed else "",
+            )
+
         if found.ambiguous:
-            self.degraded["job_ids_ambiguous"] = (
+            ambiguous = (
                 "more than one job claims the same model, so the highest id won: "
                 + "; ".join(f"{m}: {ids}" for m, ids in found.ambiguous.items())
             )
-            log.warning(self.degraded["job_ids_ambiguous"])
+            if self.degraded.get("job_ids_ambiguous") != ambiguous:
+                log.warning(ambiguous)
+            self.degraded["job_ids_ambiguous"] = ambiguous
+        else:
+            self.degraded.pop("job_ids_ambiguous", None)
+        return True
+
+    def _discovery_failed(self, reason: str, *, exc_info: bool = False) -> None:
+        """Record a failed attempt without discarding what a good one found."""
+        self.discovery.failures += 1
+        self.discovery.last_error = reason
+        self.discovery.last_error_at = _now()
+
+        if self.job_ids_source == "discovered" and self.config.job_ids:
+            self.degraded["job_discovery"] = (
+                f"the last job discovery failed: {reason}. Still using the "
+                f"{len(self.config.job_ids)} job(s) found at "
+                f"{self.discovery.last_success_at}"
+            )
+            log.warning(self.degraded["job_discovery"], exc_info=exc_info)
+            return
+
+        self.degraded["job_ids"] = (
+            f"no DBX_JOB_IDS configured and {reason}; no model can be triggered from this app"
+        )
+        log.warning(self.degraded["job_ids"], exc_info=exc_info)
+
+    def _start_discovery_refresh(self) -> None:
+        """Start the periodic refresh, if there is anything for it to do.
+
+        Not when the map is explicit (it is an allow-list; refreshing would
+        widen it), not without a Jobs API, and not when the interval is 0.
+        Started even when the startup attempt failed — recovering from that
+        without a restart is half of why the refresh exists.
+        """
+        interval = self.config.discovery_refresh_s
+        if self._job_ids_explicit or self.jobs_api is None or interval <= 0:
+            self.discovery.refresh_s = 0.0
+            return
+        self.discovery.refresh_s = interval
+        self._discovery_task = asyncio.create_task(
+            self._discovery_loop(interval), name="job-discovery-refresh"
+        )
+
+    async def _discovery_loop(self, interval: float) -> None:
+        """Re-discover every `interval` seconds until cancelled.
+
+        This calls the Jobs API and nothing else. It must never grow a SQL
+        warehouse query: warehouse cost is uptime, and a loop touching it
+        every few minutes would keep it awake all day.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.refresh_job_ids()
+            except Exception:  # noqa: BLE001 - the loop outlives any one bad attempt
+                log.exception("job discovery refresh raised; retrying in %ss", interval)
+
+    async def _stop_discovery_refresh(self) -> None:
+        task, self._discovery_task = self._discovery_task, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def job_id_for(self, model: str) -> int | None:
+        """Which job runs `model` — refreshing discovery once if it is unknown.
+
+        A job created after the last refresh would otherwise 404 for up to
+        `discovery_refresh_s`. So an unknown name costs one refresh, then the
+        answer stands. Rate-limited by `discovery_on_demand_min_s` across ALL
+        callers, so a client naming nonexistent models cannot turn this into
+        a paged walk of the workspace's job list per request.
+
+        Never refreshes an explicit map: that is an allow-list, and a model
+        missing from it is missing on purpose.
+        """
+        job_id = self.config.job_id_for(model)
+        if job_id is not None or self._job_ids_explicit or self.jobs_api is None:
+            return job_id
+
+        async with self._discovery_lock:
+            # Someone else's refresh may have found it while this one waited.
+            job_id = self.config.job_id_for(model)
+            if job_id is not None:
+                return job_id
+            last = self._discovery_attempted_at
+            if last is not None and (
+                time.monotonic() - last < self.config.discovery_on_demand_min_s
+            ):
+                return None
+            await self._discover()
+        return self.config.job_id_for(model)
 
     def _check_volume(self, cfg: AppConfig) -> None:
         """Is the app's durable filesystem actually there?
@@ -383,46 +518,54 @@ class ServiceHub:
         log.error(self.degraded["lakebase_identity"])
 
     async def _start_store(self, cfg: AppConfig) -> None:
-        """Pick the run store once, and say which one loudly.
+        """Connect to Lakebase once, CHECK its schema, and say what happened.
 
-        A deployment that thinks it is on Lakebase while silently running on
-        the warehouse would keep the concurrency race and the missing primary
-        key without anyone noticing.
+        **Nothing is created here.** The DDL (`lakebase_ddl/`) is applied out
+        of band — `docs/v5-implementation-plan.md`, Phase 2 item 3. A missing
+        or mismatched table is reported as `lakebase_schema` degraded, with
+        the reason, and the store stays None: every route needing it answers a
+        clean 503 carrying that reason, instead of a 500 from a failed query.
+        The check runs once, so applying the DDL means restarting the app.
         """
-        if cfg.lakebase_dsn:
-            self._check_lakebase_identity(cfg)
-            store = PostgresRunStore(
-                cfg.lakebase_dsn,
-                schema=cfg.lakebase_schema,
-                password_provider=self.token_provider,
+        if not cfg.lakebase_dsn:
+            self.degraded["store"] = (
+                "no run store: Lakebase is not configured. Triggering and streaming "
+                "still work; listing and reading past runs do not, because that is "
+                "where their status is recorded. See DBX_LAKEBASE_* in resources/app.yml"
             )
-            try:
-                await store.ensure_schema()
-            except Exception as exc:  # noqa: BLE001
-                self.degraded["lakebase"] = f"Lakebase configured but unreachable: {exc}"
-                log.error(self.degraded["lakebase"])
-            else:
-                self.store = store
-                version = getattr(store, "server_version", None)
-                log.info("run store: Lakebase (postgres %s)", version or "version unknown")
-                return
-
-            log.info(
-                "run store: SQL warehouse. No Lakebase configured, so the "
-                "concurrency ceiling is checked without a transaction and a "
-                "duplicate run_id is not refused — see app/server/store.py."
-            )
+            log.warning(self.degraded["store"])
             return
 
-        self.degraded["store"] = (
-            "no run store: Lakebase is not configured. Triggering and streaming "
-            "still work; listing and reading past runs do not, because that is "
-            "where the job records them. See DBX_LAKEBASE_* in resources/app.yml. "
-            "runs cannot be registered, listed or triggered"
+        self._check_lakebase_identity(cfg)
+        store = PostgresRunStore(
+            cfg.lakebase_dsn,
+            schema=cfg.lakebase_schema,
+            password_provider=self.token_provider,
         )
-        log.warning(self.degraded["store"])
+        try:
+            problems = await store.check_schema()
+        except Exception as exc:  # noqa: BLE001
+            self.degraded["lakebase"] = f"Lakebase configured but unreachable: {exc}"
+            log.error(self.degraded["lakebase"])
+            return
+
+        version = store.server_version or "version unknown"
+        if problems:
+            self.degraded["lakebase_schema"] = (
+                f"Lakebase is reachable (postgres {version}) but its schema is not what "
+                f"this app expects, so run state is unavailable: {'; '.join(problems)}. "
+                "The app creates no tables: apply lakebase_ddl/001_run_status.sql and "
+                "lakebase_ddl/002_run_status_history.sql (deploy/README.md), then "
+                "restart the app"
+            )
+            log.error(self.degraded["lakebase_schema"])
+            return
+
+        self.store = store
+        log.info("run store: Lakebase (postgres %s), schema %s checked", version, store.schema)
 
     async def shutdown(self) -> None:
+        await self._stop_discovery_refresh()
         for task in tuple(self._status_tasks):
             task.cancel()
         if self._status_tasks:
@@ -443,15 +586,20 @@ class ServiceHub:
     def _persist_status(self, run_id: str, msg: StatusMessage) -> None:
         """Reflect a lifecycle transition into ``run_status``.
 
-        The status *message* is a notification; the ``run_status`` row is the
-        record of truth (docs/message-envelope-spec.md). This is what keeps
-        the two in step while the app is up — when it is not, the job's own
-        ``run_events`` carries the truth and startup reconciliation catches up.
+        The ``run_status`` row is a point-lookup mirror, not the record of
+        truth: the job's own ``run_events`` in Delta is, and it is written
+        whether or not this runs. This keeps the mirror current while the app
+        is up and a socket is attached. When either is not, the row simply
+        lags — **nothing repairs it later.** The startup reconciliation that
+        once did was removed in the v3→v4 cut (see ``startup()``), and has
+        not been replaced. Phase 2 of ``docs/v5-implementation-plan.md`` moves
+        this write into the job, which is present for every run, and deletes
+        this method.
 
-        Off the ingest path deliberately: a cold warehouse can take seconds to
-        answer, and blocking the job's socket on that would make the app the
-        thing a run depends on. It is a couple of statements per run
-        (RUNNING, then terminal), not a loop.
+        Off the ingest path deliberately: a Lakebase connection can take
+        seconds to open from cold, and blocking the job's socket on that would
+        make the app the thing a run depends on. It is a couple of statements
+        per run (RUNNING, then terminal), not a loop.
         """
         store = self.store
         if store is None:
@@ -461,12 +609,19 @@ class ServiceHub:
             # Bound above, not re-read here: the None-check happens now, the
             # await happens later, and the attribute could have changed.
             try:
-                await store.set_status(run_id, msg.status, detail=msg.detail)
+                await store.set_status(
+                    run_id,
+                    msg.status,
+                    seq=msg.seq,
+                    terminal=msg.terminal,
+                    ts=msg.ts,
+                    detail=msg.detail,
+                )
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(
-                    "could not update run_status for %s -> %s; run_events has it and "
-                    "startup reconciliation will pick it up",
+                    "could not update run_status for %s -> %s; run_events in Delta is "
+                    "now the only record of it, and nothing retries this write",
                     run_id,
                     msg.status,
                     exc_info=True,
@@ -475,3 +630,7 @@ class ServiceHub:
         task = asyncio.create_task(write(), name=f"run-status-{run_id}")
         self._status_tasks.add(task)
         task.add_done_callback(self._status_tasks.discard)
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")

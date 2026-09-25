@@ -187,10 +187,10 @@ resources:
         # instance's NAME — not the `read_write_dns` hostname `lakebase_host`
         # takes.
         #
-        # CAN_CONNECT_AND_CREATE is the only permission this resource offers,
-        # and CREATE is the half that matters: `ensure_schema()` issues
-        # `CREATE SCHEMA IF NOT EXISTS dbx_leaning`, and Postgres grants CREATE
-        # on a database to its owner alone.
+        # CAN_CONNECT_AND_CREATE is the only permission this resource offers.
+        # The app uses the CONNECT half: it creates nothing, and only checks
+        # at startup that lakebase_ddl/*.sql were applied (out of band — see
+        # deploy/README.md, "Applying the Lakebase schema").
         #
         # - name: lakebase
         #   description: Run state — the run_status table.
@@ -380,6 +380,25 @@ resources:
           # The variable is still READ if something sets it, because an
           # explicit map is also an allow-list and someone who sets one means
           # it. Nothing produces it, and nothing depends on it.
+
+          # WHICH jobs are ours: discovery matches `tags.project` (and, when a
+          # list response omits tags, a name ending `<tag> · <model>`). A team
+          # running its own instance of this app sets its own tag here instead
+          # of forking app/server/discovery.py. `/healthz` reports the tag in
+          # use under `discovery.project_tag`.
+          #
+          # A LITERAL, not a bundle variable, for two reasons. It has to match
+          # the `project:` tag hardcoded in every resources/model_*.job.yml, and
+          # a variable would let `--var` move the app off this bundle's own jobs
+          # while the jobs stayed put. And an empty variable drops `value`
+          # entirely (see the Lakebase note above) — a literal cannot.
+          # `tests/deploy/test_app_yaml.py` pins this, app/app.yaml and the job
+          # tags to one value.
+          #
+          # Re-discovery runs every DBX_DISCOVERY_REFRESH_S seconds (default
+          # 300; 0 disables) — a Jobs API list, never the SQL warehouse.
+          - name: DBX_PROJECT_TAG
+            value: dbx-leaning
 
           # Where a job should attach. Empty until the app has a URL — jobs
           # then run unobserved, which is a normal state, not a failure.

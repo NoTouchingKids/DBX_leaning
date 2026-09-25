@@ -124,11 +124,15 @@ async def trigger_run(body: TriggerRequest, request: Request, hub: Hub) -> dict:
             hub.degraded.get("jobs_api", "runs cannot be triggered from this app"),
         )
 
-    job_id = hub.config.job_id_for(body.model)
+    # Through the hub, not `hub.config` directly: a model missing from the map
+    # costs one (rate-limited) re-discovery before the 404, so a job created
+    # since the last periodic refresh is triggerable straight away.
+    job_id = await hub.job_id_for(body.model)
     if job_id is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            f"no job found for model {body.model!r}; discovered models are "
+            f"no job found for model {body.model!r} (project tag "
+            f"{hub.config.project_tag!r}); discovered models are "
             f"{hub.config.triggerable_models or '(none — check the project tag and /healthz)'}",
         )
 
@@ -187,6 +191,24 @@ async def get_run(run_id: str, store: Store, hub: Hub) -> dict:
         "run": record.as_dict(),
         "live": hub.job_sockets.is_connected(run_id),
         "last_seq_seen": snapshot.last_seq if snapshot else None,
+    }
+
+
+@router.get("/{run_id}/history")
+async def run_history(run_id: str, store: Store) -> dict:
+    """Every status transition reported for this run, in `seq` order.
+
+    What was REPORTED, not only what is current: a late report the
+    current-state row refused as stale still appears here, which is the
+    evidence for why `GET /api/runs/{run_id}` says what it says. Read from
+    Lakebase, so it costs no warehouse uptime. Empty — not 404 — for a run
+    nothing has reported yet.
+    """
+    transitions = await store.history(run_id)
+    return {
+        "run_id": run_id,
+        "count": len(transitions),
+        "transitions": [t.as_dict() for t in transitions],
     }
 
 

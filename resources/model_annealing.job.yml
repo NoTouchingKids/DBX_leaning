@@ -130,6 +130,28 @@ resources:
         - name: DBX_OAUTH_SECRET_KEY
           default: ${var.job_ingress_secret_key}
 
+        # --- the job's Lakebase identity and location -------------------
+        #
+        # A SECOND credential, not the ingress one above: the principal that
+        # owns `run_status` is not the one every job presents to the app.
+        # Locations only, read with `dbutils.secrets.get` — see databricks.yml.
+        # Declared ahead of the writer that reads them (Track C of
+        # docs/v5-implementation-plan.md), so the parameter list changes once.
+        - name: DBX_LAKEBASE_OAUTH_SECRET_SCOPE
+          default: ${var.job_lakebase_scope}
+        - name: DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY
+          default: ${var.job_lakebase_client_id_key}
+        - name: DBX_LAKEBASE_OAUTH_SECRET_KEY
+          default: ${var.job_lakebase_secret_key}
+        - name: DBX_LAKEBASE_HOST
+          default: ${var.lakebase_host}
+        - name: DBX_LAKEBASE_DATABASE
+          default: ${var.lakebase_database}
+        - name: DBX_LAKEBASE_PORT
+          default: ${var.lakebase_port}
+        - name: DBX_LAKEBASE_SCHEMA
+          default: ${var.lakebase_schema}
+
       environments:
         - environment_key: annealing
           spec:
@@ -181,6 +203,13 @@ resources:
               - DBX_OAUTH_SECRET_SCOPE={{job.parameters.DBX_OAUTH_SECRET_SCOPE}}
               - DBX_OAUTH_CLIENT_ID_KEY={{job.parameters.DBX_OAUTH_CLIENT_ID_KEY}}
               - DBX_OAUTH_SECRET_KEY={{job.parameters.DBX_OAUTH_SECRET_KEY}}
+              - DBX_LAKEBASE_OAUTH_SECRET_SCOPE={{job.parameters.DBX_LAKEBASE_OAUTH_SECRET_SCOPE}}
+              - DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY={{job.parameters.DBX_LAKEBASE_OAUTH_CLIENT_ID_KEY}}
+              - DBX_LAKEBASE_OAUTH_SECRET_KEY={{job.parameters.DBX_LAKEBASE_OAUTH_SECRET_KEY}}
+              - DBX_LAKEBASE_HOST={{job.parameters.DBX_LAKEBASE_HOST}}
+              - DBX_LAKEBASE_DATABASE={{job.parameters.DBX_LAKEBASE_DATABASE}}
+              - DBX_LAKEBASE_PORT={{job.parameters.DBX_LAKEBASE_PORT}}
+              - DBX_LAKEBASE_SCHEMA={{job.parameters.DBX_LAKEBASE_SCHEMA}}
               # NOT a job parameter, and not `${workspace.url}` either. This is
               # a RUNTIME dynamic value: Databricks substitutes
               # `{{workspace.url}}` when the task starts, the way it does

@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 from .envelope import PLATFORM_STATUSES, TERMINAL_STATUSES, MessageAdapter
-from .rpc import JSONRPC_VERSION, Method
+from .rpc import JSONRPC_VERSION, PROTOCOL_VERSION, Method
 
 __all__ = ["SCHEMA_VERSION", "envelope_schema", "control_schema", "protocol_schema"]
 
@@ -82,6 +82,11 @@ def control_schema() -> dict[str, Any]:
         "description": ("JSON-RPC 2.0 over the job's WebSocket. Generated from shared/rpc.py."),
         "x-schema-version": SCHEMA_VERSION,
         "x-jsonrpc-version": JSONRPC_VERSION,
+        # What a job must send in `hello` to be observed, and the rule the app
+        # applies to it. Published so a non-Python harness can read both
+        # rather than discovering them as a rejected handshake.
+        "x-protocol-version": PROTOCOL_VERSION,
+        "x-protocol-compatibility": ("job MAJOR == app MAJOR and job MINOR <= app MINOR"),
         "x-methods": {
             Method.TELEMETRY: {
                 "kind": "notification",
@@ -91,7 +96,22 @@ def control_schema() -> dict[str, Any]:
             Method.HELLO: {
                 "kind": "request",
                 "from": "job",
-                "summary": "Which run this is, and the seq it is picking up from.",
+                "summary": (
+                    "First frame. Which run this is, the seq it is picking up from, "
+                    "and the job's protocol version and capabilities."
+                ),
+                "params": {
+                    "run_id": "string",
+                    "next_seq": "integer",
+                    "protocol_version": "string 'MAJOR.MINOR', REQUIRED",
+                    "capabilities": "object: methods this side answers, e.g. {'cancel': {}}",
+                },
+                "result": {
+                    "observed": "boolean",
+                    "run_id": "string",
+                    "protocol_version": "string 'MAJOR.MINOR' — the app's",
+                    "capabilities": "object: methods the app answers",
+                },
             },
             Method.BYE: {
                 "kind": "notification",

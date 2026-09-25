@@ -2,30 +2,35 @@
 
 Everything else the app touches is append-only and analytical — logs,
 progress, events, results — and belongs in Delta. ``run_status`` is not: it
-is one row per run, updated on every transition, read by point-lookup, and
-counted against a concurrency ceiling. Delta is the wrong shape for all
-three, and reading it means waking a SQL warehouse whose cost is *uptime*.
+is one row per run, updated on every transition and read by point-lookup.
+Delta is the wrong shape for both, and reading it means waking a SQL
+warehouse whose cost is *uptime*.
 
-So it moves to Lakebase (managed Postgres), which
-``docs/free-edition-constraints.md`` already earmarked for exactly this:
-"Real fallback for OLTP-shaped state (`run_status`) and for multi-worker
-fan-out via LISTEN/NOTIFY".
+So it lives in Lakebase (managed Postgres), which
+``docs/free-edition-constraints.md`` earmarked for exactly this. One
+implementation, :class:`PostgresRunStore`, and no interface in front of it:
+the warehouse-backed store it used to share a ``RunStore`` Protocol with is
+gone, and one implementation does not need a seam.
 
-Two implementations behind one interface, chosen at startup:
+**Two tables.** ``run_status`` is current state, one row per run;
+``run_status_history`` is every reported transition, append-only. One status
+report writes both, in one statement (:data:`REPORT_SQL`). The shape was signed
+off on 2026-09-24 — ``docs/v5-implementation-plan.md``, Phase 2 item 1.
 
-- :class:`PostgresRunStore` when Lakebase is configured.
-- :class:`WarehouseRunStore` otherwise — today's behaviour, unchanged, so a
-  deployment is never blocked on provisioning a database.
+**This module creates nothing.** The DDL is ``lakebase_ddl/001_run_status.sql``
+and ``002_run_status_history.sql``, applied out of band by a human or a deploy
+step (Phase 2 item 3). At startup :meth:`PostgresRunStore.check_schema` reads
+``information_schema`` and reports what is missing or different, and the app
+reports that as degraded rather than creating it. This file holds no copy of
+the DDL — only :data:`EXPECTED_COLUMNS` and :data:`EXPECTED_KEYS`, what the
+check compares against — and ``tests/deploy/test_lakebase_ddl.py`` fails if
+those drift from the ``.sql`` files. The files cannot simply be read at runtime:
+``lakebase_ddl/`` is outside ``app/``, and nothing outside ``app/`` deploys.
 
-Two things the Postgres one fixes that the warehouse one structurally cannot:
-
-- **A duplicate ``run_id`` is refused** rather than silently producing two
-  registry rows for one run. A primary key; Delta has none.
-- **The concurrency ceiling is checked and the slot taken atomically.** The
-  warehouse version counts, then launches, then inserts — two triggers
-  arriving together both see room and both launch, straight past the
-  account's 5-task limit. There is no way to write that correctly without a
-  transaction.
+**What this store does not do: enforce the account's concurrency ceiling.**
+Databricks holds the ceiling itself: every ``resources/model_*.job.yml`` sets
+``queue.enabled``, so a sixth concurrent task waits rather than failing. See
+``docs/v4-rewrite-plan.md``, "Run state".
 
 Connections are opened per operation rather than pooled. That is a
 deliberate first-cut choice: the volume is a handful of statements per run,
@@ -40,75 +45,108 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple
 
-from shared.envelope import TERMINAL_STATUSES, RunStatus, now_ms
+from shared.envelope import RunStatus
 
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "Column",
+    "DDL_FILES",
     "DEFAULT_SCHEMA",
-    "RunRecord",
+    "EXPECTED_COLUMNS",
+    "EXPECTED_KEYS",
+    "HISTORY_TABLE",
+    "HistoryRecord",
     "PostgresRunStore",
-    "SlotDenied",
-    "DuplicateRun",
+    "REPORT_SQL",
+    "RunRecord",
+    "STATUS_TABLE",
     "UnsafeSchemaName",
     "qualified",
-    "schema_sql",
-    "TERMINAL_SQL_LIST",
 ]
 
-#: The terminal statuses as a SQL list literal, for counting what is still
-#: active against the concurrency ceiling.
+STATUS_TABLE = "run_status"
+HISTORY_TABLE = "run_status_history"
+
+#: Which DDL file creates each table — named in the degraded reason, so the
+#: message says what to apply rather than only what is wrong.
+DDL_FILES = {
+    STATUS_TABLE: "lakebase_ddl/001_run_status.sql",
+    HISTORY_TABLE: "lakebase_ddl/002_run_status_history.sql",
+}
+
+
+class Column(NamedTuple):
+    #: As `information_schema.columns.data_type` spells it: BIGSERIAL is
+    #: `bigint` there, TEXT is `text`.
+    data_type: str
+    nullable: bool
+
+
+#: What the startup check expects, per table. The canonical DDL is the `.sql`
+#: files; this is the part of it the app depends on, checked against the live
+#: database at startup and against the files by tests/deploy/test_lakebase_ddl.py.
 #:
-#: This is one of the few places entitled to use `TERMINAL_STATUSES` now that a
-#: status is an open string: the run store deals in the platform's own six, and
-#: a model-defined status never reaches this column. Anything asking "is this
-#: MESSAGE the last one" wants `StatusMessage.terminal` instead.
-TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in sorted(TERMINAL_STATUSES))
+#: Extra columns are tolerated: a column added out of band ahead of an app
+#: that reads it is an additive migration, not a mismatch.
+EXPECTED_COLUMNS: dict[str, dict[str, Column]] = {
+    STATUS_TABLE: {
+        "run_id": Column("text", False),
+        "job_run_id": Column("text", True),
+        "model": Column("text", False),
+        "status": Column("text", False),
+        "terminal": Column("boolean", False),
+        "detail": Column("text", True),
+        "seq": Column("bigint", False),
+        "updated_at": Column("bigint", False),
+    },
+    HISTORY_TABLE: {
+        "id": Column("bigint", False),
+        "run_id": Column("text", False),
+        "seq": Column("bigint", False),
+        "status": Column("text", False),
+        "terminal": Column("boolean", False),
+        "detail": Column("text", True),
+        "ts": Column("bigint", False),
+    },
+}
 
-
-class SlotDenied(RuntimeError):
-    """The account's concurrent-run ceiling is already taken."""
-
-    def __init__(self, active: int, ceiling: int) -> None:
-        super().__init__(
-            f"{active} runs already active and the account ceiling is {ceiling} "
-            f"concurrent job tasks; wait for one to finish"
-        )
-        self.active = active
-        self.ceiling = ceiling
-
-
-class DuplicateRun(RuntimeError):
-    """That run_id is already registered."""
+#: The conflict targets :data:`REPORT_SQL` names. A table with the right
+#: columns and no such key fails EVERY write with "there is no unique or
+#: exclusion constraint matching the ON CONFLICT specification" — so it is
+#: checked, not assumed.
+EXPECTED_KEYS: dict[str, tuple[str, ...]] = {
+    STATUS_TABLE: ("run_id",),
+    HISTORY_TABLE: ("run_id", "seq"),
+}
 
 
 @dataclass(frozen=True)
 class RunRecord:
     """One run's current state. The object the rest of the app passes around,
-    instead of a bare dict whose keys everyone has to remember."""
+    instead of a bare dict whose keys everyone has to remember.
+
+    ``terminal`` is a stored column, as the producer stated it — not derived
+    from a list of status strings, which could not answer for a model-defined
+    status.
+    """
 
     run_id: str
     model: str
-    status: str = RunStatus.QUEUED
+    status: str
+    terminal: bool
+    seq: int
+    updated_at: int
     job_run_id: str | None = None
     detail: str | None = None
-    started_ts: int = 0
-    updated_ts: int = 0
-    requested_by: str | None = None
-
-    @property
-    def terminal(self) -> bool:
-        return self.status in TERMINAL_STATUSES
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RunRecord:
-        # A status is a plain string now, so there is nothing to coerce and
+        # A status is a plain string, so there is nothing to coerce and
         # nothing to reject. An unfamiliar value is carried through rather than
-        # rewritten to FAILED, which is what the enum forced and which lost the
-        # only evidence of what actually happened. A blank is still a data
-        # problem and says so.
+        # rewritten. A blank is still a data problem and says so.
         status = str(row.get("status") or "")
         if not status:
             log.warning("run %s has no status", row.get("run_id"))
@@ -117,11 +155,11 @@ class RunRecord:
             run_id=str(row["run_id"]),
             model=str(row.get("model") or ""),
             status=status,
+            terminal=bool(row.get("terminal")),
+            seq=int(row.get("seq") or 0),
+            updated_at=int(row.get("updated_at") or 0),
             job_run_id=None if row.get("job_run_id") is None else str(row["job_run_id"]),
             detail=row.get("detail"),
-            started_ts=int(row.get("started_ts") or 0),
-            updated_ts=int(row.get("updated_ts") or 0),
-            requested_by=row.get("requested_by"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -129,51 +167,35 @@ class RunRecord:
             "run_id": self.run_id,
             "model": self.model,
             "status": self.status,
+            "terminal": self.terminal,
+            "seq": self.seq,
+            "updated_at": self.updated_at,
             "job_run_id": self.job_run_id,
             "detail": self.detail,
-            "started_ts": self.started_ts,
-            "updated_ts": self.updated_ts,
-            "requested_by": self.requested_by,
         }
 
 
-@runtime_checkable
-class RunStore(Protocol):
-    name: str
+@dataclass(frozen=True)
+class HistoryRecord:
+    """One reported transition, as it arrived — including one the current-row
+    upsert refused as stale."""
 
-    async def ensure_schema(self) -> None: ...
+    run_id: str
+    seq: int
+    status: str
+    terminal: bool
+    ts: int
+    detail: str | None = None
 
-    async def claim_slot(
-        self, run_id: str, *, model: str, ceiling: int, requested_by: str | None = None
-    ) -> RunRecord:
-        """Reserve a slot and register the run, or raise.
-
-        Raises :class:`SlotDenied` if the ceiling is already taken and
-        :class:`DuplicateRun` if the id exists. Where the implementation can,
-        both happen in one transaction with the insert.
-        """
-
-    async def attach_job_run(self, run_id: str, job_run_id: str | int) -> None: ...
-
-    async def release_slot(self, run_id: str) -> None:
-        """Undo a claim whose launch then failed."""
-
-    async def set_status(self, run_id: str, status: str, *, detail: str | None = None) -> None: ...
-
-    async def get(self, run_id: str) -> RunRecord | None: ...
-
-    # Named list_runs, not list: a method called `list` shadows the builtin
-    # inside the class body, so `-> list[RunRecord]` would resolve to the
-    # method rather than the type.
-    async def list_runs(
-        self, *, limit: int = 50, status: str | None = None, model: str | None = None
-    ) -> list[RunRecord]: ...
-
-    async def active_count(self) -> int: ...
-
-    async def non_terminal(self, limit: int = 200) -> list[RunRecord]: ...
-
-    async def close(self) -> None: ...
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "seq": self.seq,
+            "status": self.status,
+            "terminal": self.terminal,
+            "ts": self.ts,
+            "detail": self.detail,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -184,14 +206,12 @@ class RunStore(Protocol):
 #: parameter. A schema name is an identifier, not a value.
 _PG_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: Where `run_status` lives inside the Lakebase database.
+#: Where the tables live inside the Lakebase database.
 #:
 #: NOT `public`, and that is not tidiness. Since PostgreSQL 15 the `public`
 #: schema no longer grants CREATE to `PUBLIC`, so a role that is not the
-#: database owner — which the app's service principal generally is not — gets
-#: `permission denied for schema public` the first time `ensure_schema()`
-#: runs. Owning a schema of its own is the difference between a deploy that
-#: works and one that reports `lakebase` degraded for a reason nobody expects.
+#: database owner gets `permission denied for schema public`. The DDL is
+#: applied out of band now, but the same rule decides where it can land.
 #:
 #: It also mirrors the Unity Catalog side, where everything is in
 #: `<catalog>.dbx_leaning` rather than loose in `default`.
@@ -202,8 +222,8 @@ class UnsafeSchemaName(ValueError):
     """A schema name that will not be interpolated into SQL."""
 
 
-def qualified(schema: str) -> str:
-    """`schema.run_status`, vetted.
+def qualified(schema: str, table: str = STATUS_TABLE) -> str:
+    """`schema.table`, vetted.
 
     Every statement qualifies the table rather than relying on `search_path`.
     A search path is per-session state: it would have to be set on each of the
@@ -215,39 +235,95 @@ def qualified(schema: str) -> str:
         raise UnsafeSchemaName(
             f"{schema!r} is not a plain Postgres identifier; refusing to build SQL from it"
         )
-    return f"{schema}.run_status"
+    if table not in EXPECTED_COLUMNS:
+        raise ValueError(f"{table!r} is not a table this store knows")
+    return f"{schema}.{table}"
 
 
-def schema_sql(schema: str) -> str:
-    table = qualified(schema)
-    return f"""
-CREATE SCHEMA IF NOT EXISTS {schema};
+#: One status report: the current-state upsert and the history append, in ONE
+#: statement.
+#:
+#: The upsert rides as a data-modifying CTE and the history append is the
+#: primary query. Postgres runs a data-modifying CTE exactly once and always to
+#: completion whether or not anything reads its output, so `upsert_current` is
+#: not dead code despite nothing selecting from it. One statement is one
+#: implicit transaction and one round trip.
+#:
+#: **The seq guard** (`WHERE EXCLUDED.seq >= rs.seq`): a report older than the
+#: row does not move it backwards. `seq` is job-assigned, per run, monotonic —
+#: the message's own clock. Never `now()`: a late-landing write always carries
+#: the later `now()`, which would make the guard inert on exactly the path that
+#: needs it. `>=` rather than `>` so an exact redelivery reapplies the same
+#: values — idempotent — instead of being a special case.
+#:
+#: **The history row appends even when the guard makes the upsert a no-op.**
+#: The two tables answer different questions: current state is what is true,
+#: history is what was reported. `ON CONFLICT (run_id, seq) DO NOTHING` is what
+#: keeps a redelivered report one row.
+#:
+#: **A known `model` or `job_run_id` is never blanked.** `NULLIF(..., '')`
+#: before the COALESCE, not a bare COALESCE: `model` is NOT NULL DEFAULT '', so
+#: a writer that does not know it sends `''`, and a bare COALESCE would see an
+#: empty string rather than a NULL and keep it — the bug `5c57c33` fixed on the
+#: prior branch, where a run carried `model=''` for the rest of its life.
+#:
+#: Every parameter carries an explicit cast. An untyped parameter is how this
+#: repo got `"2" > "12"` twice; `seq` here is the guard, and must compare as a
+#: number.
+REPORT_SQL = """
+WITH upsert_current AS (
+    INSERT INTO {status_table} AS rs
+        (run_id, job_run_id, model, status, terminal, detail, seq, updated_at)
+    VALUES (
+        %(run_id)s::text,
+        NULLIF(%(job_run_id)s::text, ''),
+        COALESCE(%(model)s::text, ''),
+        %(status)s::text,
+        %(terminal)s::boolean,
+        %(detail)s::text,
+        %(seq)s::bigint,
+        %(ts)s::bigint
+    )
+    ON CONFLICT (run_id) DO UPDATE SET
+        job_run_id = COALESCE(EXCLUDED.job_run_id, rs.job_run_id),
+        model      = COALESCE(NULLIF(EXCLUDED.model, ''), rs.model),
+        status     = EXCLUDED.status,
+        terminal   = EXCLUDED.terminal,
+        detail     = EXCLUDED.detail,
+        seq        = EXCLUDED.seq,
+        updated_at = EXCLUDED.updated_at
+    WHERE EXCLUDED.seq >= rs.seq
+)
+INSERT INTO {history_table} (run_id, seq, status, terminal, detail, ts)
+VALUES (
+    %(run_id)s::text,
+    %(seq)s::bigint,
+    %(status)s::text,
+    %(terminal)s::boolean,
+    %(detail)s::text,
+    %(ts)s::bigint
+)
+ON CONFLICT (run_id, seq) DO NOTHING
+""".strip()
 
-CREATE TABLE IF NOT EXISTS {table} (
-    run_id       TEXT PRIMARY KEY,
-    job_run_id   TEXT,
-    model        TEXT   NOT NULL,
-    status       TEXT   NOT NULL,
-    detail       TEXT,
-    started_ts   BIGINT NOT NULL,
-    updated_ts   BIGINT NOT NULL,
-    requested_by TEXT
-);
-
--- Partial index: the ceiling check and reconciliation both ask only about
--- runs that have not finished, and finished runs are the overwhelming
--- majority once this has been live for a while.
-CREATE INDEX IF NOT EXISTS run_status_active_idx
-    ON {table} (updated_ts DESC)
-    WHERE status NOT IN ({TERMINAL_SQL_LIST});
-
-CREATE INDEX IF NOT EXISTS run_status_recent_idx ON {table} (updated_ts DESC);
+_COLUMNS_SQL = """
+SELECT table_name::text, column_name::text, data_type::text, is_nullable::text
+FROM information_schema.columns
+WHERE table_schema::text = %s::text AND table_name::text = ANY(%s::text[])
 """
 
-
-#: One well-known lock id, so every ceiling check serialises against the
-#: others. Arbitrary but fixed; changing it would let two app versions race.
-_CEILING_LOCK_ID = 230825001
+_KEYS_SQL = """
+SELECT tc.table_name::text,
+       array_agg(kcu.column_name::text ORDER BY kcu.ordinal_position)
+FROM information_schema.table_constraints tc
+JOIN information_schema.key_column_usage kcu
+  ON kcu.constraint_schema = tc.constraint_schema
+ AND kcu.constraint_name = tc.constraint_name
+ AND kcu.table_name = tc.table_name
+WHERE tc.table_schema::text = %s::text
+  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+GROUP BY tc.table_name, tc.constraint_name
+"""
 
 
 class PostgresRunStore:
@@ -264,7 +340,9 @@ class PostgresRunStore:
         #: fail while the app is starting and can report it, not on the first
         #: trigger of the day.
         self._schema = schema
-        self._table = qualified(schema)
+        self._table = qualified(schema, STATUS_TABLE)
+        self._history = qualified(schema, HISTORY_TABLE)
+        self._report_sql = REPORT_SQL.format(status_table=self._table, history_table=self._history)
         #: Awaited on every connection, when set. Lakebase's password is a
         #: short-lived OAuth token, so it cannot live in the DSN: baked in at
         #: startup it works for about an hour, and this app runs for up to 24.
@@ -274,14 +352,17 @@ class PostgresRunStore:
         #: instance with `enable_pg_native_login` turned on.
         self._password_provider = password_provider
         self._connect = connect  # injectable for tests
-        #: What the server said it is, read once at `ensure_schema`. Reported
+        #: What the server said it is, read once at `check_schema`. Reported
         #: by `/healthz` because the alternative is asserting it, and this
         #: repo asserted wrong: it claimed "Lakebase runs PostgreSQL 18" while
         #: a real instance came back `PG_VERSION_16`, the default. The version
         #: is chosen at creation and immutable after, so a deployment can
-        #: legitimately be on either. One string from the server settles it,
-        #: and costs a query on a connection already being opened.
+        #: legitimately be on either.
         self.server_version: str | None = None
+
+    @property
+    def schema(self) -> str:
+        return self._schema
 
     async def _conn(self):
         if self._connect is not None:
@@ -295,13 +376,57 @@ class PostgresRunStore:
             params["password"] = await self._password_provider()
         return await psycopg.AsyncConnection.connect(self._dsn, **params)
 
-    async def ensure_schema(self) -> None:
+    async def check_schema(self) -> list[str]:
+        """What is missing or different about the tables this store needs.
+
+        An empty list means the schema is as expected. **Creates nothing** —
+        DDL is applied out of band (``lakebase_ddl/``, ``deploy/README.md``);
+        a store that created its own tables would hide exactly the drift this
+        exists to report. Raises only when the database cannot be reached at
+        all, which is a different fault with a different fix.
+
+        Also records the server version, on the connection already open.
+        """
         conn = await self._conn()
         try:
-            await conn.execute(schema_sql(self._schema))
             self.server_version = await self._read_server_version(conn)
+            return await self._schema_problems(conn)
         finally:
             await conn.close()
+
+    async def _schema_problems(self, conn) -> list[str]:
+        cur = await conn.execute(_COLUMNS_SQL, (self._schema, list(EXPECTED_COLUMNS)))
+        actual: dict[str, dict[str, Column]] = {}
+        for table, column, data_type, is_nullable in await cur.fetchall():
+            actual.setdefault(table, {})[column] = Column(data_type, is_nullable == "YES")
+
+        cur = await conn.execute(_KEYS_SQL, (self._schema,))
+        keys: dict[str, set[tuple[str, ...]]] = {}
+        for table, columns in await cur.fetchall():
+            keys.setdefault(table, set()).add(tuple(columns))
+
+        problems: list[str] = []
+        for table, expected in EXPECTED_COLUMNS.items():
+            name = f"{self._schema}.{table}"
+            have = actual.get(table)
+            if not have:
+                problems.append(f"{name} does not exist (apply {DDL_FILES[table]})")
+                continue
+            for column, want in expected.items():
+                got = have.get(column)
+                if got is None:
+                    problems.append(f"{name} has no column {column} ({want.data_type})")
+                elif got != want:
+                    problems.append(
+                        f"{name}.{column} is {_describe(got)}, expected {_describe(want)}"
+                    )
+            if EXPECTED_KEYS[table] not in keys.get(table, set()):
+                problems.append(
+                    f"{name} has no primary key or unique constraint on "
+                    f"({', '.join(EXPECTED_KEYS[table])}), which every write's "
+                    "ON CONFLICT names"
+                )
+        return problems
 
     @staticmethod
     async def _read_server_version(conn) -> str | None:
@@ -315,89 +440,38 @@ class PostgresRunStore:
             return None
         return str(row[0]) if row else None
 
-    async def claim_slot(
-        self, run_id: str, *, model: str, ceiling: int, requested_by: str | None = None
-    ) -> RunRecord:
-        now = now_ms()
-        conn = await self._conn()
-        try:
-            await conn.set_autocommit(False)
-            async with conn.cursor() as cur:
-                # Serialise every ceiling check against every other one. Without
-                # this, two triggers both count 4 and both insert a 5th.
-                await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_CEILING_LOCK_ID,))
+    async def set_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        seq: int,
+        terminal: bool,
+        ts: int,
+        detail: str | None = None,
+        model: str = "",
+        job_run_id: str | None = None,
+    ) -> None:
+        """Report one status message: upsert the current row (seq-guarded) and
+        append it to history (deduped on run_id, seq). See :data:`REPORT_SQL`.
 
-                await cur.execute(
-                    f"SELECT COUNT(*) FROM {self._table} WHERE status NOT IN ({TERMINAL_SQL_LIST})"
-                )
-                active = int((await cur.fetchone())[0])
-                if active >= ceiling:
-                    await conn.rollback()
-                    raise SlotDenied(active, ceiling)
-
-                await cur.execute(
-                    f"""
-                    INSERT INTO {self._table}
-                        (run_id, job_run_id, model, status, detail,
-                         started_ts, updated_ts, requested_by)
-                    VALUES (%s, NULL, %s, %s, NULL, %s, %s, %s)
-                    ON CONFLICT (run_id) DO NOTHING
-                    """,
-                    (run_id, model, RunStatus.QUEUED, now, now, requested_by),
-                )
-                if cur.rowcount == 0:
-                    await conn.rollback()
-                    raise DuplicateRun(f"run_id {run_id!r} is already registered")
-            await conn.commit()
-        finally:
-            await conn.close()
-
-        return RunRecord(
-            run_id=run_id,
-            model=model,
-            status=RunStatus.QUEUED,
-            started_ts=now,
-            updated_ts=now,
-            requested_by=requested_by,
-        )
-
-    async def attach_job_run(self, run_id: str, job_run_id: str | int) -> None:
+        ``seq``, ``terminal`` and ``ts`` are the MESSAGE's, never this
+        process's — the guard compares the message's own clock.
+        """
         conn = await self._conn()
         try:
             await conn.execute(
-                f"UPDATE {self._table} SET job_run_id = %s, updated_ts = %s WHERE run_id = %s",
-                (str(job_run_id), now_ms(), run_id),
-            )
-        finally:
-            await conn.close()
-
-    async def release_slot(self, run_id: str) -> None:
-        conn = await self._conn()
-        try:
-            # Only a run that never started: never delete one that has begun
-            # reporting, or a late status write would resurrect a ghost row.
-            await conn.execute(
-                f"DELETE FROM {self._table} WHERE run_id = %s AND status = %s",
-                (run_id, RunStatus.QUEUED),
-            )
-        finally:
-            await conn.close()
-
-    async def set_status(self, run_id: str, status: str, *, detail: str | None = None) -> None:
-        value = str(status)
-        conn = await self._conn()
-        try:
-            await conn.execute(
-                f"""
-                INSERT INTO {self._table}
-                    (run_id, model, status, detail, started_ts, updated_ts)
-                VALUES (%s, '', %s, %s, %s, %s)
-                ON CONFLICT (run_id) DO UPDATE
-                SET status = EXCLUDED.status,
-                    detail = EXCLUDED.detail,
-                    updated_ts = EXCLUDED.updated_ts
-                """,
-                (run_id, value, detail, now_ms(), now_ms()),
+                self._report_sql,
+                {
+                    "run_id": run_id,
+                    "job_run_id": job_run_id,
+                    "model": model,
+                    "status": str(status),
+                    "terminal": bool(terminal),
+                    "detail": detail,
+                    "seq": int(seq),
+                    "ts": int(ts),
+                },
             )
         finally:
             await conn.close()
@@ -407,7 +481,7 @@ class PostgresRunStore:
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT {_COLUMNS} FROM {self._table} WHERE run_id = %s", (run_id,)
+                    f"SELECT {_COLUMNS} FROM {self._table} WHERE run_id = %s::text", (run_id,)
                 )
                 row = await cur.fetchone()
                 return RunRecord.from_row(_zip(row)) if row else None
@@ -428,35 +502,35 @@ class PostgresRunStore:
             async with conn.cursor() as cur:
                 await cur.execute(
                     f"SELECT {_COLUMNS} FROM {self._table} {where} "
-                    "ORDER BY updated_ts DESC LIMIT %s",
+                    "ORDER BY updated_at DESC LIMIT %s::bigint",
                     tuple(params),
                 )
                 return [RunRecord.from_row(_zip(r)) for r in await cur.fetchall()]
         finally:
             await conn.close()
 
-    async def active_count(self) -> int:
+    async def history(self, run_id: str) -> list[HistoryRecord]:
+        """Every reported transition for one run, in the order the job issued
+        them (``seq``). Empty for a run never reported, not an error."""
         conn = await self._conn()
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT COUNT(*) FROM {self._table} WHERE status NOT IN ({TERMINAL_SQL_LIST})"
+                    f"SELECT run_id, seq, status, terminal, ts, detail FROM {self._history} "
+                    "WHERE run_id = %s::text ORDER BY seq, id",
+                    (run_id,),
                 )
-                return int((await cur.fetchone())[0])
-        finally:
-            await conn.close()
-
-    async def non_terminal(self, limit: int = 200) -> list[RunRecord]:
-        conn = await self._conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    f"SELECT {_COLUMNS} FROM {self._table} "
-                    f"WHERE status NOT IN ({TERMINAL_SQL_LIST}) "
-                    f"ORDER BY updated_ts DESC LIMIT %s",
-                    (limit,),
-                )
-                return [RunRecord.from_row(_zip(r)) for r in await cur.fetchall()]
+                return [
+                    HistoryRecord(
+                        run_id=str(r[0]),
+                        seq=int(r[1]),
+                        status=str(r[2]),
+                        terminal=bool(r[3]),
+                        ts=int(r[4]),
+                        detail=r[5],
+                    )
+                    for r in await cur.fetchall()
+                ]
         finally:
             await conn.close()
 
@@ -464,16 +538,11 @@ class PostgresRunStore:
         return None
 
 
-_COLUMN_NAMES = (
-    "run_id",
-    "job_run_id",
-    "model",
-    "status",
-    "detail",
-    "started_ts",
-    "updated_ts",
-    "requested_by",
-)
+def _describe(column: Column) -> str:
+    return f"{column.data_type} {'NULL' if column.nullable else 'NOT NULL'}"
+
+
+_COLUMN_NAMES = tuple(EXPECTED_COLUMNS[STATUS_TABLE])
 _COLUMNS = ", ".join(_COLUMN_NAMES)
 
 
@@ -490,19 +559,9 @@ def _filters(*, status: str | None, model: str | None) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     if status:
-        clauses.append("status = %s")
+        clauses.append("status = %s::text")
         params.append(status)
     if model:
-        clauses.append("model = %s")
+        clauses.append("model = %s::text")
         params.append(model)
     return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
-
-
-# --------------------------------------------------------------------------
-# Warehouse (today's behaviour, kept so a deploy is never blocked on Lakebase)
-
-# The warehouse-backed store that used to live here is gone. It existed so a
-# deploy was never blocked on provisioning Lakebase; Lakebase is provisioned,
-# and v4 takes the SQL warehouse off the app's live path entirely. The
-# `RunStore` Protocol went with it — one implementation does not need an
-# interface, and the seam it was holding open is not one v4 wants.
