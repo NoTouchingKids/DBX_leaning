@@ -152,17 +152,6 @@ def test_terminality_is_published_as_a_field_not_inferred_from_a_list():
     assert set(schema["x-terminal-statuses"]) <= set(schema["x-platform-statuses"])
 
 
-def test_the_platform_statuses_cover_what_the_run_store_counts_as_active():
-    """The run store deals only in the platform's six, and its concurrency
-    ceiling turns on the terminal ones — so those two must not drift, even
-    though the wire is open."""
-    from server.store import TERMINAL_SQL_LIST
-
-    published = set(envelope_schema()["x-platform-statuses"])
-    for value in TERMINAL_SQL_LIST.replace("'", "").split(", "):
-        assert value in published
-
-
 # --- the RPC surface -------------------------------------------------------
 
 

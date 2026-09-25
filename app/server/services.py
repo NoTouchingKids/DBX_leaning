@@ -169,8 +169,8 @@ class ServiceHub:
         #: one is a socket registry, the other is the Databricks REST client.
         self.job_sockets = JobConnections()
         self.jobs_api: JobsApi | None = None
-        #: Run state. Postgres when Lakebase is configured, else the
-        #: warehouse-backed one — see app/server/store.py for why it moved.
+        #: Run state, in Lakebase. None when it is unconfigured, unreachable, or
+        #: its schema fails the startup check — see `degraded` for which.
         self.store: PostgresRunStore | None = None
         self.degraded: dict[str, str] = {}
         #: Where `config.job_ids` came from — "config" when DBX_JOB_IDS was
@@ -383,44 +383,51 @@ class ServiceHub:
         log.error(self.degraded["lakebase_identity"])
 
     async def _start_store(self, cfg: AppConfig) -> None:
-        """Pick the run store once, and say which one loudly.
+        """Connect to Lakebase once, CHECK its schema, and say what happened.
 
-        A deployment that thinks it is on Lakebase while silently running on
-        the warehouse would keep the concurrency race and the missing primary
-        key without anyone noticing.
+        **Nothing is created here.** The DDL (`lakebase_ddl/`) is applied out
+        of band — `docs/v5-implementation-plan.md`, Phase 2 item 3. A missing
+        or mismatched table is reported as `lakebase_schema` degraded, with
+        the reason, and the store stays None: every route needing it answers a
+        clean 503 carrying that reason, instead of a 500 from a failed query.
+        The check runs once, so applying the DDL means restarting the app.
         """
-        if cfg.lakebase_dsn:
-            self._check_lakebase_identity(cfg)
-            store = PostgresRunStore(
-                cfg.lakebase_dsn,
-                schema=cfg.lakebase_schema,
-                password_provider=self.token_provider,
+        if not cfg.lakebase_dsn:
+            self.degraded["store"] = (
+                "no run store: Lakebase is not configured. Triggering and streaming "
+                "still work; listing and reading past runs do not, because that is "
+                "where their status is recorded. See DBX_LAKEBASE_* in resources/app.yml"
             )
-            try:
-                await store.ensure_schema()
-            except Exception as exc:  # noqa: BLE001
-                self.degraded["lakebase"] = f"Lakebase configured but unreachable: {exc}"
-                log.error(self.degraded["lakebase"])
-            else:
-                self.store = store
-                version = getattr(store, "server_version", None)
-                log.info("run store: Lakebase (postgres %s)", version or "version unknown")
-                return
-
-            log.info(
-                "run store: SQL warehouse. No Lakebase configured, so the "
-                "concurrency ceiling is checked without a transaction and a "
-                "duplicate run_id is not refused — see app/server/store.py."
-            )
+            log.warning(self.degraded["store"])
             return
 
-        self.degraded["store"] = (
-            "no run store: Lakebase is not configured. Triggering and streaming "
-            "still work; listing and reading past runs do not, because that is "
-            "where the job records them. See DBX_LAKEBASE_* in resources/app.yml. "
-            "runs cannot be registered, listed or triggered"
+        self._check_lakebase_identity(cfg)
+        store = PostgresRunStore(
+            cfg.lakebase_dsn,
+            schema=cfg.lakebase_schema,
+            password_provider=self.token_provider,
         )
-        log.warning(self.degraded["store"])
+        try:
+            problems = await store.check_schema()
+        except Exception as exc:  # noqa: BLE001
+            self.degraded["lakebase"] = f"Lakebase configured but unreachable: {exc}"
+            log.error(self.degraded["lakebase"])
+            return
+
+        version = store.server_version or "version unknown"
+        if problems:
+            self.degraded["lakebase_schema"] = (
+                f"Lakebase is reachable (postgres {version}) but its schema is not what "
+                f"this app expects, so run state is unavailable: {'; '.join(problems)}. "
+                "The app creates no tables: apply lakebase_ddl/001_run_status.sql and "
+                "lakebase_ddl/002_run_status_history.sql (deploy/README.md), then "
+                "restart the app"
+            )
+            log.error(self.degraded["lakebase_schema"])
+            return
+
+        self.store = store
+        log.info("run store: Lakebase (postgres %s), schema %s checked", version, store.schema)
 
     async def shutdown(self) -> None:
         for task in tuple(self._status_tasks):
@@ -466,7 +473,14 @@ class ServiceHub:
             # Bound above, not re-read here: the None-check happens now, the
             # await happens later, and the attribute could have changed.
             try:
-                await store.set_status(run_id, msg.status, detail=msg.detail)
+                await store.set_status(
+                    run_id,
+                    msg.status,
+                    seq=msg.seq,
+                    terminal=msg.terminal,
+                    ts=msg.ts,
+                    detail=msg.detail,
+                )
                 self.status_writes += 1
             except Exception:  # noqa: BLE001 - the durable record still stands
                 log.warning(

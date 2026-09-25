@@ -82,9 +82,18 @@ databricks database create-database-instance dbx-leaning --capacity CU_1
 # waits for AVAILABLE by default; note `read_write_dns` in the output
 databricks database get-database-instance dbx-leaning -o json
 
-psql "host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslmode=require" \
-  -f lakebase_ddl/001_run_status.sql
+PG="host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslmode=require"
+psql "$PG" -v ON_ERROR_STOP=1 -f lakebase_ddl/001_run_status.sql
+psql "$PG" -v ON_ERROR_STOP=1 -f lakebase_ddl/002_run_status_history.sql
 ```
+
+**Both files, in order, and by hand — the app will not do it.** Neither the
+app nor a job creates or alters anything in Postgres
+(`docs/v5-implementation-plan.md`, Phase 2 item 3). The app *checks* at
+startup that both tables exist with the columns it expects and, if not,
+reports `degraded: lakebase_schema` on `/healthz` with what is missing — see
+"Applying the Lakebase schema" below for the grants and for replacing an older
+table.
 
 `databricks database` is Public Preview and its flags may move; check
 `databricks database create-database-instance --help` if the above is refused.
@@ -106,14 +115,14 @@ the DDL below.
 **And it cannot be changed afterwards.** There is no `pg_version` flag on
 `update-database-instance` either. Moving an existing instance to another
 major means deleting it and creating a new one — cheap while it has not
-served a run, since `run_status` is the only table here and `ensure_schema()`
-rebuilds it at startup. No telemetry lives in Postgres; that is all in Delta.
+served a run: re-apply the two DDL files to the new instance. No telemetry
+lives in Postgres; that is all in Delta.
 The DNS name changes, so redeploy with the new `--var="lakebase_host=..."`.
 
-**Nothing here needs a particular version.** `lakebase_ddl/001_run_status.sql`
-uses primary keys, `ON CONFLICT`, advisory locks and a partial index, none of
-which changed between 16 and 18. Rather than assert what a deployment got,
-the app reads it: `PostgresRunStore.ensure_schema()` runs `SHOW
+**Nothing here needs a particular version.** `lakebase_ddl/` uses primary
+keys, `ON CONFLICT ... WHERE`, a data-modifying CTE and a partial index, none
+of which changed between 16 and 18. Rather than assert what a deployment got,
+the app reads it: `PostgresRunStore.check_schema()` runs `SHOW
 server_version` on the connection it already has open, and `GET /healthz`
 returns it:
 
@@ -125,48 +134,85 @@ returns it:
 while silently running on the warehouse store keeps the concurrency race and
 the missing primary key, and this is what makes that visible.
 
-The app applies that schema at startup too, but a deploy that cannot reach the
-instance reports `degraded: lakebase` rather than failing — so do not use
-startup as proof the schema is there.
+### Applying the Lakebase schema
 
-### `run_status` lives in `dbx_leaning`, not `public`
+Two tables, two files, applied out of band — by you with `psql`, or by a
+deploy step you add — and **never** by the app or a job starting up:
 
-Both the DDL file and `ensure_schema()` create a schema first:
+| File | Table | What it holds |
+|---|---|---|
+| `lakebase_ddl/001_run_status.sql` | `dbx_leaning.run_status` | current state, one row per run |
+| `lakebase_ddl/002_run_status_history.sql` | `dbx_leaning.run_status_history` | every reported transition, append-only |
 
-```sql
-CREATE SCHEMA IF NOT EXISTS dbx_leaning;
-CREATE TABLE IF NOT EXISTS dbx_leaning.run_status (...);
+```bash
+PG="host=<read_write_dns> port=5432 dbname=databricks_postgres user=<you> sslmode=require"
+psql "$PG" -v ON_ERROR_STOP=1 -f lakebase_ddl/001_run_status.sql
+psql "$PG" -v ON_ERROR_STOP=1 -f lakebase_ddl/002_run_status_history.sql
 ```
 
+Both are idempotent. At startup the app reads `information_schema` and
+compares what it finds against `app/server/store.py`'s `EXPECTED_COLUMNS` and
+`EXPECTED_KEYS`. A missing table, a missing or retyped column, or a missing
+`(run_id)` / `(run_id, seq)` key is reported on `/healthz` as
+
+    degraded: lakebase_schema — Lakebase is reachable (postgres 16.x) but its
+    schema is not what this app expects ...: dbx_leaning.run_status_history
+    does not exist (apply lakebase_ddl/002_run_status_history.sql) ...
+
+and every route that needs run state answers 503 with the same reason. The
+check runs once, at startup: **after applying the DDL, restart the app**
+(`databricks bundle run app`, or stop/start it) for it to be picked up. An
+extra column is not a mismatch — adding one ahead of the app that reads it is
+how an additive migration goes.
+
+**Replacing a pre-v5 `run_status`.** `CREATE TABLE IF NOT EXISTS` leaves an
+existing table alone, so an instance that already has the older shape
+(`started_ts`, `updated_ts`, `requested_by`) keeps it and `/healthz` reports
+`has no column terminal`, `seq`, `updated_at`. The row is a mirror of status
+messages whose record of truth is the job's telemetry, so drop and re-apply
+rather than migrate:
+
+```sql
+DROP TABLE dbx_leaning.run_status;  -- then re-run 001 (and 002) above
+```
+
+**Grants.** Whoever applies the DDL owns the tables. If that is you rather
+than the app's service principal, grant it what it uses — the app reads both
+tables and, until the job becomes the sole writer, writes them too (the
+history append needs the `id` sequence):
+
+```sql
+GRANT USAGE ON SCHEMA dbx_leaning TO "<sp-application-id>";
+GRANT SELECT, INSERT, UPDATE ON dbx_leaning.run_status TO "<sp-application-id>";
+GRANT SELECT, INSERT ON dbx_leaning.run_status_history TO "<sp-application-id>";
+GRANT USAGE ON SEQUENCE dbx_leaning.run_status_history_id_seq TO "<sp-application-id>";
+```
+
+The check itself needs no more than that: `information_schema` shows a role
+the columns and constraints of tables it holds privileges on.
+
+### The tables live in `dbx_leaning`, not `public`
+
 This is not tidiness. **Since PostgreSQL 15, `public` no longer grants CREATE
-to `PUBLIC`**, so a role that does not own the database — which the app's
-service principal generally does not — gets `permission denied for schema
-public` the first time the app applies its DDL. The app would come up
-reporting `degraded: lakebase` for a reason nobody would guess from the
-message. Every statement in `app/server/store.py` qualifies the table too,
-rather than setting a `search_path`: the store opens a connection per
-operation, and a search path that silently reverted to `public` would find a
-*different, empty* table instead of failing.
+to `PUBLIC`**, so a role that does not own the database gets `permission
+denied for schema public`. Every statement in `app/server/store.py` qualifies
+the table too, rather than setting a `search_path`: the store opens a
+connection per operation, and a search path that silently reverted to `public`
+would find a *different, empty* table instead of failing.
 
 The name is `databricks.yml`'s `lakebase_schema` (and `DBX_LAKEBASE_SCHEMA` in
-`app/app.yaml`); `tests/deploy/test_app_yaml.py` keeps the two equal.
+`app/app.yaml`); `tests/deploy/test_app_yaml.py` keeps the two equal. The DDL
+files say `dbx_leaning`; a deployment on another name applies them with that
+name substituted.
 
-**Creating a schema needs CREATE on the database**, which Postgres grants to
-the owner and not to `PUBLIC`. If the app reports
-
-    degraded: lakebase — permission denied for database databricks_postgres
-
-then the service principal cannot create it, and the fix is to create it once
-as the instance owner and hand it over:
+**Creating the schema needs CREATE on the database**, which Postgres grants to
+the owner and not to `PUBLIC` — so apply the DDL as the instance owner. To
+have the service principal own the schema instead of granting to it, create
+it first and hand it over:
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS dbx_leaning AUTHORIZATION "<sp-application-id>";
 ```
-
-Owning the schema is what lets `ensure_schema()` stay idempotent on every
-subsequent start. If handing over ownership is not wanted, grant instead —
-`GRANT USAGE, CREATE ON SCHEMA dbx_leaning TO "<sp-application-id>"` — which
-is enough for the table and index DDL that follows.
 
 The role name is the service principal's **application id**, the same value as
 `lakebase_user` and `oauth_client_id`. Lakebase names the role after the
@@ -388,9 +434,9 @@ declared resource is validated at *deploy* time, so naming an instance that
 does not exist fails the whole deploy — the trap `oauth-client-secret` fell
 into once. Uncomment it when the instance exists, and note that
 `instance_name` is the instance's **name**, not the `read_write_dns` hostname
-that `lakebase_host` takes. Its `CAN_CONNECT_AND_CREATE` is also what lets
-`ensure_schema()` issue `CREATE SCHEMA`, which Postgres allows the database
-owner alone.
+that `lakebase_host` takes. `CAN_CONNECT_AND_CREATE` is the only permission
+that resource offers; the app no longer creates anything with it — the schema
+is applied out of band (see "Applying the Lakebase schema").
 
 ### Running as your own service principal
 
@@ -590,10 +636,10 @@ fails; it simply stops being the design in `CLAUDE.md`. `GET /healthz` reports
 which store is live and `app/server/services.py` logs it at startup, which is what
 keeps that from being silent.
 
-Apply `lakebase_ddl/001_run_status.sql` before the first run. The app applies
-it at startup too, but a deploy that cannot reach the instance reports
-`degraded: lakebase` rather than failing, so do not rely on that to tell you
-the schema is there.
+Apply `lakebase_ddl/001_run_status.sql` and `002_run_status_history.sql`
+before the first run — the app does not apply them; it reports
+`degraded: lakebase_schema` until they are there, and needs a restart after
+(see "Applying the Lakebase schema").
 
 ### Running as a service principal you granted yourself
 

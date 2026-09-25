@@ -64,7 +64,7 @@ models/                One installable distribution per model, each with its own
                        dependencies and one entry point. See models/README.md
                        for the duck-typed contract a model has to satisfy.
 uc_ddl/                Unity Catalog DDL (telemetry), idempotent, apply in order
-lakebase_ddl/          Postgres DDL (run state) — applied at startup too
+lakebase_ddl/          Postgres DDL (run state) — applied out of band, checked at startup
 databricks.yml         Asset bundle: eleven jobs (one per model) and the app
 resources/             One job file per model — the microservice boundary
 deploy/                Generated per-model requirements + the deployment guide

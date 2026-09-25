@@ -154,10 +154,9 @@ variables:
 
       NOT `public`: since PostgreSQL 15 that schema grants no CREATE to
       PUBLIC, so a service principal that does not own the database gets
-      `permission denied for schema public` the first time the app applies
-      its DDL, and /healthz reports `lakebase` degraded for a reason nobody
-      expects. The app creates this schema itself at startup
-      (lakebase_ddl/001_run_status.sql is the same DDL, reviewable).
+      `permission denied for schema public`. The app creates nothing here:
+      lakebase_ddl/*.sql is applied out of band (deploy/README.md), and the
+      app checks at startup that it was.
     default: dbx_leaning
   # There is deliberately NO lakebase_password variable, and there never will
   # be one. An instance created with `enable_pg_native_login: false` — the
