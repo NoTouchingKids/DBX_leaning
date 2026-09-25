@@ -13,7 +13,19 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from shared.rpc import ErrorCode, Method, notification, request
+from shared.rpc import PROTOCOL_VERSION, ErrorCode, Method, notification, request
+
+
+def _hello(ws, run_id="r1", version=PROTOCOL_VERSION, id=1, **params):
+    """Say hello the way a conforming job does, and return the parsed reply.
+
+    Every session has to: the app processes nothing else until a `hello` has
+    passed the version check."""
+    body = {"run_id": run_id, "next_seq": 0, "capabilities": {}, **params}
+    if version is not None:
+        body["protocol_version"] = version
+    ws.send_text(request(Method.HELLO, body, id=id))
+    return json.loads(ws.receive_text())
 
 
 def _client(app_and_hub, **cfg_kw):
@@ -45,11 +57,108 @@ def _msg(seq, run_id="r1", **extra):
 def test_a_job_attaches_says_hello_and_is_acknowledged(app_and_hub):
     client, hub = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
-        ws.send_text(request(Method.HELLO, {"run_id": "r1", "next_seq": 4000}, id=1))
-        reply = json.loads(ws.receive_text())
+        assert not hub.job_sockets.is_connected("r1"), "reachable before hello"
+        reply = _hello(ws, next_seq=4000)
         assert reply["id"] == 1
         assert reply["result"]["observed"] is True
         assert hub.job_sockets.is_connected("r1")
+
+
+def test_hello_is_answered_with_the_apps_version_and_capabilities(app_and_hub):
+    """LSP's `initialize` exchange: each side learns the other's version and
+    which methods it answers."""
+    client, _ = _client(app_and_hub)
+    with client.websocket_connect("/ws/job/r1") as ws:
+        result = _hello(ws)["result"]
+    assert result["protocol_version"] == PROTOCOL_VERSION
+    assert isinstance(result["capabilities"], dict)
+    assert {Method.TELEMETRY, Method.PING} <= set(result["capabilities"])
+
+
+_MAJOR, _MINOR = (int(x) for x in PROTOCOL_VERSION.split("."))
+
+
+@pytest.mark.parametrize("job_version", [f"{_MAJOR}.0", PROTOCOL_VERSION])
+def test_a_job_at_the_same_major_and_an_equal_or_lower_minor_is_accepted(app_and_hub, job_version):
+    client, hub = _client(app_and_hub)
+    with client.websocket_connect("/ws/job/r1") as ws:
+        reply = _hello(ws, version=job_version)
+        assert "result" in reply, reply
+        assert hub.job_sockets.is_connected("r1")
+
+
+@pytest.mark.parametrize(
+    "job_version,code",
+    [
+        # A newer minor may send something this app has never heard of in a
+        # way that matters; that is exactly what MINOR <= app MINOR rules out.
+        (f"{_MAJOR}.{_MINOR + 1}", ErrorCode.INCOMPATIBLE_VERSION),
+        (f"{_MAJOR + 1}.0", ErrorCode.INCOMPATIBLE_VERSION),
+        (f"{_MAJOR + 1}.{_MINOR}", ErrorCode.INCOMPATIBLE_VERSION),
+        # Well-formed or nothing: the app cannot judge what it cannot read.
+        ("1", ErrorCode.INVALID_PARAMS),
+        ("v1.0", ErrorCode.INVALID_PARAMS),
+        ("1.0.0", ErrorCode.INVALID_PARAMS),
+        (1.0, ErrorCode.INVALID_PARAMS),
+    ],
+)
+def test_an_incompatible_or_unreadable_version_is_refused_and_closed(
+    app_and_hub, job_version, code
+):
+    """Refused with a JSON-RPC error the job can log, then closed with a
+    reason — and never registered, so the app cannot send cancel or replay to
+    a job whose protocol it has just declined to speak."""
+    from starlette.websockets import WebSocketDisconnect
+
+    client, hub = _client(app_and_hub)
+    with client.websocket_connect("/ws/job/r1") as ws:
+        reply = _hello(ws, version=job_version)
+        assert reply["error"]["code"] == code
+        assert reply["error"]["data"]["app_protocol_version"] == PROTOCOL_VERSION
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+        assert closed.value.code == 1008
+        assert "hello refused" in closed.value.reason
+    assert not hub.job_sockets.is_connected("r1")
+
+
+def test_a_hello_without_a_version_is_refused(app_and_hub):
+    """The field is mandatory. A version the job did not send is not one the
+    app can quietly assume — that is how an unenforced number becomes
+    decoration."""
+    from starlette.websockets import WebSocketDisconnect
+
+    client, hub = _client(app_and_hub)
+    with client.websocket_connect("/ws/job/r1") as ws:
+        reply = _hello(ws, version=None)
+        assert reply["error"]["code"] == ErrorCode.INVALID_PARAMS
+        assert "protocol_version" in reply["error"]["message"]
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()
+    assert not hub.job_sockets.is_connected("r1")
+
+
+def test_nothing_is_processed_before_hello(app_and_hub):
+    """The version gate is only a gate if nothing gets round it: a request
+    before `hello` is refused by name, telemetry before it is dropped, and the
+    socket survives both so a late hello still attaches."""
+    client, hub = _client(app_and_hub)
+    seen = []
+    hub.ingest = lambda run_id, msg: seen.append(msg) or _noop()
+
+    with client.websocket_connect("/ws/job/r1") as ws:
+        ws.send_text(notification(Method.TELEMETRY, {"run_id": "r1", "messages": [_msg(0)]}))
+        ws.send_text(request(Method.PING, {}, id=5))
+        reply = json.loads(ws.receive_text())
+        assert reply["id"] == 5
+        assert reply["error"]["code"] == ErrorCode.INVALID_REQUEST
+        assert "hello" in reply["error"]["message"]
+
+        assert "result" in _hello(ws, id=6)
+        ws.send_text(request(Method.PING, {}, id=7))
+        assert json.loads(ws.receive_text())["result"]["pong"] is True
+
+    assert seen == [], "telemetry got past the version gate"
 
 
 def test_telemetry_is_ingested_and_never_acknowledged(app_and_hub):
@@ -61,6 +170,7 @@ def test_telemetry_is_ingested_and_never_acknowledged(app_and_hub):
     hub.ingest = lambda run_id, msg: seen.append(msg) or _noop()
 
     with client.websocket_connect("/ws/job/r1") as ws:
+        _hello(ws)
         ws.send_text(
             notification(Method.TELEMETRY, {"run_id": "r1", "messages": [_msg(0), _msg(1)]})
         )
@@ -78,6 +188,58 @@ async def _noop():
     return None
 
 
+def test_one_unreadable_record_costs_only_itself(app_and_hub):
+    """The parse boundary is per record, and nothing on it is fatal.
+
+    A `type` from a newer minor version, a record that is not even an object,
+    a known type missing a required field, and a record with no `type` at all
+    are each skipped — logged, not raised — and every other record in the SAME
+    batch is still ingested. The socket survives it all. Nothing is lost: the
+    volume has every record.
+    """
+    client, hub = _client(app_and_hub)
+    seen = []
+    hub.ingest = lambda run_id, msg: seen.append(msg) or _noop()
+
+    batch = [
+        _msg(0),
+        {"type": "metric", "run_id": "r1", "seq": 1, "ts": 1, "name": "x"},
+        "not a record",
+        {"type": "log", "run_id": "r1", "seq": 3, "ts": 3},  # no `message`
+        {"run_id": "r1", "seq": 4, "ts": 4},  # no `type` at all
+        _msg(5),
+    ]
+    with client.websocket_connect("/ws/job/r1") as ws:
+        _hello(ws)
+        ws.send_text(notification(Method.TELEMETRY, {"run_id": "r1", "messages": batch}))
+        ws.send_text(request(Method.PING, {}, id=9))
+        assert json.loads(ws.receive_text())["result"]["pong"] is True, "the socket died"
+
+    assert [m.seq for m in seen] == [0, 5]
+
+
+def test_a_field_this_app_does_not_know_is_ignored_not_fatal(app_and_hub):
+    """`extra="ignore"`: a newer minor may add an optional field, and this
+    app still reads the record it is on — minus the field."""
+    client, hub = _client(app_and_hub)
+    seen = []
+    hub.ingest = lambda run_id, msg: seen.append(msg) or _noop()
+
+    with client.websocket_connect("/ws/job/r1") as ws:
+        _hello(ws)
+        ws.send_text(
+            notification(
+                Method.TELEMETRY,
+                {"run_id": "r1", "messages": [_msg(0, severity_score=0.7)]},
+            )
+        )
+        ws.send_text(request(Method.PING, {}, id=2))
+        json.loads(ws.receive_text())
+
+    assert [m.seq for m in seen] == [0]
+    assert not hasattr(seen[0], "severity_score")
+
+
 def test_a_message_for_another_run_is_refused(app_and_hub):
     """A job on one socket must not be able to write into another run's
     stream, however it came by the wrong id."""
@@ -86,6 +248,7 @@ def test_a_message_for_another_run_is_refused(app_and_hub):
     hub.ingest = lambda run_id, msg: seen.append(msg) or _noop()
 
     with client.websocket_connect("/ws/job/r1") as ws:
+        _hello(ws)
         ws.send_text(
             notification(
                 Method.TELEMETRY,
@@ -102,6 +265,7 @@ def test_a_malformed_frame_gets_an_error_rather_than_closing_the_socket(app_and_
     """One bad frame must not cost a run its live channel."""
     client, _ = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
+        _hello(ws)
         ws.send_text("{not json")
         reply = json.loads(ws.receive_text())
         assert reply["error"]["code"] == ErrorCode.PARSE_ERROR
@@ -113,6 +277,7 @@ def test_a_malformed_frame_gets_an_error_rather_than_closing_the_socket(app_and_
 def test_an_unknown_method_is_refused_by_name(app_and_hub):
     client, _ = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
+        _hello(ws)
         ws.send_text(request("escalate", {}, id=3))
         reply = json.loads(ws.receive_text())
         assert reply["error"]["code"] == ErrorCode.METHOD_NOT_FOUND
@@ -258,7 +423,8 @@ def test_a_job_socket_needs_no_credential_from_the_app(app_and_hub):
     """
     client, hub = _client(app_and_hub)
     with client.websocket_connect("/ws/job/r1") as ws:
-        ws.send_text(request(Method.PING, {}, id=1))
+        _hello(ws)
+        ws.send_text(request(Method.PING, {}, id=2))
         assert json.loads(ws.receive_text())["result"]["pong"] is True
         assert hub.job_sockets.is_connected("r1")
 

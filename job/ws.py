@@ -12,8 +12,10 @@ A run with no live channel at all is not degraded; it is Tuesday.
 
 What it does:
 
-  * connects, says `hello` with the seq it is picking up from, and streams
-    `telemetry` notifications in batches;
+  * connects, says `hello` with the seq it is picking up from and its
+    protocol version, waits for the app to accept it, and then streams
+    `telemetry` notifications in batches. A refused `hello` means the run goes
+    unobserved — logged once, never retried, never a run failure;
   * answers `cancel`, `replay` and `ping` requests from the app;
   * reconnects with backoff, counting CONSECUTIVE failures and resetting on
     every success — a naive "give up after N" would kill a healthy channel
@@ -33,6 +35,7 @@ from collections.abc import Callable
 from typing import Any
 
 from shared.rpc import (
+    PROTOCOL_VERSION,
     ErrorCode,
     Method,
     Request,
@@ -48,6 +51,32 @@ from shared.rpc import (
 log = logging.getLogger(__name__)
 
 __all__ = ["RpcClient", "app_client", "diagnose", "ws_url_for"]
+
+#: The methods this job answers, sent in `hello`'s params. LSP-style: a key
+#: per method, its value that method's options (none yet).
+JOB_CAPABILITIES: dict[str, dict[str, Any]] = {
+    Method.CANCEL: {},
+    Method.REPLAY: {},
+    Method.PING: {},
+}
+
+#: How long to wait for the app to answer `hello` before treating the attempt
+#: as an ordinary failed connection (and retrying on the usual backoff).
+DEFAULT_HELLO_TIMEOUT_S = 10.0
+
+
+class HelloRejected(Exception):
+    """The app answered `hello` with an error: it will not observe this job.
+
+    Final, not transient — typically a protocol version outside the app's
+    compatibility rule, which no amount of reconnecting changes. The run goes
+    on unobserved and fully durable.
+    """
+
+    def __init__(self, error: dict[str, Any]) -> None:
+        super().__init__(error.get("message", "hello refused"))
+        self.error = error
+
 
 #: Outbound records waiting to be batched. Bounded on purpose: if the app
 #: cannot keep up, the right thing is to drop live commentary, not to grow
@@ -219,6 +248,7 @@ class RpcClient:
         batch_max: int = DEFAULT_BATCH_MAX,
         max_failures: int = DEFAULT_MAX_FAILURES,
         backoff_s: float = 1.0,
+        hello_timeout_s: float = DEFAULT_HELLO_TIMEOUT_S,
     ) -> None:
         self.url = url
         self.run_id = run_id
@@ -229,6 +259,7 @@ class RpcClient:
         self._batch_max = batch_max
         self._max_failures = max_failures
         self._backoff_s = backoff_s
+        self._hello_timeout_s = hello_timeout_s
 
         self._q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_max)
         self._stop = threading.Event()
@@ -239,6 +270,8 @@ class RpcClient:
         self.dropped = 0
         self.connects = 0
         self.last_error: str | None = None
+        #: The app's error object if it refused our `hello`; None otherwise.
+        self.rejected: dict[str, Any] | None = None
 
     # --- what the harness calls -------------------------------------------
 
@@ -286,6 +319,19 @@ class RpcClient:
                     self.connects += 1
                     failures = 0  # CONSECUTIVE — reset on every success
                     self._session(ws)
+            except HelloRejected as exc:
+                # NOT a run failure and NOT a reason to retry: the app has said
+                # it will not observe this job, and reconnecting would get the
+                # same answer forever. Say why, once, and stop.
+                self.rejected = exc.error
+                self.last_error = f"hello refused: {exc.error}"
+                log.warning(
+                    "the app refused this job's hello (protocol %s): %s — the run "
+                    "continues UNOBSERVED and fully durable; no further attempts",
+                    PROTOCOL_VERSION,
+                    exc.error,
+                )
+                return
             except Exception as exc:  # noqa: BLE001 - a dead channel is normal
                 failures += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
@@ -299,13 +345,20 @@ class RpcClient:
                 self._stop.wait(min(30.0, self._backoff_s * failures))
 
     def _session(self, ws: Any) -> None:
+        hello_id = self._id()
         ws.send(
             request(
                 Method.HELLO,
-                {"run_id": self.run_id, "next_seq": self._next_seq()},
-                id=self._id(),
+                {
+                    "run_id": self.run_id,
+                    "next_seq": self._next_seq(),
+                    "protocol_version": PROTOCOL_VERSION,
+                    "capabilities": JOB_CAPABILITIES,
+                },
+                id=hello_id,
             )
         )
+        self._await_hello(ws, hello_id)
         while not self._stop.is_set():
             self._drain(ws)
             self._pump_inbound(ws)
@@ -315,6 +368,42 @@ class RpcClient:
             ws.send(notification(Method.BYE, {"run_id": self.run_id}))
         except Exception:  # noqa: BLE001 - a clean goodbye is a courtesy
             log.debug("could not say bye", exc_info=True)
+
+    def _await_hello(self, ws: Any, hello_id: int) -> None:
+        """Wait for the app's answer to `hello` before streaming anything.
+
+        The app processes nothing until `hello` is accepted, and closes the
+        socket if it is refused — so sending telemetry first would race that
+        close and turn a final refusal into an ordinary dropped connection,
+        retried forever. Raises `HelloRejected` on an error reply; a timeout
+        raises `TimeoutError`, which the outer loop counts as a normal failure.
+        """
+        deadline = time.monotonic() + self._hello_timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"app did not answer hello in {self._hello_timeout_s}s")
+            if self._stop.is_set():
+                raise TimeoutError("stopped before the app answered hello")
+            try:
+                raw = ws.recv(timeout=min(remaining, 0.1))
+            except TimeoutError:
+                continue
+            try:
+                frame = parse(raw)
+            except RpcError as exc:
+                ws.send(failure(None, exc))
+                continue
+            if not isinstance(frame, Response):
+                self._handle(ws, frame)
+                continue
+            if frame.id != hello_id:
+                continue
+            if frame.error is not None:
+                raise HelloRejected(frame.error)
+            result = frame.result if isinstance(frame.result, dict) else {}
+            log.info("attached to the app (app protocol %s)", result.get("protocol_version"))
+            return
 
     def _drain(self, ws: Any) -> None:
         """Coalesce queued records into one `telemetry` notification."""
@@ -344,7 +433,7 @@ class RpcClient:
             return
 
         if isinstance(frame, Response):
-            return  # our own hello's ack; nothing to do with it yet
+            return  # hello's ack was consumed by _await_hello; nothing else is ours
         self._handle(ws, frame)
 
     def _handle(self, ws: Any, req: Request) -> None:

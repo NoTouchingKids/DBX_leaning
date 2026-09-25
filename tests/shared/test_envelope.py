@@ -57,11 +57,40 @@ def test_messages_are_frozen():
         m.seq = 99
 
 
-def test_unknown_fields_are_rejected_not_silently_dropped():
+def test_building_a_message_with_an_unknown_field_fails_loudly():
     # A model inventing its own field is the drift this contract exists to
-    # prevent; it should fail loudly at the boundary.
-    with pytest.raises(ValidationError):
+    # prevent; it should fail loudly where the message is BUILT, in the job.
+    with pytest.raises(ValueError, match="severity"):
         make_message("log", run_id="r", seq=0, message="x", severity="high")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "log", "message": "x", "severity": "high"},
+        {"type": "progress", "elapsed_seconds": 1.0, "eta_seconds": 30},
+        {"type": "status", "status": "RUNNING", "reason_code": 7},
+        {"type": "result", "row_count": 1, "checksum": "abc"},
+    ],
+    ids=lambda p: p["type"],
+)
+def test_reading_a_message_ignores_fields_this_version_does_not_know(payload):
+    """Tolerant on read: a newer minor version may add an optional field, and
+    an older reader keeps the record and drops the field rather than
+    rejecting the whole thing."""
+    m = MessageAdapter.validate_python({"run_id": "r", "seq": 1, "ts": 1, **payload})
+    extra = next(k for k in payload if k not in type(m).model_fields)
+    assert not hasattr(m, extra)
+    assert extra not in m.model_dump()
+
+
+def test_reading_is_tolerant_of_extras_but_not_of_missing_or_wrong_fields():
+    with pytest.raises(ValidationError):
+        MessageAdapter.validate_python({"type": "log", "run_id": "r", "seq": 1, "ts": 1})
+    with pytest.raises(ValidationError):
+        MessageAdapter.validate_python(
+            {"type": "result", "run_id": "r", "seq": 1, "ts": 1, "row_count": -1}
+        )
 
 
 def test_seq_and_ts_cannot_go_negative():
