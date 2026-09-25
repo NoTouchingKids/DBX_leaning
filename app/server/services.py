@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from shared.envelope import Message, StatusMessage
+from shared.envelope import Message
 from shared.rpc import Response, RpcError, request
 from shared.tables import TableSet
 
@@ -206,8 +206,6 @@ class ServiceHub:
         #: static token it was given.
         self.token_provider = None
         self.messages_ingested = 0
-        self.status_writes = 0
-        self._status_tasks: set[asyncio.Task] = set()
 
     async def startup(self) -> None:
         cfg = self.config
@@ -566,10 +564,6 @@ class ServiceHub:
 
     async def shutdown(self) -> None:
         await self._stop_discovery_refresh()
-        for task in tuple(self._status_tasks):
-            task.cancel()
-        if self._status_tasks:
-            await asyncio.gather(*self._status_tasks, return_exceptions=True)
         if self.jobs_api is not None:
             await self.jobs_api.close()
         if self.store is not None:
@@ -580,56 +574,12 @@ class ServiceHub:
         channel it came in on. WS and HTTP push must not diverge."""
         self.messages_ingested += 1
         await self.broadcaster.publish(run_id, msg)
-        if isinstance(msg, StatusMessage):
-            self._persist_status(run_id, msg)
-
-    def _persist_status(self, run_id: str, msg: StatusMessage) -> None:
-        """Reflect a lifecycle transition into ``run_status``.
-
-        The ``run_status`` row is a point-lookup mirror, not the record of
-        truth: the job's own ``run_events`` in Delta is, and it is written
-        whether or not this runs. This keeps the mirror current while the app
-        is up and a socket is attached. When either is not, the row simply
-        lags — **nothing repairs it later.** The startup reconciliation that
-        once did was removed in the v3→v4 cut (see ``startup()``), and has
-        not been replaced. Phase 2 of ``docs/v5-implementation-plan.md`` moves
-        this write into the job, which is present for every run, and deletes
-        this method.
-
-        Off the ingest path deliberately: a Lakebase connection can take
-        seconds to open from cold, and blocking the job's socket on that would
-        make the app the thing a run depends on. It is a couple of statements
-        per run (RUNNING, then terminal), not a loop.
-        """
-        store = self.store
-        if store is None:
-            return
-
-        async def write() -> None:
-            # Bound above, not re-read here: the None-check happens now, the
-            # await happens later, and the attribute could have changed.
-            try:
-                await store.set_status(
-                    run_id,
-                    msg.status,
-                    seq=msg.seq,
-                    terminal=msg.terminal,
-                    ts=msg.ts,
-                    detail=msg.detail,
-                )
-                self.status_writes += 1
-            except Exception:  # noqa: BLE001 - the durable record still stands
-                log.warning(
-                    "could not update run_status for %s -> %s; run_events in Delta is "
-                    "now the only record of it, and nothing retries this write",
-                    run_id,
-                    msg.status,
-                    exc_info=True,
-                )
-
-        task = asyncio.create_task(write(), name=f"run-status-{run_id}")
-        self._status_tasks.add(task)
-        task.add_done_callback(self._status_tasks.discard)
+        # No write to `run_status` here, and that is the point of v5 Phase 2.
+        # The JOB writes its own status row (job/lakebase.py, from the
+        # harness's controller thread) for every run, observed or not — so
+        # the app is a reader of that table and never a second writer to the
+        # same row. A status message arriving here is a notification for the
+        # SSE stream, nothing more.
 
 
 def _now() -> str:

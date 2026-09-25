@@ -552,11 +552,15 @@ async def test_startup_attaches_the_store_when_the_schema_checks_out(postgres, a
     assert health["store"]["server_version"]
 
 
-async def test_an_ingested_status_message_reaches_both_tables(postgres, app_and_hub, config):
-    """The app-side writer, until Track C deletes it: seq, terminal and ts come
-    from the StatusMessage, not from the app."""
-    import asyncio
+async def test_the_app_never_writes_run_status_it_only_reads_it(postgres, app_and_hub, config):
+    """v5 Phase 2 item 5: the job is the sole writer of `run_status`.
 
+    An ingested status message is a notification for the SSE stream and
+    writes nothing — two writers to one row is the bug Phase 2 exists to
+    remove. The rows the job writes (`job/lakebase.py`, stood in for here by
+    the same shared statement via `store.set_status`) are what the listing and
+    history routes serve.
+    """
     from shared.envelope import StatusMessage
 
     await apply_ddl(postgres, schema="ingest_path")
@@ -565,11 +569,10 @@ async def test_an_ingested_status_message_reaches_both_tables(postgres, app_and_
     await hub._start_store(cfg)
 
     await hub.ingest("r1", StatusMessage(run_id="r1", seq=3, ts=77, status="RUNNING"))
-    await hub.ingest(
-        "r1",
-        StatusMessage(run_id="r1", seq=9, ts=88, status="INFEASIBLE", terminal=True),
-    )
-    await asyncio.gather(*hub._status_tasks)
+    assert await hub.store.get("r1") is None, "the app wrote run_status"
+
+    await hub.store.set_status("r1", "RUNNING", seq=3, terminal=False, ts=77)
+    await hub.store.set_status("r1", "INFEASIBLE", seq=9, terminal=True, ts=88)
 
     record = await hub.store.get("r1")
     assert (record.status, record.terminal, record.seq, record.updated_at) == (

@@ -383,6 +383,13 @@ class PostgresRunStore:
 
         ``seq``, ``terminal`` and ``ts`` are the MESSAGE's, never this
         process's — the guard compares the message's own clock.
+
+        **No production caller in the app, deliberately.** Since v5 the job
+        is the sole writer of ``run_status`` (``job/lakebase.py``); the app
+        only reads it. This stays because it is the app-side half of the
+        equivalence test that pins both writers to the one shared statement
+        in ``shared/run_state.py``, and because a test seeding rows through
+        the real statement beats one that hand-writes SQL.
         """
         conn = await self._conn()
         try:
