@@ -381,6 +381,25 @@ resources:
           # explicit map is also an allow-list and someone who sets one means
           # it. Nothing produces it, and nothing depends on it.
 
+          # WHICH jobs are ours: discovery matches `tags.project` (and, when a
+          # list response omits tags, a name ending `<tag> · <model>`). A team
+          # running its own instance of this app sets its own tag here instead
+          # of forking app/server/discovery.py. `/healthz` reports the tag in
+          # use under `discovery.project_tag`.
+          #
+          # A LITERAL, not a bundle variable, for two reasons. It has to match
+          # the `project:` tag hardcoded in every resources/model_*.job.yml, and
+          # a variable would let `--var` move the app off this bundle's own jobs
+          # while the jobs stayed put. And an empty variable drops `value`
+          # entirely (see the Lakebase note above) — a literal cannot.
+          # `tests/deploy/test_app_yaml.py` pins this, app/app.yaml and the job
+          # tags to one value.
+          #
+          # Re-discovery runs every DBX_DISCOVERY_REFRESH_S seconds (default
+          # 300; 0 disables) — a Jobs API list, never the SQL warehouse.
+          - name: DBX_PROJECT_TAG
+            value: dbx-leaning
+
           # Where a job should attach. Empty until the app has a URL — jobs
           # then run unobserved, which is a normal state, not a failure.
           - name: DBX_APP_PUBLIC_URL
